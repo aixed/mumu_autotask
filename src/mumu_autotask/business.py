@@ -27,6 +27,23 @@ QUALITY_ALIASES = {
     "黄色": "yellow",
     "橙色": "yellow",
 }
+BATTLE_CATEGORY_TYPES = {
+    "rescue": 2,
+    "hero": 3,
+}
+BATTLE_CATEGORY_BY_TYPE = {
+    value: key for key, value in BATTLE_CATEGORY_TYPES.items()
+}
+BATTLE_CATEGORY_ALIASES = {
+    "营救幸存者": "rescue",
+    "营救": "rescue",
+    "rescue_survivors": "rescue",
+    "survivors": "rescue",
+    "英雄之旅": "hero",
+    "英雄": "hero",
+    "hero_journey": "hero",
+    "rpg_stage": "hero",
+}
 _INTEGER_PATTERN = re.compile(r"0|[1-9][0-9]*\Z")
 _ROLE_HEX_PATTERN = re.compile(r"(?:[0-9a-f]{2})+\Z")
 _PROTOCOL_PREFIX = "MUMU_AUTOTASK\t1\t"
@@ -53,6 +70,31 @@ class IntelSnapshot:
     role: str
     kingdom: int
     items: tuple[IntelItem, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BattleIntelItem:
+    runtime_id: int
+    quest_id: int
+    status: int
+    world_x: int
+    world_y: int
+    expires_at: int
+    category: str
+    quest_type: int
+    quality: str
+    quality_id: int
+    condition: int
+    level: int
+    stamina_cost: int
+    power_level: int
+
+
+@dataclass(frozen=True, slots=True)
+class BattleIntelSnapshot:
+    role: str
+    kingdom: int
+    items: tuple[BattleIntelItem, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +158,17 @@ def normalize_quality(value: str) -> str:
         allowed = ", ".join((*QUALITY_IDS, *QUALITY_ALIASES))
         raise BusinessError(f"quality must be one of: {allowed}")
     return quality
+
+
+def normalize_battle_category(value: str) -> str:
+    if not isinstance(value, str):
+        raise BusinessError("intelligence category must be text")
+    category = value.strip().lower()
+    category = BATTLE_CATEGORY_ALIASES.get(category, category)
+    if category not in BATTLE_CATEGORY_TYPES:
+        allowed = ", ".join((*BATTLE_CATEGORY_TYPES, *BATTLE_CATEGORY_ALIASES))
+        raise BusinessError(f"intelligence category must be one of: {allowed}")
+    return category
 
 
 def validate_role_whitelist(roles: Sequence[str]) -> tuple[str, ...]:
@@ -356,8 +409,9 @@ local function exact_intel_statuses(target_ids)
                 ) ~= runtime_id then
                 fail("quest map key and runtime id disagree")
             end
-            if quest_integer(quest, "GetQuestType", "quest type", false) ~= 1 then
-                fail("requested intelligence id is not a monster quest")
+            local quest_type = quest_integer(quest, "GetQuestType", "quest type", false)
+            if quest_type ~= 1 and quest_type ~= 2 and quest_type ~= 3 then
+                fail("requested intelligence id is not a claimable intelligence quest")
             end
             local status = integer(quest._status, "quest status", true)
             local completed = call(quest, "IsCompleted", "quest completion")
@@ -640,6 +694,487 @@ return output
 def build_inspect_intel_lua(roles: Sequence[str]) -> str:
     common = _LUA_COMMON.replace("__ROLE_TABLE__", _lua_role_table(roles))
     return _finalize_lua(textwrap.dedent(common + _INSPECT_INTEL_BODY))
+
+
+_LUA_BATTLE_COMMON = r'''
+local EXPECTED_KINGDOM = 4549
+local ALLOWED_ROLES = { __ROLE_TABLE__ }
+local QUALITY_NAMES = { [2] = "green", [3] = "blue", [4] = "purple", [5] = "yellow" }
+local CATEGORY_NAMES = { [2] = "rescue", [3] = "hero" }
+
+local function fail(message)
+    error("mumu-autotask: " .. message, 0)
+end
+
+local function integer(value, label, allow_zero)
+    if type(value) ~= "number" or value ~= math.floor(value) then
+        fail(label .. " is not an integer")
+    end
+    if value < 0 or (not allow_zero and value == 0) then
+        fail(label .. " is outside the accepted range")
+    end
+    return value
+end
+
+local function call(object, method_name, label)
+    if type(object) ~= "table" or type(object[method_name]) ~= "function" then
+        fail(label .. " method is unavailable")
+    end
+    local ok, value = pcall(object[method_name], object)
+    if not ok then
+        fail(label .. " method failed")
+    end
+    return value
+end
+
+local function hex(value)
+    if type(value) ~= "string" or value == "" then
+        fail("active role is unavailable")
+    end
+    return (value:gsub(".", function(character)
+        return string.format("%02x", string.byte(character))
+    end))
+end
+
+local function checked_identity()
+    if type(GCtrl) ~= "table" or type(GCtrl.PlayerCtrl) ~= "table" then
+        fail("PlayerCtrl is unavailable")
+    end
+    local role_hex = hex(call(GCtrl.PlayerCtrl, "GetPlayerName", "player name"))
+    if ALLOWED_ROLES[role_hex] ~= true then
+        fail("active role is not in this device whitelist")
+    end
+    local kid = integer(call(GCtrl.PlayerCtrl, "GetPlayerKid", "player kingdom"), "player kingdom", false)
+    local server_id = integer(call(GCtrl.PlayerCtrl, "GetPlayerServerId", "player server"), "player server", false)
+    if kid ~= EXPECTED_KINGDOM or server_id ~= EXPECTED_KINGDOM then
+        fail("active player kingdom/server is not 4549")
+    end
+    return role_hex, server_id
+end
+
+local function quest_integer(quest, method_name, label, allow_zero)
+    return integer(call(quest, method_name, label), label, allow_zero)
+end
+
+local function config_integer(config, name, label, allow_zero)
+    local value = config[name]
+    if value == nil then
+        return 0
+    end
+    return integer(value, label, allow_zero)
+end
+
+local function collect_battle_intel(quest_type_filter)
+    if type(GCtrl) ~= "table" or type(GCtrl.RadarCtrl) ~= "table" then
+        fail("RadarCtrl is unavailable")
+    end
+    local quest_map = call(GCtrl.RadarCtrl, "GetQuestDataMap", "quest map")
+    if type(quest_map) ~= "table" then
+        fail("quest map is not a table")
+    end
+    local items = {}
+    for runtime_id, quest in pairs(quest_map) do
+        local quest_type = quest_integer(quest, "GetQuestType", "quest type", false)
+        if quest_type == quest_type_filter and CATEGORY_NAMES[quest_type] ~= nil then
+            local quality_id = quest_integer(quest, "GetQuality", "quality", false)
+            local quality = QUALITY_NAMES[quality_id]
+            local shown = call(quest, "IsShowInWorld", "world visibility")
+            local status = integer(quest._status, "quest status", true)
+            local expires_at = integer(quest._expireTime, "expire time", true)
+            local valid_time = quest_integer(quest, "GetValidTime", "valid time", true)
+            if quality ~= nil and shown == true and status == 1 and valid_time > 30 then
+                local config = call(quest, "GetQuestConfig", "quest config")
+                if type(config) ~= "table" then
+                    fail("quest config is unavailable")
+                end
+                local runtime_value = integer(runtime_id, "runtime id", false)
+                if quest_integer(quest, "GetId", "quest runtime id", false) ~= runtime_value then
+                    fail("quest map key and runtime id disagree")
+                end
+                items[#items + 1] = {
+                    runtime_id = runtime_value,
+                    quest_id = integer(quest._questId, "quest id", false),
+                    status = status,
+                    world_x = integer(quest._worldX, "world x", true),
+                    world_y = integer(quest._worldY, "world y", true),
+                    expires_at = expires_at,
+                    category = CATEGORY_NAMES[quest_type],
+                    quest_type = quest_type,
+                    quality = quality,
+                    quality_id = quality_id,
+                    condition = config_integer(config, "condition", "condition", true),
+                    level = quest_integer(quest, "GetLevel", "quest level", true),
+                    stamina_cost = config_integer(config, "stamtina_expend", "stamina cost", true),
+                    power_level = config_integer(config, "power_level", "power level", true),
+                    object = quest,
+                }
+            end
+        end
+    end
+    if #items > 128 then
+        fail("battle intelligence count exceeds 128")
+    end
+    table.sort(items, function(left, right)
+        if left.quest_type ~= right.quest_type then
+            return left.quest_type < right.quest_type
+        end
+        if left.quality_id ~= right.quality_id then
+            return left.quality_id < right.quality_id
+        end
+        if left.expires_at ~= right.expires_at then
+            return left.expires_at < right.expires_at
+        end
+        return left.runtime_id < right.runtime_id
+    end)
+    return items
+end
+
+local function hero_config_id(hero)
+    if type(hero) ~= "table" then
+        return nil
+    end
+    for _, key in ipairs({ "id", "_id", "hero_id" }) do
+        if type(hero[key]) == "number" then
+            return hero[key]
+        end
+    end
+    local config = hero.hero_config
+    if type(config) == "table" then
+        for _, key in ipairs({ "id", "hero_id" }) do
+            if type(config[key]) == "number" then
+                return config[key]
+            end
+        end
+    end
+    for _, method in ipairs({ "GetId", "GetHeroId", "GetConfigId" }) do
+        if type(hero[method]) == "function" then
+            local ok, value = pcall(hero[method], hero)
+            if ok and type(value) == "number" then
+                return value
+            end
+        end
+    end
+    return nil
+end
+
+local function hero_power(hero)
+    if type(hero) ~= "table" then
+        return 0
+    end
+    for _, key in ipairs({ "powerFight", "fight", "power", "_power" }) do
+        if type(hero[key]) == "number" then
+            return hero[key]
+        end
+    end
+    return 0
+end
+
+local function recommended_pve_heroes()
+    if type(GCtrl) ~= "table" or type(GCtrl.HeroCtrl) ~= "table" then
+        fail("HeroCtrl is unavailable")
+    end
+    local list = call(GCtrl.HeroCtrl, "GetRecruitedHeroList", "recruited hero list")
+    if type(list) ~= "table" then
+        fail("recruited hero list is unavailable")
+    end
+    local heroes = {}
+    local seen = {}
+    for _, hero in ipairs(list) do
+        local id = hero_config_id(hero)
+        if type(id) == "number" and id > 0 and seen[id] ~= true then
+            seen[id] = true
+            heroes[#heroes + 1] = {
+                id = integer(id, "hero id", false),
+                power = hero_power(hero),
+            }
+        end
+    end
+    table.sort(heroes, function(left, right)
+        if left.power ~= right.power then
+            return left.power > right.power
+        end
+        return left.id < right.id
+    end)
+    if #heroes == 0 then
+        fail("no recruited hero is available")
+    end
+    local selected = {}
+    local limit = math.min(5, #heroes)
+    for index = 1, limit do
+        selected[#selected + 1] = heroes[index].id
+    end
+    return selected
+end
+
+local function require_battle_target(
+    runtime_id,
+    quest_id,
+    quest_type,
+    quality_id,
+    world_x,
+    world_y,
+    expires_at,
+    condition,
+    level,
+    stamina_cost,
+    power_level
+)
+    local quest_map = call(GCtrl.RadarCtrl, "GetQuestDataMap", "quest map")
+    local quest = quest_map[runtime_id]
+    if type(quest) ~= "table" then
+        fail("selected intelligence no longer exists")
+    end
+    if quest_integer(quest, "GetId", "quest runtime id", false) ~= runtime_id
+        or integer(quest._questId, "quest id", false) ~= quest_id
+        or quest_integer(quest, "GetQuestType", "quest type", false) ~= quest_type
+        or quest_integer(quest, "GetQuality", "quality", false) ~= quality_id
+        or integer(quest._worldX, "world x", true) ~= world_x
+        or integer(quest._worldY, "world y", true) ~= world_y
+        or integer(quest._expireTime, "expire time", false) ~= expires_at then
+        fail("selected intelligence identity changed")
+    end
+    if integer(quest._status, "quest status", true) ~= 1 then
+        fail("selected intelligence is not available")
+    end
+    if call(quest, "IsShowInWorld", "world visibility") ~= true then
+        fail("selected intelligence is no longer shown in world")
+    end
+    if quest_integer(quest, "GetValidTime", "valid time", true) <= 30 then
+        fail("selected intelligence is expired or too close to expiry")
+    end
+    if quest_integer(quest, "GetLevel", "quest level", true) ~= level then
+        fail("selected intelligence level changed")
+    end
+    local config = call(quest, "GetQuestConfig", "quest config")
+    if type(config) ~= "table" then
+        fail("quest config is unavailable")
+    end
+    if config_integer(config, "condition", "condition", true) ~= condition
+        or config_integer(config, "stamtina_expend", "stamina cost", true) ~= stamina_cost
+        or config_integer(config, "power_level", "power level", true) ~= power_level then
+        fail("selected intelligence config changed")
+    end
+    return quest
+end
+'''
+
+
+def _battle_category_constant(category: str) -> str:
+    normalized = normalize_battle_category(category)
+    return f"local TARGET_QUEST_TYPE = {BATTLE_CATEGORY_TYPES[normalized]}\n"
+
+
+_INSPECT_BATTLE_INTEL_BODY = r'''
+local role_hex, kingdom = checked_identity()
+local items = collect_battle_intel(TARGET_QUEST_TYPE)
+local lines = {
+    "MUMU_AUTOTASK\t1\tBATTLE_INTEL",
+    "ROLE\t" .. role_hex,
+    "KINGDOM\t" .. tostring(kingdom),
+}
+for _, item in ipairs(items) do
+    lines[#lines + 1] = table.concat({
+        "ITEM",
+        tostring(item.runtime_id),
+        tostring(item.quest_id),
+        tostring(item.status),
+        tostring(item.world_x),
+        tostring(item.world_y),
+        tostring(item.expires_at),
+        item.category,
+        tostring(item.quest_type),
+        item.quality,
+        tostring(item.quality_id),
+        tostring(item.condition),
+        tostring(item.level),
+        tostring(item.stamina_cost),
+        tostring(item.power_level),
+    }, "\t")
+end
+lines[#lines + 1] = "END\t" .. tostring(#items)
+local output = table.concat(lines, "\n")
+if #output > 15000 then
+    fail("battle intelligence output exceeds 15000 bytes")
+end
+return output
+'''
+
+
+def build_inspect_battle_intel_lua(
+    roles: Sequence[str],
+    category: str,
+) -> str:
+    common = _LUA_BATTLE_COMMON.replace("__ROLE_TABLE__", _lua_role_table(roles))
+    return _finalize_lua(
+        textwrap.dedent(
+            common + _battle_category_constant(category) + _INSPECT_BATTLE_INTEL_BODY
+        )
+    )
+
+
+def _battle_target_constants(target: BattleIntelItem) -> str:
+    if not isinstance(target, BattleIntelItem):
+        raise BusinessError("battle intelligence target must be a BattleIntelItem")
+    category = normalize_battle_category(target.category)
+    if category != target.category:
+        raise BusinessError("battle intelligence target category must be canonical")
+    if BATTLE_CATEGORY_TYPES[category] != target.quest_type:
+        raise BusinessError("battle intelligence category/type disagree")
+    quality = normalize_quality(target.quality)
+    if quality != target.quality or QUALITY_IDS[quality] != target.quality_id:
+        raise BusinessError("battle intelligence quality name/id disagree")
+    numeric = {
+        "runtime id": target.runtime_id,
+        "quest id": target.quest_id,
+        "status": target.status,
+        "world x": target.world_x,
+        "world y": target.world_y,
+        "expiry": target.expires_at,
+        "quest type": target.quest_type,
+        "quality id": target.quality_id,
+        "condition": target.condition,
+        "level": target.level,
+        "stamina cost": target.stamina_cost,
+        "power level": target.power_level,
+    }
+    for label, value in numeric.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise BusinessError(f"battle intelligence target {label} must be non-negative")
+    if target.runtime_id == 0 or target.quest_id == 0 or target.expires_at == 0:
+        raise BusinessError("battle intelligence target identifiers and expiry must be positive")
+    if target.status != 1:
+        raise BusinessError("battle intelligence target is not available")
+    return textwrap.dedent(
+        f'''\
+        local TARGET_RUNTIME_ID = {target.runtime_id}
+        local TARGET_QUEST_ID = {target.quest_id}
+        local TARGET_QUEST_TYPE = {target.quest_type}
+        local TARGET_QUALITY_ID = {target.quality_id}
+        local TARGET_WORLD_X = {target.world_x}
+        local TARGET_WORLD_Y = {target.world_y}
+        local TARGET_EXPIRES_AT = {target.expires_at}
+        local TARGET_CONDITION = {target.condition}
+        local TARGET_LEVEL = {target.level}
+        local TARGET_STAMINA_COST = {target.stamina_cost}
+        local TARGET_POWER_LEVEL = {target.power_level}
+        '''
+    )
+
+
+def _battle_target_lua(
+    roles: Sequence[str],
+    target: BattleIntelItem,
+    body: str,
+) -> str:
+    common = _LUA_BATTLE_COMMON.replace("__ROLE_TABLE__", _lua_role_table(roles))
+    return _finalize_lua(textwrap.dedent(common + _battle_target_constants(target) + body))
+
+
+_START_BATTLE_INTEL_BODY = r'''
+local role_hex, kingdom = checked_identity()
+local quest = require_battle_target(
+    TARGET_RUNTIME_ID,
+    TARGET_QUEST_ID,
+    TARGET_QUEST_TYPE,
+    TARGET_QUALITY_ID,
+    TARGET_WORLD_X,
+    TARGET_WORLD_Y,
+    TARGET_EXPIRES_AT,
+    TARGET_CONDITION,
+    TARGET_LEVEL,
+    TARGET_STAMINA_COST,
+    TARGET_POWER_LEVEL
+)
+local heroes = recommended_pve_heroes()
+if type(GCtrl.RadarCtrl._pveBattleStartMap) == "table"
+    and GCtrl.RadarCtrl._pveBattleStartMap[TARGET_RUNTIME_ID] then
+    fail("selected intelligence battle is already starting")
+end
+local ok_start = pcall(
+    GCtrl.RadarCtrl.RequestStartBattle,
+    GCtrl.RadarCtrl,
+    1,
+    heroes,
+    quest,
+    {}
+)
+if not ok_start then
+    fail("battle start request failed")
+end
+local ok_end = pcall(
+    GCtrl.RadarCtrl.RequestEndBattle,
+    GCtrl.RadarCtrl,
+    TARGET_RUNTIME_ID
+)
+if not ok_end then
+    fail("battle end request failed")
+end
+local lines = {
+    "MUMU_AUTOTASK\t1\tBATTLE_COMMIT",
+    "ROLE\t" .. role_hex,
+    "KINGDOM\t" .. tostring(kingdom),
+    "TARGET\t" .. tostring(TARGET_RUNTIME_ID),
+    "START\t1",
+    "END_REQUEST\t1",
+}
+for index, hero_id in ipairs(heroes) do
+    lines[#lines + 1] = table.concat({ "HERO", tostring(index), tostring(hero_id) }, "\t")
+end
+lines[#lines + 1] = "END\t1"
+return table.concat(lines, "\n")
+'''
+
+
+def build_start_battle_intel_lua(
+    roles: Sequence[str],
+    target: BattleIntelItem,
+) -> str:
+    return _battle_target_lua(roles, target, _START_BATTLE_INTEL_BODY)
+
+
+_VERIFY_BATTLE_INTEL_BODY = r'''
+local role_hex, kingdom = checked_identity()
+local quest_map = call(GCtrl.RadarCtrl, "GetQuestDataMap", "quest map")
+local quest = quest_map[TARGET_RUNTIME_ID]
+local status_text = "missing"
+local accepted = false
+if quest == nil then
+    status_text = "missing"
+    accepted = true
+else
+    if quest_integer(quest, "GetId", "quest runtime id", false) ~= TARGET_RUNTIME_ID
+        or integer(quest._questId, "quest id", false) ~= TARGET_QUEST_ID
+        or quest_integer(quest, "GetQuestType", "quest type", false) ~= TARGET_QUEST_TYPE
+        or quest_integer(quest, "GetQuality", "quality", false) ~= TARGET_QUALITY_ID
+        or integer(quest._worldX, "world x", true) ~= TARGET_WORLD_X
+        or integer(quest._worldY, "world y", true) ~= TARGET_WORLD_Y then
+        fail("selected intelligence identity changed after battle request")
+    end
+    local status = integer(quest._status, "quest status", true)
+    local completed = call(quest, "IsCompleted", "quest completion")
+    status_text = tostring(status)
+    if status == 2 or completed == true then
+        accepted = true
+    elseif status ~= 1 and status ~= 3 then
+        fail("selected intelligence entered an unexpected status")
+    end
+end
+return table.concat({
+    "MUMU_AUTOTASK\t1\tBATTLE_VERIFY",
+    "ROLE\t" .. role_hex,
+    "KINGDOM\t" .. tostring(kingdom),
+    "TARGET\t" .. tostring(TARGET_RUNTIME_ID),
+    "ACCEPTED\t" .. (accepted and "1" or "0") .. "\tSTATUS\t" .. status_text,
+    "END\t1",
+}, "\n")
+'''
+
+
+def build_verify_battle_intel_lua(
+    roles: Sequence[str],
+    target: BattleIntelItem,
+) -> str:
+    return _battle_target_lua(roles, target, _VERIFY_BATTLE_INTEL_BODY)
 
 
 def _target_ids_constants(target_ids: Sequence[int]) -> str:
@@ -1813,6 +2348,43 @@ def select_march_target(
     return min(matches, key=lambda item: (item.expires_at, item.runtime_id))
 
 
+def select_battle_target(
+    snapshot: BattleIntelSnapshot,
+    category: str,
+    runtime_id: int | None = None,
+) -> BattleIntelItem:
+    requested = normalize_battle_category(category)
+    if snapshot.kingdom != ALLOWED_KINGDOM:
+        raise BusinessError("cannot select a battle target outside kingdom 4549")
+    if runtime_id is not None:
+        if isinstance(runtime_id, bool) or not isinstance(runtime_id, int) or runtime_id <= 0:
+            raise BusinessError("battle target runtime id must be a positive integer")
+        exact = [item for item in snapshot.items if item.runtime_id == runtime_id]
+        if not exact:
+            raise BusinessError(
+                f"requested battle intelligence target {runtime_id} is no longer available"
+            )
+        target = exact[0]
+        if target.status != 1:
+            raise BusinessError(
+                f"requested battle intelligence target {runtime_id} is not available"
+            )
+        if target.category != requested:
+            raise BusinessError(
+                f"requested battle intelligence target {runtime_id} is "
+                f"{target.category}, not {requested}"
+            )
+        return target
+    matches = [
+        item
+        for item in snapshot.items
+        if item.category == requested and item.status == 1
+    ]
+    if not matches:
+        raise BusinessError(f"no available {requested} battle intelligence was found")
+    return min(matches, key=lambda item: (item.expires_at, item.runtime_id))
+
+
 def _parse_integer(value: str, location: str, *, allow_zero: bool) -> int:
     if _INTEGER_PATTERN.fullmatch(value) is None:
         raise BusinessError(f"{location} is not a canonical non-negative integer")
@@ -1857,6 +2429,41 @@ def _parse_item(fields: list[str], location: str) -> IntelItem:
         level=_parse_integer(fields[10], f"{location} level", allow_zero=False),
         stamina_cost=_parse_integer(
             fields[11], f"{location} stamina cost", allow_zero=False
+        ),
+    )
+
+
+def _parse_battle_item(fields: list[str], location: str) -> BattleIntelItem:
+    if len(fields) != 15 or fields[0] != "ITEM":
+        raise BusinessError(f"{location} must contain 14 fields")
+    category = normalize_battle_category(fields[7])
+    quest_type = _parse_integer(fields[8], f"{location} quest type", allow_zero=False)
+    if BATTLE_CATEGORY_TYPES[category] != quest_type:
+        raise BusinessError(f"{location} category/type disagree")
+    quality = normalize_quality(fields[9])
+    if quality != fields[9]:
+        raise BusinessError(f"{location} quality must use its canonical name")
+    quality_id = _parse_integer(fields[10], f"{location} quality id", allow_zero=False)
+    if QUALITY_IDS[quality] != quality_id:
+        raise BusinessError(f"{location} quality name/id disagree")
+    return BattleIntelItem(
+        runtime_id=_parse_integer(fields[1], f"{location} runtime id", allow_zero=False),
+        quest_id=_parse_integer(fields[2], f"{location} quest id", allow_zero=False),
+        status=_parse_integer(fields[3], f"{location} status", allow_zero=True),
+        world_x=_parse_integer(fields[4], f"{location} world x", allow_zero=True),
+        world_y=_parse_integer(fields[5], f"{location} world y", allow_zero=True),
+        expires_at=_parse_integer(fields[6], f"{location} expiry", allow_zero=False),
+        category=category,
+        quest_type=quest_type,
+        quality=quality,
+        quality_id=quality_id,
+        condition=_parse_integer(fields[11], f"{location} condition", allow_zero=True),
+        level=_parse_integer(fields[12], f"{location} level", allow_zero=True),
+        stamina_cost=_parse_integer(
+            fields[13], f"{location} stamina cost", allow_zero=True
+        ),
+        power_level=_parse_integer(
+            fields[14], f"{location} power level", allow_zero=True
         ),
     )
 
@@ -1912,6 +2519,47 @@ def parse_intel_output(
     if list(items) != expected_order:
         raise BusinessError("INTEL items are not in canonical order")
     return IntelSnapshot(role=role, kingdom=kingdom, items=items)
+
+
+def parse_battle_intel_output(
+    output: str,
+    allowed_roles: Sequence[str],
+    expected_category: str,
+) -> BattleIntelSnapshot:
+    category = normalize_battle_category(expected_category)
+    lines = _protocol_lines(output, "BATTLE_INTEL")
+    if len(lines) < 4 or len(lines[1]) != 2 or lines[1][0] != "ROLE":
+        raise BusinessError("BATTLE_INTEL output is missing ROLE")
+    role = _parse_role(lines[1][1], allowed_roles)
+    if len(lines[2]) != 2 or lines[2][0] != "KINGDOM":
+        raise BusinessError("BATTLE_INTEL output is missing KINGDOM")
+    kingdom = _parse_integer(lines[2][1], "KINGDOM", allow_zero=False)
+    if kingdom != ALLOWED_KINGDOM:
+        raise BusinessError("BATTLE_INTEL output kingdom is not 4549")
+    if len(lines[-1]) != 2 or lines[-1][0] != "END":
+        raise BusinessError("BATTLE_INTEL output is missing END")
+    count = _parse_integer(lines[-1][1], "END count", allow_zero=True)
+    item_lines = lines[3:-1]
+    if count != len(item_lines):
+        raise BusinessError("BATTLE_INTEL END count does not match ITEM lines")
+    if count > 128:
+        raise BusinessError("BATTLE_INTEL output contains more than 128 items")
+    items = tuple(
+        _parse_battle_item(fields, f"ITEM[{index}]")
+        for index, fields in enumerate(item_lines)
+    )
+    if any(item.category != category for item in items):
+        raise BusinessError("BATTLE_INTEL output category does not match the request")
+    runtime_ids = [item.runtime_id for item in items]
+    if len(runtime_ids) != len(set(runtime_ids)):
+        raise BusinessError("BATTLE_INTEL output contains duplicate runtime ids")
+    expected_order = sorted(
+        items,
+        key=lambda item: (item.quest_type, item.quality_id, item.expires_at, item.runtime_id),
+    )
+    if list(items) != expected_order:
+        raise BusinessError("BATTLE_INTEL items are not in canonical order")
+    return BattleIntelSnapshot(role=role, kingdom=kingdom, items=items)
 
 
 def parse_intel_status_output(
@@ -2135,7 +2783,73 @@ def parse_commit_output(
         or lines[4] != ["AVERAGE", "1"]
         or lines[5] != ["GO", "1"]
     ):
-        raise BusinessError("COMMIT output did not confirm average and go actions")
+            raise BusinessError("COMMIT output did not confirm average and go actions")
+
+
+def parse_battle_commit_output(
+    output: str,
+    allowed_roles: Sequence[str],
+    target: BattleIntelItem,
+) -> tuple[int, ...]:
+    lines = _protocol_lines(output, "BATTLE_COMMIT")
+    if len(lines) < 7:
+        raise BusinessError("BATTLE_COMMIT output is incomplete")
+    if len(lines[1]) != 2 or lines[1][0] != "ROLE":
+        raise BusinessError("BATTLE_COMMIT output is missing ROLE")
+    _parse_role(lines[1][1], allowed_roles)
+    if lines[2] != ["KINGDOM", str(ALLOWED_KINGDOM)]:
+        raise BusinessError("BATTLE_COMMIT output kingdom is not 4549")
+    if lines[3] != ["TARGET", str(target.runtime_id)]:
+        raise BusinessError("BATTLE_COMMIT output target does not match the request")
+    if lines[4] != ["START", "1"] or lines[5] != ["END_REQUEST", "1"]:
+        raise BusinessError("BATTLE_COMMIT output did not confirm start/end requests")
+    if lines[-1] != ["END", "1"]:
+        raise BusinessError("BATTLE_COMMIT output has an invalid terminator")
+    heroes: list[int] = []
+    for index, fields in enumerate(lines[6:-1], start=1):
+        if len(fields) != 3 or fields[0] != "HERO" or fields[1] != str(index):
+            raise BusinessError("BATTLE_COMMIT output has an invalid HERO line")
+        heroes.append(
+            _parse_integer(fields[2], f"BATTLE_COMMIT HERO[{index}]", allow_zero=False)
+        )
+    if not heroes:
+        raise BusinessError("BATTLE_COMMIT output selected no heroes")
+    return tuple(heroes)
+
+
+def parse_battle_verify_output(
+    output: str,
+    allowed_roles: Sequence[str],
+    target: BattleIntelItem,
+) -> tuple[bool, str]:
+    lines = _protocol_lines(output, "BATTLE_VERIFY")
+    if len(lines) != 6:
+        raise BusinessError("BATTLE_VERIFY output must contain exactly 6 lines")
+    if len(lines[1]) != 2 or lines[1][0] != "ROLE":
+        raise BusinessError("BATTLE_VERIFY output is missing ROLE")
+    _parse_role(lines[1][1], allowed_roles)
+    if lines[2] != ["KINGDOM", str(ALLOWED_KINGDOM)]:
+        raise BusinessError("BATTLE_VERIFY output kingdom is not 4549")
+    if lines[3] != ["TARGET", str(target.runtime_id)]:
+        raise BusinessError("BATTLE_VERIFY output target does not match the request")
+    if (
+        len(lines[4]) != 4
+        or lines[4][0] != "ACCEPTED"
+        or lines[4][1] not in {"0", "1"}
+        or lines[4][2] != "STATUS"
+    ):
+        raise BusinessError("BATTLE_VERIFY output has an invalid acceptance state")
+    if lines[5] != ["END", "1"]:
+        raise BusinessError("BATTLE_VERIFY output has an invalid terminator")
+    status = lines[4][3]
+    if status != "missing":
+        _parse_integer(status, "BATTLE_VERIFY status", allow_zero=True)
+        if status not in {"1", "2", "3"}:
+            raise BusinessError("BATTLE_VERIFY entered an unexpected quest status")
+    accepted = lines[4][1] == "1"
+    if accepted and status not in {"2", "3", "missing"}:
+        raise BusinessError("BATTLE_VERIFY accepted without a terminal status")
+    return accepted, status
 
 
 def parse_verify_output(
@@ -2242,6 +2956,11 @@ def parse_march_output(
 
 __all__ = [
     "ALLOWED_KINGDOM",
+    "BATTLE_CATEGORY_ALIASES",
+    "BATTLE_CATEGORY_BY_TYPE",
+    "BATTLE_CATEGORY_TYPES",
+    "BattleIntelItem",
+    "BattleIntelSnapshot",
     "BusinessError",
     "ClaimReceipt",
     "INTEL_COMPLETED",
@@ -2262,6 +2981,7 @@ __all__ = [
     "build_commit_march_lua",
     "build_direct_commit_march_lua",
     "build_install_march_capture_hook_lua",
+    "build_inspect_battle_intel_lua",
     "build_inspect_formation_lua",
     "build_inspect_intel_lua",
     "build_intel_status_lua",
@@ -2269,10 +2989,16 @@ __all__ = [
     "build_open_march_lua",
     "build_read_march_capture_hook_lua",
     "build_scene_status_lua",
+    "build_start_battle_intel_lua",
     "build_uninstall_march_capture_hook_lua",
+    "build_verify_battle_intel_lua",
     "build_verify_march_lua",
+    "normalize_battle_category",
     "normalize_quality",
     "normalize_target_ids",
+    "parse_battle_commit_output",
+    "parse_battle_intel_output",
+    "parse_battle_verify_output",
     "parse_claim_intel_output",
     "parse_commit_output",
     "parse_intel_output",
@@ -2282,6 +3008,7 @@ __all__ = [
     "parse_ready_output",
     "parse_scene_status_output",
     "parse_verify_output",
+    "select_battle_target",
     "select_march_target",
     "script_sha256",
     "validate_role_whitelist",

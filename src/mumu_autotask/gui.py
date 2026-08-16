@@ -16,6 +16,7 @@ from tkinter import messagebox, ttk
 
 from .config import ALLOWED_KINGDOM, ConfigError, DeviceProfile, Settings, load_settings
 from .gui_backend import (
+    DEFAULT_GUI_CATEGORY,
     DEFAULT_HUNT_CONCURRENCY,
     MAX_HUNT_CONCURRENCY,
     MIN_HUNT_CONCURRENCY,
@@ -33,6 +34,11 @@ QUALITY_META: dict[str, tuple[str, str]] = {
     "purple": ("紫色", "#805AD5"),
     "yellow": ("黄色", "#D69E2E"),
 }
+CATEGORY_META: dict[str, str] = {
+    "monster": "狩猎野兽",
+    "hero": "英雄之旅",
+    "rescue": "营救幸存者",
+}
 
 
 TaskCallback = Callable[[Any | None, Exception | None], None]
@@ -48,6 +54,7 @@ class HuntBatchTarget:
     quality: str
     expires_at: int
     level: int | None = None
+    category: str = "monster"
 
     @classmethod
     def from_item(cls, item: Mapping[str, Any]) -> "HuntBatchTarget":
@@ -71,13 +78,18 @@ class HuntBatchTarget:
             raise HuntBatchError(f"目标 {runtime_id} 的过期时间无效")
         if isinstance(level, bool) or not isinstance(level, int):
             level = None
-        return cls(runtime_id, quality, expires_at, level)
+        category = item.get("category", "monster")
+        if not isinstance(category, str) or category not in CATEGORY_META:
+            raise HuntBatchError(f"目标 {runtime_id} 的类别无效")
+        return cls(runtime_id, quality, expires_at, level, category)
 
     @property
     def label(self) -> str:
         quality_label = QUALITY_META[self.quality][0]
         level = f" Lv.{self.level}" if self.level is not None else ""
-        return f"{quality_label}目标 {self.runtime_id}{level}"
+        if self.category == "monster":
+            return f"{quality_label}目标 {self.runtime_id}{level}"
+        return f"{CATEGORY_META[self.category]} {quality_label}目标 {self.runtime_id}{level}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +128,34 @@ def build_hunt_queue(
     )
     if not targets:
         raise HuntBatchError("所选品质当前没有可用情报")
+    runtime_ids = [target.runtime_id for target in targets]
+    if len(runtime_ids) != len(set(runtime_ids)):
+        raise HuntBatchError("情报列表包含重复的目标 ID")
+    return tuple(targets)
+
+
+def build_category_queue(
+    items: Sequence[Mapping[str, Any]],
+    category: str,
+) -> tuple[HuntBatchTarget, ...]:
+    if category not in CATEGORY_META:
+        raise HuntBatchError(f"不支持的情报类别：{category}")
+    if category == "monster":
+        raise HuntBatchError("野兽类别必须按品质筛选")
+    targets = [
+        HuntBatchTarget.from_item(item)
+        for item in items
+        if item.get("category") == category
+    ]
+    targets.sort(
+        key=lambda target: (
+            target.quality,
+            target.expires_at,
+            target.runtime_id,
+        )
+    )
+    if not targets:
+        raise HuntBatchError(f"当前没有可用的{CATEGORY_META[category]}情报")
     runtime_ids = [target.runtime_id for target in targets]
     if len(runtime_ids) != len(set(runtime_ids)):
         raise HuntBatchError("情报列表包含重复的目标 ID")
@@ -1387,6 +1427,17 @@ class DeviceManagerWindow:
                 selected_qualities = {"purple"}
         else:
             selected_qualities = {"purple"}
+        load_category = getattr(self.backend, "get_category", None)
+        if callable(load_category):
+            try:
+                selected_category = str(load_category(self.profile.serial))
+                if selected_category not in CATEGORY_META:
+                    raise ValueError("情报类别无效")
+            except Exception as exc:
+                preference_errors.append(f"类别：{exc}")
+                selected_category = DEFAULT_GUI_CATEGORY
+        else:
+            selected_category = DEFAULT_GUI_CATEGORY
         load_concurrency = getattr(self.backend, "get_concurrency", None)
         if callable(load_concurrency):
             try:
@@ -1401,6 +1452,11 @@ class DeviceManagerWindow:
         self.identity_text = tk.StringVar(value="正在读取当前角色和情报...")
         self.action_text = tk.StringVar(value="等待情报检查")
         self.quality_labels: dict[str, ttk.Label] = {}
+        self.category_var = tk.StringVar(
+            master=self.window,
+            value=selected_category,
+        )
+        self.category_radios: dict[str, ttk.Radiobutton] = {}
         self.quality_vars = {
             quality: tk.BooleanVar(
                 master=self.window,
@@ -1472,13 +1528,40 @@ class DeviceManagerWindow:
 
         ttk.Separator(outer).grid(row=1, column=0, sticky="ew", pady=(14, 12))
 
-        quality_frame = ttk.LabelFrame(outer, text="狩猎设置", padding=(14, 10))
+        quality_frame = ttk.LabelFrame(outer, text="情报设置", padding=(14, 10))
         quality_frame.grid(row=2, column=0, sticky="ew")
         for column in range(len(QUALITY_META)):
             quality_frame.columnconfigure(column, weight=1, uniform="quality")
+        category_frame = ttk.Frame(quality_frame)
+        category_frame.grid(
+            row=0,
+            column=0,
+            columnspan=len(QUALITY_META),
+            sticky="ew",
+            pady=(0, 8),
+        )
+        ttk.Label(category_frame, text="类别").grid(row=0, column=0, sticky="w")
+        for column, (category, label) in enumerate(CATEGORY_META.items(), start=1):
+            radio = ttk.Radiobutton(
+                category_frame,
+                text=label,
+                value=category,
+                variable=self.category_var,
+                command=self._category_changed,
+            )
+            radio.grid(row=0, column=column, sticky="w", padx=(14, 0))
+            self.category_radios[category] = radio
+
+        ttk.Separator(quality_frame).grid(
+            row=1,
+            column=0,
+            columnspan=len(QUALITY_META),
+            sticky="ew",
+            pady=(0, 8),
+        )
         for column, (quality, (label, color)) in enumerate(QUALITY_META.items()):
             cell = ttk.Frame(quality_frame)
-            cell.grid(row=0, column=column, sticky="w", padx=(0, 18))
+            cell.grid(row=2, column=column, sticky="w", padx=(0, 18))
             swatch = tk.Canvas(
                 cell,
                 width=16,
@@ -1500,7 +1583,7 @@ class DeviceManagerWindow:
             self.quality_labels[quality] = text
 
         ttk.Separator(quality_frame).grid(
-            row=1,
+            row=3,
             column=0,
             columnspan=len(QUALITY_META),
             sticky="ew",
@@ -1508,7 +1591,7 @@ class DeviceManagerWindow:
         )
         concurrency_frame = ttk.Frame(quality_frame)
         concurrency_frame.grid(
-            row=2,
+            row=4,
             column=0,
             columnspan=len(QUALITY_META),
             sticky="ew",
@@ -1546,7 +1629,7 @@ class DeviceManagerWindow:
         intel_frame.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
         intel_frame.rowconfigure(0, weight=1)
         intel_frame.columnconfigure(0, weight=1)
-        columns = ("quality", "level", "position", "expires", "runtime")
+        columns = ("category", "quality", "level", "position", "expires", "runtime")
         self.intel_tree = ttk.Treeview(
             intel_frame,
             columns=columns,
@@ -1554,13 +1637,21 @@ class DeviceManagerWindow:
             height=7,
         )
         headings = {
+            "category": "类别",
             "quality": "品质",
             "level": "等级",
             "position": "坐标",
             "expires": "过期时间",
             "runtime": "目标 ID",
         }
-        widths = {"quality": 100, "level": 80, "position": 130, "expires": 150, "runtime": 110}
+        widths = {
+            "category": 120,
+            "quality": 90,
+            "level": 70,
+            "position": 130,
+            "expires": 150,
+            "runtime": 110,
+        }
         for column in columns:
             self.intel_tree.heading(column, text=headings[column])
             self.intel_tree.column(column, width=widths[column], anchor="center")
@@ -1620,24 +1711,47 @@ class DeviceManagerWindow:
         self.busy = busy
         self.action_text.set(message)
         self.refresh_intel_button.configure(state="disabled" if busy else "normal")
+        for radio in self.category_radios.values():
+            radio.configure(state="disabled" if busy else "normal")
         for check in self.quality_checks.values():
             check.configure(state="disabled" if busy else "normal")
         self.concurrency_scale.configure(state="disabled" if busy else "normal")
         self._update_hunt_button()
 
     def _update_hunt_button(self) -> None:
+        category = self._selected_category()
         selected = self._selected_qualities()
-        count = sum(item.get("quality") in selected for item in self.current_items)
+        if category == "monster":
+            count = sum(
+                item.get("category", "monster") == "monster"
+                and item.get("quality") in selected
+                for item in self.current_items
+            )
+        else:
+            count = sum(item.get("category") == category for item in self.current_items)
         enabled = not self.busy and count > 0
         self.hunt_button.configure(state="normal" if enabled else "disabled")
+        self.hunt_button.configure(text=f"情报-自动处理{CATEGORY_META.get(category, '任务')}")
         if not self.busy:
-            labels = "、".join(QUALITY_META[quality][0] for quality in selected)
-            if count:
-                self.action_text.set(f"已选择{labels}，将处理 {count} 个目标")
-            elif selected:
-                self.action_text.set(f"所选品质（{labels}）当前没有可用情报")
+            if category == "monster":
+                labels = "、".join(QUALITY_META[quality][0] for quality in selected)
+                if count:
+                    self.action_text.set(f"已选择{labels}，将处理 {count} 个野兽目标")
+                elif selected:
+                    self.action_text.set(f"所选品质（{labels}）当前没有可用野兽情报")
+                else:
+                    self.action_text.set("请选择至少一种骷髅品质")
             else:
-                self.action_text.set("请选择至少一种骷髅品质")
+                label = CATEGORY_META[category]
+                if count:
+                    self.action_text.set(f"已选择{label}，将处理 {count} 个目标")
+                else:
+                    self.action_text.set(f"当前没有可用的{label}情报")
+
+    def _selected_category(self) -> str:
+        var = getattr(self, "category_var", None)
+        category = var.get() if var is not None else DEFAULT_GUI_CATEGORY
+        return category if category in CATEGORY_META else DEFAULT_GUI_CATEGORY
 
     def _selected_qualities(self) -> tuple[str, ...]:
         return tuple(
@@ -1659,6 +1773,20 @@ class DeviceManagerWindow:
                 messagebox.showerror(
                     "品质偏好保存失败",
                     f"本次复选状态未能保存：\n{exc}",
+                    parent=self.window,
+                )
+        self._update_hunt_button()
+
+    def _category_changed(self) -> None:
+        save_category = getattr(self.backend, "set_category", None)
+        if callable(save_category):
+            try:
+                save_category(self.profile.serial, self._selected_category())
+            except Exception as exc:
+                self._log(f"类别偏好保存失败：{exc}")
+                messagebox.showerror(
+                    "类别偏好保存失败",
+                    f"本次类别选择未能保存：\n{exc}",
                     parent=self.window,
                 )
         self._update_hunt_button()
@@ -1699,6 +1827,9 @@ class DeviceManagerWindow:
         ensure_world = getattr(self.backend, "ensure_world", None)
         if callable(ensure_world):
             ensure_world(self.profile.serial)
+        inspect_tasks = getattr(self.backend, "inspect_tasks", None)
+        if callable(inspect_tasks):
+            return inspect_tasks(self.profile.serial)
         return self.backend.inspect_intel(self.profile.serial)
 
     def _intel_refreshed(self, value: Any | None, error: Exception | None) -> None:
@@ -1746,14 +1877,17 @@ class DeviceManagerWindow:
             self.intel_tree.delete(row)
         counts = {quality: 0 for quality in QUALITY_META}
         for item in self.current_items:
+            category = str(item.get("category", "monster"))
             quality = str(item.get("quality", ""))
-            if quality in counts:
+            if category == "monster" and quality in counts:
                 counts[quality] += 1
             quality_label = QUALITY_META.get(quality, (quality, ""))[0]
+            category_label = CATEGORY_META.get(category, category)
             self.intel_tree.insert(
                 "",
                 "end",
                 values=(
+                    category_label,
                     quality_label,
                     f"Lv.{item.get('level', '-')}",
                     f"{item.get('world_x', '-')}, {item.get('world_y', '-')}",
@@ -1772,6 +1906,7 @@ class DeviceManagerWindow:
     def start_hunt(self) -> None:
         if self.busy:
             return
+        category = self._selected_category()
         selected_qualities = self._selected_qualities()
         concurrency = int(self.concurrency_var.get())
         if self.current_role not in self.profile.roles:
@@ -1782,27 +1917,33 @@ class DeviceManagerWindow:
             )
             return
         try:
-            targets = build_hunt_queue(self.current_items, selected_qualities)
+            if category == "monster":
+                targets = build_hunt_queue(self.current_items, selected_qualities)
+            else:
+                targets = build_category_queue(self.current_items, category)
             waves = build_hunt_waves(targets, concurrency)
         except HuntBatchError as exc:
             self._update_hunt_button()
             messagebox.showwarning("无法开始批次", str(exc), parent=self.window)
             return
         role_text = self.current_role
-        quality_counts = {
-            quality: sum(target.quality == quality for target in targets)
-            for quality in selected_qualities
-        }
-        quality_text = "、".join(
-            f"{QUALITY_META[quality][0]} {quality_counts[quality]} 个"
-            for quality in selected_qualities
-            if quality_counts[quality]
-        )
+        if category == "monster":
+            quality_counts = {
+                quality: sum(target.quality == quality for target in targets)
+                for quality in selected_qualities
+            }
+            target_text = "、".join(
+                f"{QUALITY_META[quality][0]} {quality_counts[quality]} 个"
+                for quality in selected_qualities
+                if quality_counts[quality]
+            )
+        else:
+            target_text = f"{CATEGORY_META[category]} {len(targets)} 个"
         self.hunt_batch = HuntWaveBatch(targets, concurrency)
         self.hunt_role = role_text
         self._set_busy(True, f"正在处理 {len(targets)} 个目标，请勿切换角色或关闭窗口...")
         self._log(
-            f"批量自动狩猎开始：{quality_text}，共 {len(targets)} 个目标；"
+            f"批量自动处理开始：{target_text}，共 {len(targets)} 个目标；"
             f"并发上限已冻结为 {concurrency} 队，共 {len(waves)} 波。"
         )
         self._dispatch_next_hunt(self._available_runtime_ids())
@@ -1839,9 +1980,15 @@ class DeviceManagerWindow:
         self._log(
             f"第 {batch.wave_number}/{len(batch.waves)} 波，"
             f"连续提交精确目标 {[target.runtime_id for target in targets]}；"
-            "依次执行平均配置 -> 出征 -> 结果验证，全部发起后再等待本波完成。"
+            f"依次执行{self._dispatch_flow_text(targets[0])}，全部发起后再等待本波完成。"
         )
         self._start_next_hunt_dispatch()
+
+    @staticmethod
+    def _dispatch_flow_text(target: HuntBatchTarget) -> str:
+        if target.category == "monster":
+            return "平均配置 -> 出征 -> 结果验证"
+        return "战斗开始 -> 战斗结束 -> 结果验证"
 
     def _start_next_hunt_dispatch(self) -> None:
         batch = self.hunt_batch
@@ -1874,7 +2021,7 @@ class DeviceManagerWindow:
             f"连续发起 {ordinal}/{len(batch.targets)}：{target.label}。"
         )
         self.dispatcher.submit(
-            lambda target=target: self._guarded_march_target(target),
+            lambda target=target: self._guarded_task_target(target),
             lambda value, error, batch=batch, target=target: self._hunt_finished(
                 batch,
                 target,
@@ -1883,11 +2030,18 @@ class DeviceManagerWindow:
             ),
         )
 
-    def _guarded_march_target(self, target: HuntBatchTarget) -> Mapping[str, Any]:
+    def _guarded_task_target(self, target: HuntBatchTarget) -> Mapping[str, Any]:
         ensure_world = getattr(self.backend, "ensure_world", None)
         if callable(ensure_world):
             ensure_world(
                 self.profile.serial,
+                expected_role=self.hunt_role,
+            )
+        if target.category in {"hero", "rescue"}:
+            return self.backend.battle_intel(
+                self.profile.serial,
+                target.category,
+                runtime_id=target.runtime_id,
                 expected_role=self.hunt_role,
             )
         return self.backend.march(
@@ -2008,9 +2162,15 @@ class DeviceManagerWindow:
             return
         self.action_text.set("正在只读刷新并统一核对本波异常出征结果...")
         self.dispatcher.submit(
-            lambda: self.backend.inspect_intel(self.profile.serial),
+            self._inspect_current_tasks,
             self._march_reconciled,
         )
+
+    def _inspect_current_tasks(self) -> Mapping[str, Any]:
+        inspect_tasks = getattr(self.backend, "inspect_tasks", None)
+        if callable(inspect_tasks):
+            return inspect_tasks(self.profile.serial)
+        return self.backend.inspect_intel(self.profile.serial)
 
     def _march_reconciled(
         self,
@@ -2137,7 +2297,7 @@ class DeviceManagerWindow:
     def _request_wave_reconcile(self, detail: str) -> None:
         self.action_text.set("正在只读刷新；本波未获完成证明时将停止并跳过后续波次...")
         self.dispatcher.submit(
-            lambda: self.backend.inspect_intel(self.profile.serial),
+            self._inspect_current_tasks,
             lambda value, error, detail=detail: self._wave_reconciled(
                 value,
                 error,
@@ -2471,9 +2631,11 @@ __all__ = [
     "HuntBatchTarget",
     "HuntWaveBatch",
     "LauncherApp",
+    "CATEGORY_META",
     "QUALITY_META",
     "TaskDispatcher",
     "build_hunt_queue",
+    "build_category_queue",
     "build_hunt_waves",
     "build_parser",
     "main",

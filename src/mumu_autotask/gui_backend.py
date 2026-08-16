@@ -22,7 +22,9 @@ class GuiBackendError(RuntimeError):
 
 
 GUI_QUALITY_ORDER = ("green", "blue", "purple", "yellow")
+GUI_CATEGORY_ORDER = ("monster", "hero", "rescue")
 DEFAULT_GUI_QUALITIES = ("purple",)
+DEFAULT_GUI_CATEGORY = "monster"
 MIN_HUNT_CONCURRENCY = 1
 MAX_HUNT_CONCURRENCY = 3
 DEFAULT_HUNT_CONCURRENCY = 3
@@ -56,6 +58,28 @@ class GuiPreferences:
                 for quality in GUI_QUALITY_ORDER
                 if qualities[quality]
             )
+
+    def get_category(self, serial: str) -> str:
+        serial = self._validate_serial(serial)
+        with self._lock:
+            data = self._read()
+            section = data["devices"].get(serial)
+            if section is None:
+                return DEFAULT_GUI_CATEGORY
+            return str(section["category"])
+
+    def set_category(self, serial: str, category: str) -> None:
+        serial = self._validate_serial(serial)
+        category = self._validate_category(category)
+        with self._lock:
+            data = self._read()
+            devices = dict(data["devices"])
+            section = dict(devices.get(serial, self._default_device_section()))
+            section["category"] = category
+            devices[serial] = section
+            updated = {"version": 1, "devices": devices}
+            self._write(updated)
+            self._memory_data = updated
 
     def set_selected_qualities(
         self,
@@ -105,6 +129,7 @@ class GuiPreferences:
     @staticmethod
     def _default_device_section() -> dict[str, Any]:
         return {
+            "category": DEFAULT_GUI_CATEGORY,
             "qualities": {
                 quality: quality in DEFAULT_GUI_QUALITIES
                 for quality in GUI_QUALITY_ORDER
@@ -129,6 +154,15 @@ class GuiPreferences:
         if invalid:
             raise GuiBackendError(f"GUI 品质偏好包含未知值：{invalid}")
         return selected
+
+    @staticmethod
+    def _validate_category(category: str) -> str:
+        if not isinstance(category, str):
+            raise GuiBackendError("GUI 情报类别必须是文本")
+        normalized = category.strip().lower()
+        if normalized not in GUI_CATEGORY_ORDER:
+            raise GuiBackendError(f"GUI 情报类别无效：{category!r}")
+        return normalized
 
     @staticmethod
     def _validate_concurrency(value: int) -> int:
@@ -172,6 +206,9 @@ class GuiPreferences:
             serial = cls._validate_serial(serial)
             if not isinstance(section, dict):
                 raise GuiBackendError(f"{serial} 的 GUI 偏好配置段无效")
+            category = cls._validate_category(
+                section.get("category", DEFAULT_GUI_CATEGORY)
+            )
             qualities = section.get("qualities")
             if not isinstance(qualities, dict):
                 raise GuiBackendError(f"{serial} 的 qualities 配置段无效")
@@ -190,6 +227,7 @@ class GuiPreferences:
                 section.get("concurrency", DEFAULT_HUNT_CONCURRENCY)
             )
             validated[serial] = {
+                "category": category,
                 "qualities": normalized,
                 "concurrency": concurrency,
             }
@@ -448,6 +486,12 @@ class GuiBackend:
     def get_selected_qualities(self, serial: str) -> tuple[str, ...]:
         return self.preferences.get_selected_qualities(serial)
 
+    def get_category(self, serial: str) -> str:
+        return self.preferences.get_category(serial)
+
+    def set_category(self, serial: str, category: str) -> None:
+        self.preferences.set_category(serial, category)
+
     def set_selected_qualities(
         self,
         serial: str,
@@ -487,6 +531,53 @@ class GuiBackend:
         payloads = parse_json_lines(result.stdout)
         if len(payloads) != 1:
             raise GuiBackendError("情报检查命令返回了意外的数据条数")
+        return payloads[0]
+
+    def inspect_tasks(self, serial: str) -> Mapping[str, Any]:
+        monster = dict(self.inspect_intel(serial))
+        hero = dict(self._inspect_battle_intel(serial, "hero"))
+        rescue = dict(self._inspect_battle_intel(serial, "rescue"))
+        for payload in (hero, rescue):
+            if (
+                payload.get("serial") != monster.get("serial")
+                or payload.get("kingdom") != monster.get("kingdom")
+                or payload.get("role") != monster.get("role")
+            ):
+                raise GuiBackendError("多类别情报检查期间设备、区域或角色发生变化")
+        items: list[dict[str, Any]] = []
+        for item in monster.get("items", []):
+            if isinstance(item, Mapping):
+                copied = dict(item)
+                copied.setdefault("category", "monster")
+                items.append(copied)
+        for payload in (hero, rescue):
+            for item in payload.get("items", []):
+                if isinstance(item, Mapping):
+                    items.append(dict(item))
+        monster["items"] = items
+        monster["item_count"] = len(items)
+        monster["categories"] = {
+            "monster": len(monster.get("items", [])) - len(hero.get("items", [])) - len(rescue.get("items", [])),
+            "hero": len(hero.get("items", [])),
+            "rescue": len(rescue.get("items", [])),
+        }
+        return monster
+
+    def _inspect_battle_intel(self, serial: str, category: str) -> Mapping[str, Any]:
+        result = self.runner.run(
+            (
+                "inspect-battle-intel",
+                "--serial",
+                serial,
+                "--category",
+                category,
+                "--execute",
+            ),
+            timeout=90,
+        )
+        payloads = parse_json_lines(result.stdout)
+        if len(payloads) != 1:
+            raise GuiBackendError("战斗情报检查命令返回了意外的数据条数")
         return payloads[0]
 
     def ensure_world(
@@ -541,6 +632,46 @@ class GuiBackend:
         payloads = parse_json_lines(result.stdout)
         if len(payloads) != 1:
             raise GuiBackendError("自动狩猎命令返回了意外的数据条数")
+        return payloads[0]
+
+    def battle_intel(
+        self,
+        serial: str,
+        category: str,
+        *,
+        runtime_id: int | None = None,
+        expected_role: str | None = None,
+    ) -> Mapping[str, Any]:
+        if category not in {"hero", "rescue"}:
+            raise GuiBackendError("战斗情报类别必须是 hero 或 rescue")
+        if (
+            runtime_id is not None
+            and (
+                isinstance(runtime_id, bool)
+                or not isinstance(runtime_id, int)
+                or runtime_id <= 0
+            )
+        ):
+            raise GuiBackendError("情报目标 ID 必须是正整数")
+        arguments = [
+            "battle-intel",
+            "--serial",
+            serial,
+            "--category",
+            category,
+        ]
+        if runtime_id is not None:
+            arguments.extend(("--target-id", str(runtime_id)))
+        if expected_role is not None:
+            arguments.extend(("--expected-role", _validate_expected_role(expected_role)))
+        arguments.append("--execute")
+        result = self.runner.run(
+            arguments,
+            timeout=150,
+        )
+        payloads = parse_json_lines(result.stdout)
+        if len(payloads) != 1:
+            raise GuiBackendError("自动处理战斗情报命令返回了意外的数据条数")
         return payloads[0]
 
     def wait_intel(
@@ -636,8 +767,10 @@ def _validate_expected_role(role: str) -> str:
 __all__ = [
     "CliRunner",
     "CommandResult",
+    "DEFAULT_GUI_CATEGORY",
     "DEFAULT_GUI_QUALITIES",
     "DEFAULT_HUNT_CONCURRENCY",
+    "GUI_CATEGORY_ORDER",
     "GUI_PREFERENCES_FILENAME",
     "GUI_QUALITY_ORDER",
     "GuiBackend",

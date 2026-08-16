@@ -22,6 +22,7 @@ from .business import (
     build_close_expedition_lua,
     build_direct_commit_march_lua,
     build_install_march_capture_hook_lua,
+    build_inspect_battle_intel_lua,
     build_inspect_formation_lua,
     build_inspect_intel_lua,
     build_intel_status_lua,
@@ -29,10 +30,16 @@ from .business import (
     build_open_march_lua,
     build_read_march_capture_hook_lua,
     build_scene_status_lua,
+    build_start_battle_intel_lua,
     build_uninstall_march_capture_hook_lua,
+    build_verify_battle_intel_lua,
     build_verify_march_lua,
+    normalize_battle_category,
     normalize_quality,
     normalize_target_ids,
+    parse_battle_commit_output,
+    parse_battle_intel_output,
+    parse_battle_verify_output,
     parse_claim_intel_output,
     parse_commit_output,
     parse_intel_output,
@@ -41,6 +48,7 @@ from .business import (
     parse_ready_output,
     parse_scene_status_output,
     parse_verify_output,
+    select_battle_target,
     select_march_target,
     script_sha256,
     validate_role_whitelist,
@@ -117,6 +125,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="run the read-only inspection after all guards pass",
     )
     inspect_intel.set_defaults(dry_run=True)
+
+    inspect_battle = subparsers.add_parser(
+        "inspect-battle-intel",
+        help="inspect hero journey or rescue survivor intelligence",
+    )
+    inspect_battle.add_argument("--serial", required=True)
+    inspect_battle.add_argument(
+        "--category",
+        required=True,
+        help="hero/英雄之旅 or rescue/营救幸存者",
+    )
+    inspect_battle.add_argument(
+        "--execute",
+        dest="dry_run",
+        action="store_false",
+        help="run the read-only inspection after all guards pass",
+    )
+    inspect_battle.set_defaults(dry_run=True)
 
     ensure_world = subparsers.add_parser(
         "ensure-world",
@@ -252,6 +278,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="average the formation and march after all guards pass",
     )
     march.set_defaults(dry_run=True)
+
+    battle = subparsers.add_parser(
+        "battle-intel",
+        help="start and finish a guarded hero journey or rescue survivor intelligence battle",
+    )
+    battle.add_argument("--serial", required=True)
+    battle.add_argument(
+        "--expected-role",
+        help="require this exact active role before target selection",
+    )
+    battle.add_argument(
+        "--category",
+        required=True,
+        help="hero/英雄之旅 or rescue/营救幸存者",
+    )
+    battle.add_argument(
+        "--target-id",
+        type=int,
+        help="require this exact intelligence runtime ID instead of choosing by category",
+    )
+    battle.add_argument(
+        "--execute",
+        dest="dry_run",
+        action="store_false",
+        help="send native start/end battle requests after all guards pass",
+    )
+    battle.set_defaults(dry_run=True)
 
     formation = subparsers.add_parser(
         "inspect-formation",
@@ -1010,6 +1063,221 @@ def _execute_inspect_formation(
             "target": asdict(target),
             "request_dispatched": False,
             "output": formation_result.output,
+            "stage_script_sha256": stage_hashes,
+        }
+    )
+    return result
+
+
+def _execute_inspect_battle_intel(
+    adb: AdbClient,
+    profile: DeviceProfile,
+    client: FridaLuaClient,
+    process: ProcessInfo,
+    category: str,
+    *,
+    initial_roles: Sequence[str],
+    output_capacity: int,
+) -> dict[str, Any]:
+    locked_initial_roles = validate_role_whitelist(initial_roles)
+    inspect_code = build_inspect_battle_intel_lua(locked_initial_roles, category)
+    scanner = _scanner(adb, profile)
+    state = _wait_unique_idle_lua_state(
+        adb,
+        profile,
+        scanner,
+        process,
+        "battle intelligence inspection initialization",
+    )
+    with client:
+        initialization = dict(client.initialize_bridge(profile.bridge_remote_path))
+        before = scanner.verify_idle_main(process.pid, state.address)
+        try:
+            inspect_result = _execute_lua_when_idle(
+                adb,
+                profile,
+                client,
+                process,
+                scanner,
+                state,
+                inspect_code,
+                output_capacity=output_capacity,
+                operation="battle intelligence inspection",
+            )
+            snapshot = parse_battle_intel_output(
+                inspect_result.output,
+                locked_initial_roles,
+                category,
+            )
+        finally:
+            after = _verify_process_after_lua_finally(
+                adb,
+                profile,
+                scanner,
+                process,
+                state,
+                "inspect-battle-intel",
+            )
+    result = _execution_payload(initialization, state, before, after, inspect_result)
+    result.update(
+        {
+            "role": snapshot.role,
+            "category": normalize_battle_category(category),
+            "item_count": len(snapshot.items),
+            "items": [asdict(item) for item in snapshot.items],
+            "stage_script_sha256": {"inspect": script_sha256(inspect_code)},
+        }
+    )
+    return result
+
+
+def _execute_battle_intel(
+    adb: AdbClient,
+    profile: DeviceProfile,
+    client: FridaLuaClient,
+    process: ProcessInfo,
+    category: str,
+    *,
+    initial_roles: Sequence[str],
+    target_runtime_id: int | None = None,
+    dry_run: bool,
+    output_capacity: int,
+    verify_timeout_seconds: float = 20.0,
+    verify_poll_interval_seconds: float = 0.25,
+) -> dict[str, Any]:
+    locked_initial_roles = validate_role_whitelist(initial_roles)
+    normalized_category = normalize_battle_category(category)
+    inspect_code = build_inspect_battle_intel_lua(
+        locked_initial_roles,
+        normalized_category,
+    )
+    request_dispatched = False
+    end_request_dispatched = False
+    accepted = False
+    status_after = "not-sent"
+    verification_polls = 0
+    selected_heroes: tuple[int, ...] = ()
+    stage_hashes: dict[str, str] = {
+        "inspect": script_sha256(inspect_code),
+    }
+    scanner = _scanner(adb, profile)
+    state = _wait_unique_idle_lua_state(
+        adb,
+        profile,
+        scanner,
+        process,
+        "battle workflow initialization",
+    )
+    with client:
+        initialization = dict(client.initialize_bridge(profile.bridge_remote_path))
+        before = scanner.verify_idle_main(process.pid, state.address)
+        try:
+            inspect_result = _execute_lua_when_idle(
+                adb,
+                profile,
+                client,
+                process,
+                scanner,
+                state,
+                inspect_code,
+                output_capacity=output_capacity,
+                operation="battle intelligence inspection",
+            )
+            last_result = inspect_result
+            snapshot = parse_battle_intel_output(
+                inspect_result.output,
+                locked_initial_roles,
+                normalized_category,
+            )
+            target = select_battle_target(
+                snapshot,
+                normalized_category,
+                target_runtime_id,
+            )
+            active_roles = (snapshot.role,)
+            if not dry_run:
+                commit_code = build_start_battle_intel_lua(active_roles, target)
+                verify_code = build_verify_battle_intel_lua(active_roles, target)
+                stage_hashes.update(
+                    {
+                        "commit": script_sha256(commit_code),
+                        "verify": script_sha256(verify_code),
+                    }
+                )
+                commit_result = _execute_lua_when_idle(
+                    adb,
+                    profile,
+                    client,
+                    process,
+                    scanner,
+                    state,
+                    commit_code,
+                    output_capacity=output_capacity,
+                    operation="battle start/end request",
+                )
+                selected_heroes = parse_battle_commit_output(
+                    commit_result.output,
+                    active_roles,
+                    target,
+                )
+                last_result = commit_result
+                request_dispatched = True
+                end_request_dispatched = True
+                verify_deadline = time.monotonic() + verify_timeout_seconds
+                while True:
+                    verify_result = _execute_lua_when_idle(
+                        adb,
+                        profile,
+                        client,
+                        process,
+                        scanner,
+                        state,
+                        verify_code,
+                        output_capacity=output_capacity,
+                        operation="battle result verification",
+                    )
+                    last_result = verify_result
+                    verification_polls += 1
+                    accepted, status_after = parse_battle_verify_output(
+                        verify_result.output,
+                        active_roles,
+                        target,
+                    )
+                    if accepted:
+                        break
+                    if time.monotonic() >= verify_deadline:
+                        raise BusinessError(
+                            "battle request was invoked but no completed or "
+                            "removed intelligence state appeared before timeout "
+                            f"for target {target.runtime_id}; last quest status was "
+                            f"{status_after} after {verification_polls} polls"
+                        )
+                    time.sleep(verify_poll_interval_seconds)
+        finally:
+            after = _verify_process_after_lua_finally(
+                adb,
+                profile,
+                scanner,
+                process,
+                state,
+                "battle workflow",
+            )
+
+    result = _execution_payload(initialization, state, before, after, last_result)
+    result.update(
+        {
+            "dry_run": dry_run,
+            "battle_executed": not dry_run,
+            "category": normalized_category,
+            "request_dispatched": accepted if not dry_run else False,
+            "start_request_dispatched": request_dispatched,
+            "end_request_dispatched": end_request_dispatched,
+            "quest_status_after": status_after,
+            "verification_polls": verification_polls,
+            "selected_heroes": list(selected_heroes),
+            "role": snapshot.role,
+            "item_count": len(snapshot.items),
+            "target": asdict(target),
             "stage_script_sha256": stage_hashes,
         }
     )
@@ -1782,10 +2050,12 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
         if args.command
         in {
             "inspect-intel",
+            "inspect-battle-intel",
             "ensure-world",
             "wait-intel",
             "claim-intel",
             "march",
+            "battle-intel",
             "inspect-formation",
             "capture-march",
             "unhook-march-capture",
@@ -1793,6 +2063,7 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
         else tuple(profile.roles)
     )
     quality: str | None = None
+    battle_category: str | None = None
     target_runtime_id: int | None = None
     target_ids: tuple[int, ...] | None = None
     timeout_seconds: float | None = None
@@ -1802,6 +2073,9 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
         require_safe_lua(code, allow_unsafe=args.allow_unsafe_lua)
     elif args.command == "inspect-intel":
         code = build_inspect_intel_lua(operation_roles)
+    elif args.command == "inspect-battle-intel":
+        battle_category = normalize_battle_category(args.category)
+        code = build_inspect_battle_intel_lua(operation_roles, battle_category)
     elif args.command == "ensure-world":
         timeout_seconds, poll_interval_seconds = _polling_options(args)
         code = build_scene_status_lua(operation_roles)
@@ -1817,6 +2091,14 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
                 f"{args.command} target runtime id must be a positive integer"
             )
         code = build_inspect_intel_lua(operation_roles)
+    elif args.command == "battle-intel":
+        battle_category = normalize_battle_category(args.category)
+        target_runtime_id = getattr(args, "target_id", None)
+        if target_runtime_id is not None and target_runtime_id <= 0:
+            raise BusinessError(
+                f"{args.command} target runtime id must be a positive integer"
+            )
+        code = build_inspect_battle_intel_lua(operation_roles, battle_category)
     elif args.command == "capture-march":
         timeout_seconds, poll_interval_seconds = _polling_options(args)
         code = build_install_march_capture_hook_lua(operation_roles)
@@ -1841,6 +2123,8 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
     )
     if quality is not None:
         payload["quality"] = quality
+    if battle_category is not None:
+        payload["category"] = battle_category
     if target_runtime_id is not None:
         payload["requested_target_id"] = target_runtime_id
     if target_ids is not None:
@@ -1848,7 +2132,12 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
     if expected_role is not None:
         payload["expected_role"] = expected_role
 
-    if args.dry_run and args.command not in {"march", "claim-intel", "ensure-world"}:
+    if args.dry_run and args.command not in {
+        "march",
+        "battle-intel",
+        "claim-intel",
+        "ensure-world",
+    }:
         payload.update({"dry_run": True, "lua_executed": False})
         print(json.dumps(payload, ensure_ascii=False))
         return 0
@@ -1861,6 +2150,40 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
                 client,
                 process,
                 quality,
+                initial_roles=operation_roles,
+                target_runtime_id=target_runtime_id,
+                dry_run=args.dry_run,
+                output_capacity=settings.frida.output_capacity,
+            )
+        )
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+
+    if args.command == "inspect-battle-intel":
+        assert battle_category is not None
+        payload.update(
+            _execute_inspect_battle_intel(
+                adb,
+                profile,
+                client,
+                process,
+                battle_category,
+                initial_roles=operation_roles,
+                output_capacity=settings.frida.output_capacity,
+            )
+        )
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+
+    if args.command == "battle-intel":
+        assert battle_category is not None
+        payload.update(
+            _execute_battle_intel(
+                adb,
+                profile,
+                client,
+                process,
+                battle_category,
                 initial_roles=operation_roles,
                 target_runtime_id=target_runtime_id,
                 dry_run=args.dry_run,
