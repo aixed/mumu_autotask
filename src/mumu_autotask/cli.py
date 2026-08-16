@@ -31,6 +31,7 @@ from .business import (
     build_read_march_capture_hook_lua,
     build_scene_status_lua,
     build_start_battle_intel_lua,
+    build_start_rescue_intel_lua,
     build_uninstall_march_capture_hook_lua,
     build_verify_battle_intel_lua,
     build_verify_march_lua,
@@ -46,6 +47,7 @@ from .business import (
     parse_intel_status_output,
     parse_open_output,
     parse_ready_output,
+    parse_rescue_commit_output,
     parse_scene_status_output,
     parse_verify_output,
     select_battle_target,
@@ -1273,7 +1275,10 @@ def _execute_battle_intel(
             )
             active_roles = (snapshot.role,)
             if not dry_run:
-                commit_code = build_start_battle_intel_lua(active_roles, target)
+                if normalized_category == "rescue":
+                    commit_code = build_start_rescue_intel_lua(active_roles, target)
+                else:
+                    commit_code = build_start_battle_intel_lua(active_roles, target)
                 verify_code = build_verify_battle_intel_lua(active_roles, target)
                 stage_hashes.update(
                     {
@@ -1293,14 +1298,22 @@ def _execute_battle_intel(
                     operation=(
                         "battle start/end request"
                         if normalized_category == "hero"
-                        else "battle start request"
+                        else "rescue world march request"
                     ),
                 )
-                selected_heroes = parse_battle_commit_output(
-                    commit_result.output,
-                    active_roles,
-                    target,
-                )
+                if normalized_category == "rescue":
+                    parse_rescue_commit_output(
+                        commit_result.output,
+                        active_roles,
+                        target,
+                    )
+                    selected_heroes = ()
+                else:
+                    selected_heroes = parse_battle_commit_output(
+                        commit_result.output,
+                        active_roles,
+                        target,
+                    )
                 last_result = commit_result
                 request_dispatched = True
                 end_request_dispatched = normalized_category == "hero"
@@ -1327,8 +1340,13 @@ def _execute_battle_intel(
                     if accepted:
                         break
                     if time.monotonic() >= verify_deadline:
+                        request_label = (
+                            "rescue world march request"
+                            if normalized_category == "rescue"
+                            else "battle request"
+                        )
                         raise BusinessError(
-                            "battle request was invoked but no completed or "
+                            f"{request_label} was invoked but no completed or "
                             "removed intelligence state appeared before timeout "
                             f"for target {target.runtime_id}; last quest status was "
                             f"{status_after} after {verification_polls} polls"
@@ -1351,7 +1369,12 @@ def _execute_battle_intel(
             "battle_executed": not dry_run,
             "category": normalized_category,
             "request_dispatched": accepted if not dry_run else False,
-            "start_request_dispatched": request_dispatched,
+            "start_request_dispatched": (
+                request_dispatched and normalized_category == "hero"
+            ),
+            "world_march_request_dispatched": (
+                request_dispatched and normalized_category == "rescue"
+            ),
             "end_request_dispatched": end_request_dispatched,
             "quest_status_after": status_after,
             "verification_polls": verification_polls,
@@ -1835,7 +1858,16 @@ def _execute_batch_intel(
                             }
                         )
                     else:
-                        commit_code = build_start_battle_intel_lua(active_roles, target)
+                        if category == "rescue":
+                            commit_code = build_start_rescue_intel_lua(
+                                active_roles,
+                                target,
+                            )
+                        else:
+                            commit_code = build_start_battle_intel_lua(
+                                active_roles,
+                                target,
+                            )
                         verify_code = build_verify_battle_intel_lua(active_roles, target)
                         stage_hashes[f"target_{runtime_id}_commit"] = script_sha256(
                             commit_code
@@ -1855,15 +1887,23 @@ def _execute_batch_intel(
                             operation=(
                                 f"batch battle request {runtime_id}"
                                 if category == "hero"
-                                else f"batch rescue start request {runtime_id}"
+                                else f"batch rescue world march request {runtime_id}"
                             ),
                         )
                         last_result = commit_result
-                        selected_heroes = parse_battle_commit_output(
-                            commit_result.output,
-                            active_roles,
-                            target,
-                        )
+                        if category == "rescue":
+                            parse_rescue_commit_output(
+                                commit_result.output,
+                                active_roles,
+                                target,
+                            )
+                            selected_heroes = ()
+                        else:
+                            selected_heroes = parse_battle_commit_output(
+                                commit_result.output,
+                                active_roles,
+                                target,
+                            )
                         verify_deadline = time.monotonic() + verify_timeout_seconds
                         verification_polls = 0
                         accepted = False
@@ -1890,9 +1930,14 @@ def _execute_batch_intel(
                             if accepted:
                                 break
                             if time.monotonic() >= verify_deadline:
+                                request_label = (
+                                    "rescue world march request"
+                                    if category == "rescue"
+                                    else "battle request"
+                                )
                                 raise BusinessError(
-                                    "batch battle request was invoked but no completed "
-                                    "or removed intelligence state appeared before "
+                                    f"batch {request_label} was invoked but no "
+                                    "completed or removed intelligence state appeared before "
                                     f"timeout for target {runtime_id}; last quest "
                                     f"status was {status_after} after "
                                     f"{verification_polls} polls"
@@ -1906,7 +1951,8 @@ def _execute_batch_intel(
                                 "category": category,
                                 "quality": getattr(target, "quality", None),
                                 "request_dispatched": True,
-                                "start_request_dispatched": True,
+                                "start_request_dispatched": category == "hero",
+                                "world_march_request_dispatched": category == "rescue",
                                 "end_request_dispatched": category == "hero",
                                 "target": asdict(target),
                                 "quest_status_after": status_after,

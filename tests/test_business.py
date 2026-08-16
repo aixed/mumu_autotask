@@ -31,6 +31,8 @@ from mumu_autotask.business import (
     parse_march_output,
     parse_open_output,
     parse_ready_output,
+    build_start_rescue_intel_lua,
+    parse_rescue_commit_output,
     parse_scene_status_output,
     parse_verify_output,
     select_march_target,
@@ -131,6 +133,21 @@ def battle_commit_output(target: BattleIntelItem, *, end_request: bool) -> str:
             "HERO\t1\t50006",
             "HERO\t2\t50012",
             "HERO\t3\t50004",
+            "END\t1",
+        )
+    )
+
+
+def rescue_commit_output(target: BattleIntelItem) -> str:
+    return "\n".join(
+        (
+            "MUMU_AUTOTASK\t1\tRESCUE_COMMIT",
+            f"ROLE\t{ROLE_HEX}",
+            "KINGDOM\t4549",
+            f"TARGET\t{target.runtime_id}",
+            "WORLD_MARCH\t1",
+            "TYPE\t301",
+            "MARCH_MAP_TYPE\t1",
             "END\t1",
         )
     )
@@ -243,34 +260,39 @@ class BusinessTests(unittest.TestCase):
         self.assertIn('proof = march_event_id ~= nil and "MARCH_EVENT" or "MARCH_FIELDS"', verify_code)
         self.assertIn('"PROOF\\t" .. proof', build_verify_march_lua((ROLE,), target))
 
-    def test_rescue_start_script_does_not_emit_end_battle_request(self) -> None:
-        rescue_code = build_start_battle_intel_lua((ROLE,), battle_target("rescue"))
+    def test_rescue_start_script_uses_world_march_payload(self) -> None:
+        rescue_code = build_start_rescue_intel_lua((ROLE,), battle_target("rescue"))
         hero_code = build_start_battle_intel_lua((ROLE,), battle_target("hero"))
 
-        self.assertIn("RequestStartBattle", rescue_code)
+        self.assertNotIn("RequestStartBattle", rescue_code)
         self.assertNotIn("RequestEndBattle", rescue_code)
-        self.assertIn('"END_REQUEST\\t" .. (end_request and "1" or "0")', rescue_code)
+        self.assertIn('"req_world_march"', rescue_code)
+        self.assertIn("type = 301", rescue_code)
+        self.assertIn("endpoint = {", rescue_code)
+        self.assertIn("x = TARGET_WORLD_X", rescue_code)
+        self.assertIn("y = TARGET_WORLD_Y", rescue_code)
+        self.assertIn("event_id = TARGET_RUNTIME_ID", rescue_code)
+        self.assertIn("MarchMapType = 1", rescue_code)
+        self.assertIn("RESCUE_COMMIT", rescue_code)
         self.assertIn("RequestStartBattle", hero_code)
         self.assertIn("RequestEndBattle", hero_code)
 
-    def test_battle_commit_parser_allows_rescue_start_only(self) -> None:
+    def test_battle_commit_parser_rejects_rescue_category(self) -> None:
         rescue = battle_target("rescue")
         hero = battle_target("hero")
 
-        self.assertEqual(
+        with self.assertRaisesRegex(BusinessError, "target category"):
             parse_battle_commit_output(
                 battle_commit_output(rescue, end_request=False),
                 (ROLE,),
                 rescue,
-            ),
-            (50006, 50012, 50004),
-        )
+            )
         parse_battle_commit_output(
             battle_commit_output(hero, end_request=True),
             (ROLE,),
             hero,
         )
-        with self.assertRaisesRegex(BusinessError, "does not match rescue"):
+        with self.assertRaisesRegex(BusinessError, "target category"):
             parse_battle_commit_output(
                 battle_commit_output(rescue, end_request=True),
                 (ROLE,),
@@ -281,6 +303,23 @@ class BusinessTests(unittest.TestCase):
                 battle_commit_output(hero, end_request=False),
                 (ROLE,),
                 hero,
+            )
+
+    def test_rescue_commit_parser_accepts_hook_captured_world_march_shape(self) -> None:
+        rescue = battle_target("rescue")
+
+        parse_rescue_commit_output(rescue_commit_output(rescue), (ROLE,), rescue)
+        with self.assertRaisesRegex(BusinessError, "target category"):
+            parse_rescue_commit_output(
+                rescue_commit_output(battle_target("hero")),
+                (ROLE,),
+                battle_target("hero"),
+            )
+        with self.assertRaisesRegex(BusinessError, "invalid march type"):
+            parse_rescue_commit_output(
+                rescue_commit_output(rescue).replace("TYPE\t301", "TYPE\t300"),
+                (ROLE,),
+                rescue,
             )
 
     def test_scene_status_script_and_parser_report_world_readiness_inputs(self) -> None:
@@ -333,6 +372,7 @@ class BusinessTests(unittest.TestCase):
             build_march_ready_lua((ROLE,), target),
             build_commit_march_lua((ROLE,), target),
             build_verify_march_lua((ROLE,), target),
+            build_start_rescue_intel_lua((ROLE,), battle_target("rescue")),
             build_close_expedition_lua((ROLE,)),
             build_scene_status_lua((ROLE,)),
         )

@@ -1144,6 +1144,67 @@ def build_start_battle_intel_lua(
     return _battle_target_lua(roles, target, body)
 
 
+_START_RESCUE_INTEL_BODY = r'''
+local role_hex, kingdom = checked_identity()
+if TARGET_QUEST_TYPE ~= 2 then
+    fail("selected intelligence is not a rescue survivor quest")
+end
+local quest = require_battle_target(
+    TARGET_RUNTIME_ID,
+    TARGET_QUEST_ID,
+    TARGET_QUEST_TYPE,
+    TARGET_QUALITY_ID,
+    TARGET_WORLD_X,
+    TARGET_WORLD_Y,
+    TARGET_EXPIRES_AT,
+    TARGET_CONDITION,
+    TARGET_LEVEL,
+    TARGET_STAMINA_COST,
+    TARGET_POWER_LEVEL
+)
+if type(quest) ~= "table" then
+    fail("selected rescue intelligence is unavailable")
+end
+if type(NetMsg) ~= "table" or type(NetMsg.SendMsg) ~= "function" then
+    fail("NetMsg.SendMsg is unavailable")
+end
+local payload = {
+    type = 301,
+    endpoint = {
+        x = TARGET_WORLD_X,
+        y = TARGET_WORLD_Y,
+    },
+    extra = {
+        event_id = TARGET_RUNTIME_ID,
+    },
+    MarchMapType = 1,
+}
+local ok = pcall(NetMsg.SendMsg, "req_world_march", payload, true)
+if not ok then
+    fail("rescue world march request failed")
+end
+return table.concat({
+    "MUMU_AUTOTASK\t1\tRESCUE_COMMIT",
+    "ROLE\t" .. role_hex,
+    "KINGDOM\t" .. tostring(kingdom),
+    "TARGET\t" .. tostring(TARGET_RUNTIME_ID),
+    "WORLD_MARCH\t1",
+    "TYPE\t301",
+    "MARCH_MAP_TYPE\t1",
+    "END\t1",
+}, "\n")
+'''
+
+
+def build_start_rescue_intel_lua(
+    roles: Sequence[str],
+    target: BattleIntelItem,
+) -> str:
+    if normalize_battle_category(target.category) != "rescue":
+        raise BusinessError("rescue intelligence target category must be rescue")
+    return _battle_target_lua(roles, target, _START_RESCUE_INTEL_BODY)
+
+
 _VERIFY_BATTLE_INTEL_BODY = r'''
 local role_hex, kingdom = checked_identity()
 local quest_map = call(GCtrl.RadarCtrl, "GetQuestDataMap", "quest map")
@@ -2822,8 +2883,9 @@ def parse_battle_commit_output(
     ):
         raise BusinessError("BATTLE_COMMIT output has an invalid end-request state")
     category = normalize_battle_category(target.category)
-    expected_end = "1" if category == "hero" else "0"
-    if lines[5][1] != expected_end:
+    if category != "hero":
+        raise BusinessError("BATTLE_COMMIT target category must be hero")
+    if lines[5][1] != "1":
         raise BusinessError(
             f"BATTLE_COMMIT output end-request state does not match {category}"
         )
@@ -2839,6 +2901,33 @@ def parse_battle_commit_output(
     if not heroes:
         raise BusinessError("BATTLE_COMMIT output selected no heroes")
     return tuple(heroes)
+
+
+def parse_rescue_commit_output(
+    output: str,
+    allowed_roles: Sequence[str],
+    target: BattleIntelItem,
+) -> None:
+    if normalize_battle_category(target.category) != "rescue":
+        raise BusinessError("RESCUE_COMMIT target category must be rescue")
+    lines = _protocol_lines(output, "RESCUE_COMMIT")
+    if len(lines) != 8:
+        raise BusinessError("RESCUE_COMMIT output must contain exactly 8 lines")
+    if len(lines[1]) != 2 or lines[1][0] != "ROLE":
+        raise BusinessError("RESCUE_COMMIT output is missing ROLE")
+    _parse_role(lines[1][1], allowed_roles)
+    if lines[2] != ["KINGDOM", str(ALLOWED_KINGDOM)]:
+        raise BusinessError("RESCUE_COMMIT output kingdom is not 4549")
+    if lines[3] != ["TARGET", str(target.runtime_id)]:
+        raise BusinessError("RESCUE_COMMIT output target does not match the request")
+    if lines[4] != ["WORLD_MARCH", "1"]:
+        raise BusinessError("RESCUE_COMMIT output did not confirm world march")
+    if lines[5] != ["TYPE", "301"]:
+        raise BusinessError("RESCUE_COMMIT output has an invalid march type")
+    if lines[6] != ["MARCH_MAP_TYPE", "1"]:
+        raise BusinessError("RESCUE_COMMIT output has an invalid march map type")
+    if lines[7] != ["END", "1"]:
+        raise BusinessError("RESCUE_COMMIT output has an invalid terminator")
 
 
 def parse_battle_verify_output(
@@ -3014,6 +3103,7 @@ __all__ = [
     "build_read_march_capture_hook_lua",
     "build_scene_status_lua",
     "build_start_battle_intel_lua",
+    "build_start_rescue_intel_lua",
     "build_uninstall_march_capture_hook_lua",
     "build_verify_battle_intel_lua",
     "build_verify_march_lua",
@@ -3030,6 +3120,7 @@ __all__ = [
     "parse_march_output",
     "parse_open_output",
     "parse_ready_output",
+    "parse_rescue_commit_output",
     "parse_scene_status_output",
     "parse_verify_output",
     "select_battle_target",

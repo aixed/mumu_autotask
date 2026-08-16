@@ -216,9 +216,11 @@ def business_args(
     command: str,
     *,
     dry_run: bool = True,
+    category: str | None = None,
     quality: str | None = None,
     target_id: int | None = None,
     target_ids: list[int] | None = None,
+    batch_targets: list[str] | None = None,
     timeout: float = 1.0,
     poll_interval: float = 0.05,
     expected_role: str | None = None,
@@ -228,9 +230,11 @@ def business_args(
     return argparse.Namespace(
         command=command,
         serial="device-1",
+        category=category,
         quality=quality,
         target_id=target_id,
         target_ids=target_ids,
+        batch_targets=batch_targets,
         timeout=timeout,
         poll_interval=poll_interval,
         expected_role=expected_role,
@@ -248,6 +252,52 @@ def status_protocol(role: str, *targets: str) -> str:
             "KINGDOM\t4549",
             *targets,
             f"END\t{len(targets)}",
+        )
+    )
+
+
+def battle_intel_protocol(role: str, *items: str) -> str:
+    return "\n".join(
+        (
+            "MUMU_AUTOTASK\t1\tBATTLE_INTEL",
+            f"ROLE\t{role.encode('utf-8').hex()}",
+            "KINGDOM\t4549",
+            *items,
+            f"END\t{len(items)}",
+        )
+    )
+
+
+def rescue_commit_protocol(role: str, target_id: int) -> str:
+    return "\n".join(
+        (
+            "MUMU_AUTOTASK\t1\tRESCUE_COMMIT",
+            f"ROLE\t{role.encode('utf-8').hex()}",
+            "KINGDOM\t4549",
+            f"TARGET\t{target_id}",
+            "WORLD_MARCH\t1",
+            "TYPE\t301",
+            "MARCH_MAP_TYPE\t1",
+            "END\t1",
+        )
+    )
+
+
+def battle_verify_protocol(
+    role: str,
+    target_id: int,
+    *,
+    accepted: bool = True,
+    status: str = "2",
+) -> str:
+    return "\n".join(
+        (
+            "MUMU_AUTOTASK\t1\tBATTLE_VERIFY",
+            f"ROLE\t{role.encode('utf-8').hex()}",
+            "KINGDOM\t4549",
+            f"TARGET\t{target_id}",
+            f"ACCEPTED\t{int(accepted)}\tSTATUS\t{status}",
+            "END\t1",
         )
     )
 
@@ -1299,6 +1349,100 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result["dispatch_mode"], "direct")
         self.assertEqual(result["quest_status_after"], "2")
         self.assertFalse(any(event.startswith("input-tap:") for event in events))
+        self.assertEqual(events.count("lua-execute"), 3)
+
+    def test_battle_intel_rescue_execute_uses_world_march_commit(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        target_id = 438
+        outputs = (
+            battle_intel_protocol(
+                role,
+                "ITEM\t438\t2438\t1\t789\t728\t1900000000"
+                "\trescue\t2\tblue\t3\t1\t1\t0\t0",
+            ),
+            rescue_commit_protocol(role, target_id),
+            battle_verify_protocol(role, target_id, status="2"),
+        )
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, outputs=outputs),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args(
+                        "battle-intel",
+                        dry_run=False,
+                        category="rescue",
+                        target_id=target_id,
+                        expected_role=role,
+                    ),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["category"], "rescue")
+        self.assertTrue(result["request_dispatched"])
+        self.assertTrue(result["world_march_request_dispatched"])
+        self.assertFalse(result["start_request_dispatched"])
+        self.assertFalse(result["end_request_dispatched"])
+        self.assertEqual(result["selected_heroes"], [])
+        self.assertEqual(result["quest_status_after"], "2")
+        self.assertEqual(events.count("lua-execute"), 3)
+
+    def test_batch_intel_rescue_execute_uses_world_march_commit(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        target_id = 438
+        outputs = (
+            battle_intel_protocol(
+                role,
+                "ITEM\t438\t2438\t1\t789\t728\t1900000000"
+                "\trescue\t2\tblue\t3\t1\t1\t0\t0",
+            ),
+            rescue_commit_protocol(role, target_id),
+            battle_verify_protocol(role, target_id, status="missing"),
+        )
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, outputs=outputs),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args(
+                        "batch-intel",
+                        dry_run=False,
+                        batch_targets=[f"rescue:{target_id}"],
+                        expected_role=role,
+                    ),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["request_dispatched"])
+        self.assertEqual(len(result["results"]), 1)
+        rescue_result = result["results"][0]
+        self.assertEqual(rescue_result["category"], "rescue")
+        self.assertTrue(rescue_result["request_dispatched"])
+        self.assertTrue(rescue_result["world_march_request_dispatched"])
+        self.assertFalse(rescue_result["start_request_dispatched"])
+        self.assertFalse(rescue_result["end_request_dispatched"])
+        self.assertEqual(rescue_result["selected_heroes"], [])
+        self.assertEqual(rescue_result["quest_status_after"], "missing")
         self.assertEqual(events.count("lua-execute"), 3)
 
     def test_march_execute_surfaces_open_protocol_errors_without_ui_taps(self) -> None:
