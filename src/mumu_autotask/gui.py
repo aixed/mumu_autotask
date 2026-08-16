@@ -1443,7 +1443,9 @@ class DeviceManagerWindow:
             try:
                 concurrency = int(load_concurrency(self.profile.serial))
                 if not MIN_HUNT_CONCURRENCY <= concurrency <= MAX_HUNT_CONCURRENCY:
-                    raise ValueError("并发出征数超出 1-3")
+                    raise ValueError(
+                        f"并发出征数超出 {MIN_HUNT_CONCURRENCY}-{MAX_HUNT_CONCURRENCY}"
+                    )
             except Exception as exc:
                 preference_errors.append(f"并发数：{exc}")
                 concurrency = DEFAULT_HUNT_CONCURRENCY

@@ -89,15 +89,15 @@ class GuiPreferencesTests(unittest.TestCase):
             preferences = GuiPreferences(path)
 
             preferences.set_concurrency("127.0.0.1:16384", 1)
-            preferences.set_concurrency("127.0.0.1:16416", 2)
+            preferences.set_concurrency("127.0.0.1:16416", 4)
 
             reloaded = GuiPreferences(path)
             self.assertEqual(reloaded.get_concurrency("127.0.0.1:16384"), 1)
-            self.assertEqual(reloaded.get_concurrency("127.0.0.1:16416"), 2)
+            self.assertEqual(reloaded.get_concurrency("127.0.0.1:16416"), 4)
             self.assertEqual(reloaded.get_concurrency("127.0.0.1:16480"), 3)
-            for invalid in (0, 4, True, 1.5):
+            for invalid in (0, 5, True, 1.5):
                 with self.subTest(invalid=invalid):
-                    with self.assertRaisesRegex(GuiBackendError, "1-3"):
+                    with self.assertRaisesRegex(GuiBackendError, "1-4"):
                         preferences.set_concurrency(  # type: ignore[arg-type]
                             "127.0.0.1:16384", invalid
                         )

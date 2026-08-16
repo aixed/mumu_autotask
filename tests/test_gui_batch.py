@@ -170,9 +170,13 @@ class HuntWaveBatchTests(unittest.TestCase):
         )
         self.assertEqual(batch.concurrency, 3)
         self.assertEqual(batch.waves, waves)
-        for invalid in (0, 4, True, 1.5):
+        self.assertEqual(
+            [[target.runtime_id for target in wave] for wave in build_hunt_waves(targets, 4)],
+            [[100, 101, 102, 103], [104, 105, 106]],
+        )
+        for invalid in (0, 5, True, 1.5):
             with self.subTest(invalid=invalid):
-                with self.assertRaisesRegex(HuntBatchError, "1-3"):
+                with self.assertRaisesRegex(HuntBatchError, "1-4"):
                     build_hunt_waves(targets, invalid)  # type: ignore[arg-type]
 
     def test_each_wave_prepares_all_dispatches_then_waits_before_next(self) -> None:
