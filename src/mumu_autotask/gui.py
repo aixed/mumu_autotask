@@ -2123,18 +2123,27 @@ class DeviceManagerWindow:
     def _dispatch_flow_text(target: HuntBatchTarget) -> str:
         if target.category == "monster":
             return "平均配置 -> 出征 -> 结果验证"
-        return "战斗开始 -> 战斗结束 -> 结果验证"
+        if target.category == "hero":
+            return "战斗开始 -> 战斗结束 -> 结果验证"
+        return "营救发起 -> 完成验证"
 
     @classmethod
     def _wave_flow_text(cls, targets: Sequence[HuntBatchTarget]) -> str:
         monster_count = sum(target.category == "monster" for target in targets)
-        battle_count = len(targets) - monster_count
-        if monster_count and battle_count:
-            return (
-                f"{monster_count} 个野兽执行平均配置 -> 出征 -> 结果验证；"
-                f"{battle_count} 个英雄/营救任务直接执行战斗开始 -> 战斗结束 -> 结果验证"
+        hero_count = sum(target.category == "hero" for target in targets)
+        rescue_count = sum(target.category == "rescue" for target in targets)
+        if len(targets) == 1:
+            return cls._dispatch_flow_text(targets[0])
+        parts: list[str] = []
+        if monster_count:
+            parts.append(f"{monster_count} 个野兽执行平均配置 -> 出征 -> 结果验证")
+        if hero_count:
+            parts.append(
+                f"{hero_count} 个英雄之旅执行战斗开始 -> 战斗结束 -> 结果验证"
             )
-        return cls._dispatch_flow_text(targets[0])
+        if rescue_count:
+            parts.append(f"{rescue_count} 个营救幸存者执行营救发起 -> 完成验证")
+        return "；".join(parts)
 
     def _start_next_hunt_dispatch(self) -> None:
         batch = self.hunt_batch

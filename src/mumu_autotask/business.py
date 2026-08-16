@@ -1101,21 +1101,15 @@ local ok_start = pcall(
 if not ok_start then
     fail("battle start request failed")
 end
-local ok_end = pcall(
-    GCtrl.RadarCtrl.RequestEndBattle,
-    GCtrl.RadarCtrl,
-    TARGET_RUNTIME_ID
-)
-if not ok_end then
-    fail("battle end request failed")
-end
+local end_request = false
+__END_REQUEST_BLOCK__
 local lines = {
     "MUMU_AUTOTASK\t1\tBATTLE_COMMIT",
     "ROLE\t" .. role_hex,
     "KINGDOM\t" .. tostring(kingdom),
     "TARGET\t" .. tostring(TARGET_RUNTIME_ID),
     "START\t1",
-    "END_REQUEST\t1",
+    "END_REQUEST\t" .. (end_request and "1" or "0"),
 }
 for index, hero_id in ipairs(heroes) do
     lines[#lines + 1] = table.concat({ "HERO", tostring(index), tostring(hero_id) }, "\t")
@@ -1129,7 +1123,25 @@ def build_start_battle_intel_lua(
     roles: Sequence[str],
     target: BattleIntelItem,
 ) -> str:
-    return _battle_target_lua(roles, target, _START_BATTLE_INTEL_BODY)
+    category = normalize_battle_category(target.category)
+    should_request_end = category == "hero"
+    end_block = (
+        r'''
+        local ok_end = pcall(
+            GCtrl.RadarCtrl.RequestEndBattle,
+            GCtrl.RadarCtrl,
+            TARGET_RUNTIME_ID
+        )
+        if not ok_end then
+            fail("battle end request failed")
+        end
+        end_request = true
+        '''
+        if should_request_end
+        else ""
+    )
+    body = _START_BATTLE_INTEL_BODY.replace("__END_REQUEST_BLOCK__", end_block)
+    return _battle_target_lua(roles, target, body)
 
 
 _VERIFY_BATTLE_INTEL_BODY = r'''
@@ -2801,8 +2813,20 @@ def parse_battle_commit_output(
         raise BusinessError("BATTLE_COMMIT output kingdom is not 4549")
     if lines[3] != ["TARGET", str(target.runtime_id)]:
         raise BusinessError("BATTLE_COMMIT output target does not match the request")
-    if lines[4] != ["START", "1"] or lines[5] != ["END_REQUEST", "1"]:
-        raise BusinessError("BATTLE_COMMIT output did not confirm start/end requests")
+    if lines[4] != ["START", "1"]:
+        raise BusinessError("BATTLE_COMMIT output did not confirm start request")
+    if (
+        len(lines[5]) != 2
+        or lines[5][0] != "END_REQUEST"
+        or lines[5][1] not in {"0", "1"}
+    ):
+        raise BusinessError("BATTLE_COMMIT output has an invalid end-request state")
+    category = normalize_battle_category(target.category)
+    expected_end = "1" if category == "hero" else "0"
+    if lines[5][1] != expected_end:
+        raise BusinessError(
+            f"BATTLE_COMMIT output end-request state does not match {category}"
+        )
     if lines[-1] != ["END", "1"]:
         raise BusinessError("BATTLE_COMMIT output has an invalid terminator")
     heroes: list[int] = []

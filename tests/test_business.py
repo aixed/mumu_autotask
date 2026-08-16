@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from mumu_autotask.business import (
+    BattleIntelItem,
     BusinessError,
     INTEL_COMPLETED,
     INTEL_MISSING,
@@ -12,6 +13,7 @@ from mumu_autotask.business import (
     build_claim_intel_lua,
     build_close_expedition_lua,
     build_commit_march_lua,
+    build_start_battle_intel_lua,
     build_inspect_formation_lua,
     build_inspect_intel_lua,
     build_intel_status_lua,
@@ -22,6 +24,7 @@ from mumu_autotask.business import (
     normalize_quality,
     normalize_target_ids,
     parse_claim_intel_output,
+    parse_battle_commit_output,
     parse_commit_output,
     parse_intel_output,
     parse_intel_status_output,
@@ -94,6 +97,43 @@ def scene_output(
 
 PURPLE_ITEM = "ITEM\t71\t1701\t0\t759\t774\t1900000000\tpurple\t4\t813\t13\t10"
 GREEN_ITEM = "ITEM\t70\t1700\t0\t700\t701\t1800000000\tgreen\t2\t808\t8\t10"
+
+
+def battle_target(category: str = "rescue") -> BattleIntelItem:
+    quest_type = 2 if category == "rescue" else 3
+    return BattleIntelItem(
+        runtime_id=438,
+        quest_id=2438,
+        status=1,
+        world_x=789,
+        world_y=728,
+        expires_at=1900000000,
+        category=category,
+        quest_type=quest_type,
+        quality="blue",
+        quality_id=3,
+        condition=1,
+        level=1,
+        stamina_cost=0,
+        power_level=0,
+    )
+
+
+def battle_commit_output(target: BattleIntelItem, *, end_request: bool) -> str:
+    return "\n".join(
+        (
+            "MUMU_AUTOTASK\t1\tBATTLE_COMMIT",
+            f"ROLE\t{ROLE_HEX}",
+            "KINGDOM\t4549",
+            f"TARGET\t{target.runtime_id}",
+            "START\t1",
+            f"END_REQUEST\t{int(end_request)}",
+            "HERO\t1\t50006",
+            "HERO\t2\t50012",
+            "HERO\t3\t50004",
+            "END\t1",
+        )
+    )
 
 
 class BusinessTests(unittest.TestCase):
@@ -202,6 +242,46 @@ class BusinessTests(unittest.TestCase):
         self.assertNotIn('march_method(march, "GetLevel")', verify_code)
         self.assertIn('proof = march_event_id ~= nil and "MARCH_EVENT" or "MARCH_FIELDS"', verify_code)
         self.assertIn('"PROOF\\t" .. proof', build_verify_march_lua((ROLE,), target))
+
+    def test_rescue_start_script_does_not_emit_end_battle_request(self) -> None:
+        rescue_code = build_start_battle_intel_lua((ROLE,), battle_target("rescue"))
+        hero_code = build_start_battle_intel_lua((ROLE,), battle_target("hero"))
+
+        self.assertIn("RequestStartBattle", rescue_code)
+        self.assertNotIn("RequestEndBattle", rescue_code)
+        self.assertIn('"END_REQUEST\\t" .. (end_request and "1" or "0")', rescue_code)
+        self.assertIn("RequestStartBattle", hero_code)
+        self.assertIn("RequestEndBattle", hero_code)
+
+    def test_battle_commit_parser_allows_rescue_start_only(self) -> None:
+        rescue = battle_target("rescue")
+        hero = battle_target("hero")
+
+        self.assertEqual(
+            parse_battle_commit_output(
+                battle_commit_output(rescue, end_request=False),
+                (ROLE,),
+                rescue,
+            ),
+            (50006, 50012, 50004),
+        )
+        parse_battle_commit_output(
+            battle_commit_output(hero, end_request=True),
+            (ROLE,),
+            hero,
+        )
+        with self.assertRaisesRegex(BusinessError, "does not match rescue"):
+            parse_battle_commit_output(
+                battle_commit_output(rescue, end_request=True),
+                (ROLE,),
+                rescue,
+            )
+        with self.assertRaisesRegex(BusinessError, "does not match hero"):
+            parse_battle_commit_output(
+                battle_commit_output(hero, end_request=False),
+                (ROLE,),
+                hero,
+            )
 
     def test_scene_status_script_and_parser_report_world_readiness_inputs(self) -> None:
         code = build_scene_status_lua((ROLE,))

@@ -305,6 +305,21 @@ class HuntWaveBatchTests(unittest.TestCase):
             [[100, 101, 102, 103, 200, 201], [104]],
         )
 
+    def test_wave_flow_text_describes_rescue_without_end_battle(self) -> None:
+        targets = build_task_queue(
+            [
+                intel_item(200, "blue", expires_at=900, category="hero"),
+                intel_item(201, "yellow", expires_at=901, category="rescue"),
+            ],
+            ("hero", "rescue"),
+            (),
+        )
+
+        text = DeviceManagerWindow._wave_flow_text(targets)
+
+        self.assertIn("英雄之旅执行战斗开始 -> 战斗结束", text)
+        self.assertIn("营救幸存者执行营救发起 -> 完成验证", text)
+
     def test_each_wave_prepares_all_dispatches_then_waits_before_next(self) -> None:
         batch = HuntWaveBatch(self.targets(3), 2)
 

@@ -281,7 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     battle = subparsers.add_parser(
         "battle-intel",
-        help="start and finish a guarded hero journey or rescue survivor intelligence battle",
+        help="run a guarded hero journey or rescue survivor intelligence battle",
     )
     battle.add_argument("--serial", required=True)
     battle.add_argument(
@@ -302,7 +302,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--execute",
         dest="dry_run",
         action="store_false",
-        help="send native start/end battle requests after all guards pass",
+        help="send native battle requests after all guards pass",
     )
     battle.set_defaults(dry_run=True)
 
@@ -1290,7 +1290,11 @@ def _execute_battle_intel(
                     state,
                     commit_code,
                     output_capacity=output_capacity,
-                    operation="battle start/end request",
+                    operation=(
+                        "battle start/end request"
+                        if normalized_category == "hero"
+                        else "battle start request"
+                    ),
                 )
                 selected_heroes = parse_battle_commit_output(
                     commit_result.output,
@@ -1299,7 +1303,7 @@ def _execute_battle_intel(
                 )
                 last_result = commit_result
                 request_dispatched = True
-                end_request_dispatched = True
+                end_request_dispatched = normalized_category == "hero"
                 verify_deadline = time.monotonic() + verify_timeout_seconds
                 while True:
                     verify_result = _execute_lua_when_idle(
@@ -1848,7 +1852,11 @@ def _execute_batch_intel(
                             state,
                             commit_code,
                             output_capacity=output_capacity,
-                            operation=f"batch battle request {runtime_id}",
+                            operation=(
+                                f"batch battle request {runtime_id}"
+                                if category == "hero"
+                                else f"batch rescue start request {runtime_id}"
+                            ),
                         )
                         last_result = commit_result
                         selected_heroes = parse_battle_commit_output(
@@ -1898,6 +1906,8 @@ def _execute_batch_intel(
                                 "category": category,
                                 "quality": getattr(target, "quality", None),
                                 "request_dispatched": True,
+                                "start_request_dispatched": True,
+                                "end_request_dispatched": category == "hero",
                                 "target": asdict(target),
                                 "quest_status_after": status_after,
                                 "verification_polls": verification_polls,
