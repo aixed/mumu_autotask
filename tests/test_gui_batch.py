@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from typing import Mapping
 from unittest.mock import patch
 
 from mumu_autotask.gui import (
@@ -9,6 +10,7 @@ from mumu_autotask.gui import (
     HuntBatchError,
     HuntBatchQueue,
     HuntWaveBatch,
+    LauncherApp,
     build_task_queue,
     build_hunt_queue,
     build_hunt_waves,
@@ -175,6 +177,75 @@ class HuntBatchQueueTests(unittest.TestCase):
         )
         self.assertIn("成功 1 个", batch.summary())
         self.assertIn("失败 1 个", batch.summary())
+
+
+class LauncherRefreshTests(unittest.TestCase):
+    def test_connect_failure_does_not_skip_per_device_status_checks(self) -> None:
+        launcher = object.__new__(LauncherApp)
+        launcher.busy = False
+        launcher.row_serials = {"row-1": "device-1", "row-2": "device-2"}
+        events: list[tuple[object, ...]] = []
+        launcher._set_busy = lambda busy: events.append(("busy", busy))
+        launcher.summary_text = SimpleNamespace(
+            set=lambda value: events.append(("summary", value))
+        )
+
+        class FakeTree:
+            def __init__(self) -> None:
+                self.values = {
+                    "row-1": ["未检查", "one", "device-1"],
+                    "row-2": ["未检查", "two", "device-2"],
+                }
+
+            def item(self, row_id: str, option: str | None = None, **kwargs):
+                if kwargs:
+                    self.values[row_id] = list(kwargs["values"])
+                    return None
+                if option == "values":
+                    return tuple(self.values[row_id])
+                return {}
+
+        class FakeBackend:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def connect_devices(self) -> None:
+                self.calls.append("connect")
+                raise RuntimeError("device offline")
+
+            def status(self, serial: str) -> Mapping[str, object]:
+                self.calls.append(f"status:{serial}")
+                return {"serial": serial, "kingdom": 4549}
+
+        class CapturingDispatcher:
+            def __init__(self) -> None:
+                self.submissions: list[tuple[object, object]] = []
+
+            def submit(self, action: object, callback: object) -> None:
+                self.submissions.append((action, callback))
+
+        backend = FakeBackend()
+        dispatcher = CapturingDispatcher()
+        launcher.tree = FakeTree()
+        launcher.backend = backend
+        launcher.dispatcher = dispatcher
+        launcher.settings = SimpleNamespace(
+            devices=(
+                SimpleNamespace(serial="device-1"),
+                SimpleNamespace(serial="device-2"),
+            )
+        )
+
+        launcher.refresh_devices()
+        action, _callback = dispatcher.submissions[0]
+        statuses, errors = action()  # type: ignore[operator]
+
+        self.assertEqual(
+            backend.calls,
+            ["connect", "status:device-1", "status:device-2"],
+        )
+        self.assertEqual(set(statuses), {"device-1", "device-2"})
+        self.assertIn("连接阶段", errors)
 
 
 class HuntWaveBatchTests(unittest.TestCase):
@@ -638,36 +709,28 @@ class HuntWaveBatchTests(unittest.TestCase):
 
         manager._dispatch_next_hunt({100, 101, 102})
 
-        self.assertEqual(len(dispatcher.submissions), 3)
+        self.assertEqual(len(dispatcher.submissions), 1)
         self.assertEqual(manager.hunt_batch.dispatch_active_ids, (100, 101, 102))
         self.assertEqual(manager.hunt_batch.dispatch_queued_ids, ())
         self.assertFalse(any(event[0] == "wait" for event in events))
 
-        for index, runtime_id in enumerate((100, 101, 102)):
-            action, callback = dispatcher.submissions[index]
-            result = action()  # type: ignore[operator]
-            self.assertEqual(march_calls[-1], runtime_id)
-            callback(result, None)  # type: ignore[operator]
-            if index < 2:
-                self.assertEqual(
-                    manager.hunt_batch.dispatch_active_ids,
-                    tuple(range(runtime_id + 1, 103)),
-                )
-                self.assertNotIn(("wait", (100, 101, 102)), events)
-
+        action, callback = dispatcher.submissions[0]
+        result = action()  # type: ignore[operator]
         self.assertEqual(march_calls, [100, 101, 102])
+        self.assertEqual(manager.hunt_batch.dispatch_active_ids, (100, 101, 102))
+        self.assertFalse(any(event[0] == "wait" for event in events))
+        callback(result, None)  # type: ignore[operator]
+
         self.assertEqual(
             call_order,
             [
                 ("ensure-world", "打工人"),
                 ("march", 100),
-                ("ensure-world", "打工人"),
                 ("march", 101),
-                ("ensure-world", "打工人"),
                 ("march", 102),
             ],
         )
-        self.assertEqual(len(dispatcher.submissions), 3)
+        self.assertEqual(len(dispatcher.submissions), 1)
         self.assertEqual(manager.hunt_batch.dispatch_pending_ids, ())
         self.assertEqual(manager.hunt_batch.wait_target_ids, (100, 101, 102))
         self.assertEqual(manager.hunt_batch.wave_phase, "resolved")
@@ -714,8 +777,29 @@ class HuntWaveBatchTests(unittest.TestCase):
 
         dispatcher = CapturingDispatcher()
         manager.dispatcher = dispatcher
+        batch_results = {
+            "results": [
+                {
+                    "serial": "device-1",
+                    "kingdom": 4549,
+                    "role": "打工人",
+                    "request_dispatched": False,
+                    "target": {"runtime_id": 100},
+                    "quest_status_after": "error",
+                    "error": "ambiguous",
+                },
+                {
+                    "serial": "device-1",
+                    "kingdom": 4549,
+                    "role": "打工人",
+                    "request_dispatched": True,
+                    "target": {"runtime_id": 101},
+                    "quest_status_after": 1,
+                },
+            ]
+        }
         manager.backend = SimpleNamespace(
-            march=lambda *args, **kwargs: {},
+            batch_intel=lambda *args, **kwargs: batch_results,
             inspect_intel=lambda serial: {
                 "serial": serial,
                 "kingdom": 4549,
@@ -726,28 +810,12 @@ class HuntWaveBatchTests(unittest.TestCase):
         )
 
         manager._dispatch_next_hunt({100, 101})
-        self.assertEqual(len(dispatcher.submissions), 2)
+        self.assertEqual(len(dispatcher.submissions), 1)
 
-        first_callback = dispatcher.submissions[0][1]
-        first_callback(None, RuntimeError("ambiguous"))  # type: ignore[operator]
+        action, callback = dispatcher.submissions[0]
+        callback(action(), None)  # type: ignore[operator]
         self.assertEqual(len(dispatcher.submissions), 2)
-        self.assertEqual(manager.hunt_batch.dispatch_active_ids, (101,))
-        self.assertFalse(any(event[0] == "wait" for event in events))
-
-        second_callback = dispatcher.submissions[1][1]
-        second_callback(
-            {
-                "serial": "device-1",
-                "kingdom": 4549,
-                "role": "打工人",
-                "request_dispatched": True,
-                "target": {"runtime_id": 101},
-                "quest_status_after": 1,
-            },
-            None,
-        )  # type: ignore[operator]
-        self.assertEqual(len(dispatcher.submissions), 3)
-        refresh_action, refresh_callback = dispatcher.submissions[2]
+        refresh_action, refresh_callback = dispatcher.submissions[1]
         refresh_callback(refresh_action(), None)  # type: ignore[operator]
 
         self.assertEqual(manager.hunt_batch.reconciled_dispatch_ids, (100,))
@@ -799,8 +867,29 @@ class HuntWaveBatchTests(unittest.TestCase):
 
         dispatcher = CapturingDispatcher()
         manager.dispatcher = dispatcher
+        batch_results = {
+            "results": [
+                {
+                    "serial": "device-1",
+                    "kingdom": 4549,
+                    "role": "打工人",
+                    "request_dispatched": False,
+                    "target": {"runtime_id": 100},
+                    "quest_status_after": "error",
+                    "error": "direct failure",
+                },
+                {
+                    "serial": "device-1",
+                    "kingdom": 4549,
+                    "role": "打工人",
+                    "request_dispatched": True,
+                    "target": {"runtime_id": 101},
+                    "quest_status_after": 1,
+                },
+            ]
+        }
         manager.backend = SimpleNamespace(
-            march=lambda *args, **kwargs: {},
+            batch_intel=lambda *args, **kwargs: batch_results,
             inspect_intel=lambda serial: {
                 "serial": serial,
                 "kingdom": 4549,
@@ -824,27 +913,15 @@ class HuntWaveBatchTests(unittest.TestCase):
         )
 
         manager._dispatch_next_hunt({100, 101})
-        self.assertEqual(len(dispatcher.submissions), 2)
-        first_callback = dispatcher.submissions[0][1]
-        first_callback(None, RuntimeError("direct failure"))  # type: ignore[operator]
-        second_callback = dispatcher.submissions[1][1]
-        second_callback(
-            {
-                "serial": "device-1",
-                "kingdom": 4549,
-                "role": "打工人",
-                "request_dispatched": True,
-                "target": {"runtime_id": 101},
-                "quest_status_after": 1,
-            },
-            None,
-        )  # type: ignore[operator]
-        refresh_action, refresh_callback = dispatcher.submissions[2]
+        self.assertEqual(len(dispatcher.submissions), 1)
+        action, callback = dispatcher.submissions[0]
+        callback(action(), None)  # type: ignore[operator]
+        refresh_action, refresh_callback = dispatcher.submissions[1]
         refresh_callback(refresh_action(), None)  # type: ignore[operator]
-        final_action, final_callback = dispatcher.submissions[3]
+        final_action, final_callback = dispatcher.submissions[2]
         final_callback(final_action(), None)  # type: ignore[operator]
 
-        self.assertEqual(len(dispatcher.submissions), 4)
+        self.assertEqual(len(dispatcher.submissions), 3)
         self.assertIsNone(manager.hunt_batch)
         self.assertTrue(batch.all_waves_done)
         self.assertEqual(

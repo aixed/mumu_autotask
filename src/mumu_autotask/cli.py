@@ -306,6 +306,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     battle.set_defaults(dry_run=True)
 
+    batch_intel = subparsers.add_parser(
+        "batch-intel",
+        help="dispatch one GUI intelligence wave through a single guarded Frida session",
+    )
+    batch_intel.add_argument("--serial", required=True)
+    batch_intel.add_argument(
+        "--expected-role",
+        help="require this exact active role before batch target selection",
+    )
+    batch_intel.add_argument(
+        "--target",
+        dest="batch_targets",
+        action="append",
+        required=True,
+        help=(
+            "exact target spec; use monster:<runtime_id>:<quality>, "
+            "hero:<runtime_id>, or rescue:<runtime_id>"
+        ),
+    )
+    batch_intel.add_argument(
+        "--execute",
+        dest="dry_run",
+        action="store_false",
+        help="dispatch every target in one guarded Frida session",
+    )
+    batch_intel.set_defaults(dry_run=True)
+
     formation = subparsers.add_parser(
         "inspect-formation",
         help="compute a read-only average-formation payload by skull quality",
@@ -431,6 +458,56 @@ def _polling_options(args: argparse.Namespace) -> tuple[float, float]:
     ):
         raise BusinessError("poll interval must be between 0.05 and 60 seconds")
     return float(timeout), float(poll_interval)
+
+
+def _parse_positive_id(value: str, label: str) -> int:
+    try:
+        runtime_id = int(value)
+    except ValueError as exc:
+        raise BusinessError(f"{label} must be a positive integer") from exc
+    if runtime_id <= 0:
+        raise BusinessError(f"{label} must be a positive integer")
+    return runtime_id
+
+
+def _parse_batch_target_specs(specs: Sequence[str]) -> tuple[dict[str, Any], ...]:
+    if not specs:
+        raise BusinessError("batch-intel requires at least one target")
+    parsed: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for index, spec in enumerate(specs, start=1):
+        if not isinstance(spec, str) or not spec.strip():
+            raise BusinessError(f"batch target {index} is empty")
+        parts = spec.strip().split(":")
+        category = parts[0].strip().lower()
+        if category == "monster":
+            if len(parts) != 3:
+                raise BusinessError(
+                    "monster batch target must use monster:<runtime_id>:<quality>"
+                )
+            runtime_id = _parse_positive_id(parts[1], "monster runtime id")
+            quality = normalize_quality(parts[2])
+            item = {
+                "category": "monster",
+                "runtime_id": runtime_id,
+                "quality": quality,
+            }
+        else:
+            category = normalize_battle_category(category)
+            if len(parts) != 2:
+                raise BusinessError(
+                    f"{category} batch target must use {category}:<runtime_id>"
+                )
+            runtime_id = _parse_positive_id(parts[1], f"{category} runtime id")
+            item = {
+                "category": category,
+                "runtime_id": runtime_id,
+            }
+        if runtime_id in seen:
+            raise BusinessError("batch target runtime ids must be unique")
+        seen.add(runtime_id)
+        parsed.append(item)
+    return tuple(parsed)
 
 
 def _operation_roles(
@@ -1525,6 +1602,356 @@ def _execute_march(
     return result
 
 
+def _batch_result_error(
+    profile: DeviceProfile,
+    role: str,
+    category: str,
+    runtime_id: int,
+    detail: str,
+    *,
+    quality: str | None = None,
+) -> dict[str, Any]:
+    target: dict[str, Any] = {"runtime_id": runtime_id}
+    if quality is not None:
+        target["quality"] = quality
+    return {
+        "serial": profile.serial,
+        "kingdom": 4549,
+        "role": role,
+        "category": category,
+        "quality": quality,
+        "request_dispatched": False,
+        "target": target,
+        "quest_status_after": "error",
+        "error": detail or "batch target dispatch failed",
+    }
+
+
+def _execute_batch_intel(
+    adb: AdbClient,
+    profile: DeviceProfile,
+    client: FridaLuaClient,
+    process: ProcessInfo,
+    target_specs: Sequence[dict[str, Any]],
+    *,
+    initial_roles: Sequence[str],
+    output_capacity: int,
+    verify_timeout_seconds: float = 8.0,
+    verify_poll_interval_seconds: float = 0.2,
+) -> dict[str, Any]:
+    locked_initial_roles = validate_role_whitelist(initial_roles)
+    specs = tuple(target_specs)
+    if not specs:
+        raise BusinessError("batch-intel requires at least one target")
+    if len({int(spec["runtime_id"]) for spec in specs}) != len(specs):
+        raise BusinessError("batch target runtime ids must be unique")
+
+    needs_monster = any(spec["category"] == "monster" for spec in specs)
+    battle_categories = tuple(
+        category
+        for category in ("hero", "rescue")
+        if any(spec["category"] == category for spec in specs)
+    )
+    inspect_monster_code = (
+        build_inspect_intel_lua(locked_initial_roles) if needs_monster else None
+    )
+    inspect_battle_codes = {
+        category: build_inspect_battle_intel_lua(locked_initial_roles, category)
+        for category in battle_categories
+    }
+    stage_hashes: dict[str, Any] = {}
+    if inspect_monster_code is not None:
+        stage_hashes["inspect_monster"] = script_sha256(inspect_monster_code)
+    for category, code in inspect_battle_codes.items():
+        stage_hashes[f"inspect_{category}"] = script_sha256(code)
+
+    scanner = _scanner(adb, profile)
+    state = _wait_unique_idle_lua_state(
+        adb,
+        profile,
+        scanner,
+        process,
+        "batch intelligence initialization",
+    )
+    role: str | None = None
+    selected_targets: list[tuple[dict[str, Any], Any]] = []
+    results: list[dict[str, Any]] = []
+
+    def lock_role(candidate: str) -> None:
+        nonlocal role
+        if role is None:
+            role = candidate
+        elif role != candidate:
+            raise BusinessError("active role changed during batch target inspection")
+
+    with client:
+        initialization = dict(client.initialize_bridge(profile.bridge_remote_path))
+        before = scanner.verify_idle_main(process.pid, state.address)
+        try:
+            last_result: LuaExecutionResult | None = None
+            monster_snapshot = None
+            if inspect_monster_code is not None:
+                monster_result = _execute_lua_when_idle(
+                    adb,
+                    profile,
+                    client,
+                    process,
+                    scanner,
+                    state,
+                    inspect_monster_code,
+                    output_capacity=output_capacity,
+                    operation="batch monster intelligence inspection",
+                )
+                last_result = monster_result
+                monster_snapshot = parse_intel_output(
+                    monster_result.output,
+                    locked_initial_roles,
+                )
+                lock_role(monster_snapshot.role)
+
+            battle_snapshots: dict[str, Any] = {}
+            for category, inspect_code in inspect_battle_codes.items():
+                battle_result = _execute_lua_when_idle(
+                    adb,
+                    profile,
+                    client,
+                    process,
+                    scanner,
+                    state,
+                    inspect_code,
+                    output_capacity=output_capacity,
+                    operation=f"batch {category} intelligence inspection",
+                )
+                last_result = battle_result
+                snapshot = parse_battle_intel_output(
+                    battle_result.output,
+                    locked_initial_roles,
+                    category,
+                )
+                lock_role(snapshot.role)
+                battle_snapshots[category] = snapshot
+
+            assert role is not None
+            active_roles = (role,)
+            for spec in specs:
+                category = str(spec["category"])
+                runtime_id = int(spec["runtime_id"])
+                if category == "monster":
+                    if monster_snapshot is None:
+                        raise BusinessError("monster snapshot is unavailable")
+                    target = select_march_target(
+                        monster_snapshot,
+                        str(spec["quality"]),
+                        runtime_id,
+                    )
+                else:
+                    target = select_battle_target(
+                        battle_snapshots[category],
+                        category,
+                        runtime_id,
+                    )
+                selected_targets.append((spec, target))
+
+            for index, (spec, target) in enumerate(selected_targets, start=1):
+                category = str(spec["category"])
+                runtime_id = int(spec["runtime_id"])
+                quality = str(spec.get("quality", getattr(target, "quality", "")))
+                try:
+                    if category == "monster":
+                        commit_code = build_direct_commit_march_lua(
+                            active_roles,
+                            target,
+                        )
+                        verify_code = build_verify_march_lua(active_roles, target)
+                        stage_hashes[f"target_{runtime_id}_commit"] = script_sha256(
+                            commit_code
+                        )
+                        stage_hashes[f"target_{runtime_id}_verify"] = script_sha256(
+                            verify_code
+                        )
+                        commit_result = _execute_lua_when_idle(
+                            adb,
+                            profile,
+                            client,
+                            process,
+                            scanner,
+                            state,
+                            commit_code,
+                            output_capacity=output_capacity,
+                            operation=f"batch direct march request {runtime_id}",
+                        )
+                        last_result = commit_result
+                        parse_commit_output(commit_result.output, active_roles, target)
+
+                        verify_deadline = time.monotonic() + verify_timeout_seconds
+                        verification_polls = 0
+                        accepted = False
+                        status_after = "not-sent"
+                        while True:
+                            verify_result = _execute_lua_when_idle(
+                                adb,
+                                profile,
+                                client,
+                                process,
+                                scanner,
+                                state,
+                                verify_code,
+                                output_capacity=output_capacity,
+                                operation=f"batch march verification {runtime_id}",
+                            )
+                            last_result = verify_result
+                            verification_polls += 1
+                            accepted, status_after = parse_verify_output(
+                                verify_result.output,
+                                active_roles,
+                                target,
+                            )
+                            if accepted:
+                                break
+                            if time.monotonic() >= verify_deadline:
+                                raise BusinessError(
+                                    "batch march request was invoked but no matching "
+                                    "server-created march or quest acceptance appeared "
+                                    f"before timeout for target {runtime_id}; last "
+                                    f"quest status was {status_after} after "
+                                    f"{verification_polls} polls"
+                                )
+                            time.sleep(verify_poll_interval_seconds)
+                        results.append(
+                            {
+                                "serial": profile.serial,
+                                "kingdom": 4549,
+                                "role": role,
+                                "category": "monster",
+                                "quality": quality,
+                                "request_dispatched": True,
+                                "target": asdict(target),
+                                "quest_status_after": status_after,
+                                "verification_polls": verification_polls,
+                            }
+                        )
+                    else:
+                        commit_code = build_start_battle_intel_lua(active_roles, target)
+                        verify_code = build_verify_battle_intel_lua(active_roles, target)
+                        stage_hashes[f"target_{runtime_id}_commit"] = script_sha256(
+                            commit_code
+                        )
+                        stage_hashes[f"target_{runtime_id}_verify"] = script_sha256(
+                            verify_code
+                        )
+                        commit_result = _execute_lua_when_idle(
+                            adb,
+                            profile,
+                            client,
+                            process,
+                            scanner,
+                            state,
+                            commit_code,
+                            output_capacity=output_capacity,
+                            operation=f"batch battle request {runtime_id}",
+                        )
+                        last_result = commit_result
+                        selected_heroes = parse_battle_commit_output(
+                            commit_result.output,
+                            active_roles,
+                            target,
+                        )
+                        verify_deadline = time.monotonic() + verify_timeout_seconds
+                        verification_polls = 0
+                        accepted = False
+                        status_after = "not-sent"
+                        while True:
+                            verify_result = _execute_lua_when_idle(
+                                adb,
+                                profile,
+                                client,
+                                process,
+                                scanner,
+                                state,
+                                verify_code,
+                                output_capacity=output_capacity,
+                                operation=f"batch battle verification {runtime_id}",
+                            )
+                            last_result = verify_result
+                            verification_polls += 1
+                            accepted, status_after = parse_battle_verify_output(
+                                verify_result.output,
+                                active_roles,
+                                target,
+                            )
+                            if accepted:
+                                break
+                            if time.monotonic() >= verify_deadline:
+                                raise BusinessError(
+                                    "batch battle request was invoked but no completed "
+                                    "or removed intelligence state appeared before "
+                                    f"timeout for target {runtime_id}; last quest "
+                                    f"status was {status_after} after "
+                                    f"{verification_polls} polls"
+                                )
+                            time.sleep(verify_poll_interval_seconds)
+                        results.append(
+                            {
+                                "serial": profile.serial,
+                                "kingdom": 4549,
+                                "role": role,
+                                "category": category,
+                                "quality": getattr(target, "quality", None),
+                                "request_dispatched": True,
+                                "target": asdict(target),
+                                "quest_status_after": status_after,
+                                "verification_polls": verification_polls,
+                                "selected_heroes": list(selected_heroes),
+                            }
+                        )
+                except Exception as exc:
+                    results.append(
+                        _batch_result_error(
+                            profile,
+                            role,
+                            category,
+                            runtime_id,
+                            str(exc),
+                            quality=quality if quality else None,
+                        )
+                    )
+                    LOGGER.warning(
+                        "batch target %s/%s failed: %s",
+                        index,
+                        len(selected_targets),
+                        exc,
+                    )
+            if last_result is None:
+                raise BusinessError("batch intelligence inspection produced no result")
+        finally:
+            after = _verify_process_after_lua_finally(
+                adb,
+                profile,
+                scanner,
+                process,
+                state,
+                "batch intelligence workflow",
+            )
+
+    assert role is not None
+    result = _execution_payload(initialization, state, before, after, last_result)
+    result.update(
+        {
+            "dry_run": False,
+            "batch_executed": True,
+            "role": role,
+            "item_count": len(selected_targets),
+            "target_count": len(selected_targets),
+            "request_dispatched": all(
+                item.get("request_dispatched") is True for item in results
+            ),
+            "results": results,
+            "stage_script_sha256": stage_hashes,
+        }
+    )
+    return result
+
+
 _MARCH_CAPTURE_REQUEST_MARKERS = (
     "WorldMarchHelper.RequestMarchStartOff",
     "WorldMarchCtrl.RequestWorldMarchStartOff",
@@ -2056,6 +2483,7 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
             "claim-intel",
             "march",
             "battle-intel",
+            "batch-intel",
             "inspect-formation",
             "capture-march",
             "unhook-march-capture",
@@ -2064,6 +2492,7 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
     )
     quality: str | None = None
     battle_category: str | None = None
+    batch_target_specs: tuple[dict[str, Any], ...] | None = None
     target_runtime_id: int | None = None
     target_ids: tuple[int, ...] | None = None
     timeout_seconds: float | None = None
@@ -2099,6 +2528,9 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
                 f"{args.command} target runtime id must be a positive integer"
             )
         code = build_inspect_battle_intel_lua(operation_roles, battle_category)
+    elif args.command == "batch-intel":
+        batch_target_specs = _parse_batch_target_specs(args.batch_targets)
+        code = build_scene_status_lua(operation_roles)
     elif args.command == "capture-march":
         timeout_seconds, poll_interval_seconds = _polling_options(args)
         code = build_install_march_capture_hook_lua(operation_roles)
@@ -2125,6 +2557,8 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
         payload["quality"] = quality
     if battle_category is not None:
         payload["category"] = battle_category
+    if batch_target_specs is not None:
+        payload["requested_batch_targets"] = list(batch_target_specs)
     if target_runtime_id is not None:
         payload["requested_target_id"] = target_runtime_id
     if target_ids is not None:
@@ -2135,6 +2569,7 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
     if args.dry_run and args.command not in {
         "march",
         "battle-intel",
+        "batch-intel",
         "claim-intel",
         "ensure-world",
     }:
@@ -2190,6 +2625,25 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
                 output_capacity=settings.frida.output_capacity,
             )
         )
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+
+    if args.command == "batch-intel":
+        assert batch_target_specs is not None
+        if args.dry_run:
+            payload.update({"dry_run": True, "lua_executed": False})
+        else:
+            payload.update(
+                _execute_batch_intel(
+                    adb,
+                    profile,
+                    client,
+                    process,
+                    batch_target_specs,
+                    initial_roles=operation_roles,
+                    output_capacity=settings.frida.output_capacity,
+                )
+            )
         print(json.dumps(payload, ensure_ascii=False))
         return 0
 

@@ -385,6 +385,7 @@ class CliTests(unittest.TestCase):
             "wait-intel",
             "claim-intel",
             "march",
+            "batch-intel",
             "inspect-formation",
             "capture-march",
             "unhook-march-capture",
@@ -393,6 +394,8 @@ class CliTests(unittest.TestCase):
                 args = [command, "--serial", "device-1"]
                 if command in {"march", "inspect-formation"}:
                     args.extend(("--quality", "orange"))
+                elif command == "batch-intel":
+                    args.extend(("--target", "monster:71:yellow"))
                 elif command in {"wait-intel", "claim-intel"}:
                     args.extend(
                         (

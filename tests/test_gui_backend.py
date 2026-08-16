@@ -355,6 +355,41 @@ class GuiBackendTests(unittest.TestCase):
             ),
         )
 
+    def test_backend_batch_intel_uses_one_explicit_execute_command(self) -> None:
+        runner = FakeRunner(['{"serial":"device-1","results":[]}\n'])
+        backend = GuiBackend(runner)  # type: ignore[arg-type]
+
+        backend.batch_intel(
+            "device-1",
+            (
+                {"category": "monster", "runtime_id": 420, "quality": "yellow"},
+                {"category": "hero", "runtime_id": 501, "quality": "blue"},
+                {"category": "rescue", "runtime_id": 601, "quality": "green"},
+            ),
+            expected_role="打工人",
+        )
+
+        self.assertEqual(
+            runner.calls[0],
+            (
+                (
+                    "batch-intel",
+                    "--serial",
+                    "device-1",
+                    "--target",
+                    "monster:420:yellow",
+                    "--target",
+                    "hero:501",
+                    "--target",
+                    "rescue:601",
+                    "--expected-role",
+                    "打工人",
+                    "--execute",
+                ),
+                300,
+            ),
+        )
+
     def test_backend_wait_and_claim_keep_every_exact_target_id(self) -> None:
         runner = FakeRunner(
             [

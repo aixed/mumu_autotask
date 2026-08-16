@@ -760,6 +760,52 @@ class GuiBackend:
             raise GuiBackendError("自动处理战斗情报命令返回了意外的数据条数")
         return payloads[0]
 
+    def batch_intel(
+        self,
+        serial: str,
+        targets: Sequence[Mapping[str, Any]],
+        *,
+        expected_role: str | None = None,
+    ) -> Mapping[str, Any]:
+        if isinstance(targets, (str, bytes)) or not targets:
+            raise GuiBackendError("批量情报目标必须是非空列表")
+        arguments = ["batch-intel", "--serial", serial]
+        for target in targets:
+            if not isinstance(target, Mapping):
+                raise GuiBackendError("批量情报目标必须是对象")
+            category = target.get("category", "monster")
+            runtime_id = target.get("runtime_id")
+            if (
+                not isinstance(category, str)
+                or isinstance(runtime_id, bool)
+                or not isinstance(runtime_id, int)
+                or runtime_id <= 0
+            ):
+                raise GuiBackendError("批量情报目标缺少有效类别或目标 ID")
+            normalized_category = category.strip().lower()
+            if normalized_category == "monster":
+                quality = target.get("quality")
+                if not isinstance(quality, str):
+                    raise GuiBackendError("野兽批量目标缺少品质")
+                arguments.extend(
+                    (
+                        "--target",
+                        f"monster:{runtime_id}:{quality.strip().lower()}",
+                    )
+                )
+            elif normalized_category in {"hero", "rescue"}:
+                arguments.extend(("--target", f"{normalized_category}:{runtime_id}"))
+            else:
+                raise GuiBackendError(f"不支持的批量情报类别：{category!r}")
+        if expected_role is not None:
+            arguments.extend(("--expected-role", _validate_expected_role(expected_role)))
+        arguments.append("--execute")
+        result = self.runner.run(arguments, timeout=300)
+        payloads = parse_json_lines(result.stdout)
+        if len(payloads) != 1:
+            raise GuiBackendError("批量情报命令返回了意外的数据条数")
+        return payloads[0]
+
     def wait_intel(
         self,
         serial: str,

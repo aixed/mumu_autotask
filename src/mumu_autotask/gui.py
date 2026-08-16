@@ -1322,9 +1322,12 @@ class LauncherApp:
             self.tree.item(row_id, values=values, tags=("checking",))
 
         def action() -> tuple[dict[str, Mapping[str, Any]], dict[str, str]]:
-            self.backend.connect_devices()
             statuses: dict[str, Mapping[str, Any]] = {}
             errors: dict[str, str] = {}
+            try:
+                self.backend.connect_devices()
+            except Exception as exc:
+                errors["连接阶段"] = str(exc)
             for profile in self.settings.devices:
                 try:
                     statuses[profile.serial] = self.backend.status(profile.serial)
@@ -1485,8 +1488,8 @@ class DeviceManagerWindow:
 
         self.window = tk.Toplevel(launcher.root)
         self.window.title(f"自动狩猎管理 - {_profile_name(profile)}")
-        self.window.geometry("900x700")
-        self.window.minsize(780, 620)
+        self.window.geometry("900x780")
+        self.window.minsize(780, 700)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.window.configure(background="#F4F6F8")
         preference_errors: list[str] = []
@@ -1589,7 +1592,7 @@ class DeviceManagerWindow:
         self.window.columnconfigure(0, weight=1)
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(3, weight=1)
-        outer.rowconfigure(5, weight=1)
+        outer.rowconfigure(5, weight=2)
 
         title = ttk.Frame(outer)
         title.grid(row=0, column=0, sticky="ew")
@@ -1769,7 +1772,7 @@ class DeviceManagerWindow:
         log_frame.columnconfigure(0, weight=1)
         self.log_text = tk.Text(
             log_frame,
-            height=8,
+            height=13,
             wrap="word",
             font=("Consolas", 9),
             background="#FFFFFF",
@@ -2138,6 +2141,7 @@ class DeviceManagerWindow:
         if batch is None or not self.exists or batch.wave_phase != "dispatching":
             return
         submitted = 0
+        targets: list[HuntBatchTarget] = []
         while True:
             try:
                 target = batch.begin_next_dispatch()
@@ -2148,6 +2152,7 @@ class DeviceManagerWindow:
             if target is None:
                 break
             submitted += 1
+            targets.append(target)
             ordinal = next(
                 index
                 for index, queued in enumerate(batch.targets, start=1)
@@ -2163,24 +2168,50 @@ class DeviceManagerWindow:
                 f"正在提交 {wave_ordinal}/{len(batch.current_wave)}：{target.label}"
             )
             self._log(
-                f"并发发起 {ordinal}/{len(batch.targets)}：{target.label}。"
-            )
-            self.dispatcher.submit(
-                lambda target=target: self._guarded_task_target(target),
-                lambda value, error, batch=batch, target=target: self._hunt_finished(
-                    batch,
-                    target,
-                    value,
-                    error,
-                ),
+                f"批量发起 {ordinal}/{len(batch.targets)}：{target.label}。"
             )
         if submitted == 0:
             self._resolve_wave_dispatches()
             return
+        frozen_targets = tuple(targets)
+        self.dispatcher.submit(
+            lambda targets=frozen_targets: self._guarded_task_targets(targets),
+            lambda value, error, batch=batch, targets=frozen_targets: (
+                self._hunt_batch_dispatch_finished(batch, targets, value, error)
+            ),
+        )
         self.action_text.set(
             f"第 {batch.wave_number}/{len(batch.waves)} 波，"
-            f"已提交 {submitted} 个任务，等待出征回执..."
+            f"已通过单会话提交 {submitted} 个任务，等待出征回执..."
         )
+
+    def _guarded_task_targets(
+        self,
+        targets: Sequence[HuntBatchTarget],
+    ) -> Mapping[str, Any]:
+        ensure_world = getattr(self.backend, "ensure_world", None)
+        if callable(ensure_world):
+            ensure_world(
+                self.profile.serial,
+                expected_role=self.hunt_role,
+            )
+        batch_intel = getattr(self.backend, "batch_intel", None)
+        if callable(batch_intel):
+            payload_targets = [
+                {
+                    "category": target.category,
+                    "runtime_id": target.runtime_id,
+                    "quality": target.quality,
+                }
+                for target in targets
+            ]
+            return batch_intel(
+                self.profile.serial,
+                payload_targets,
+                expected_role=self.hunt_role,
+            )
+        results = [self._dispatch_task_target(target) for target in targets]
+        return {"results": results}
 
     def _guarded_task_target(self, target: HuntBatchTarget) -> Mapping[str, Any]:
         ensure_world = getattr(self.backend, "ensure_world", None)
@@ -2189,6 +2220,9 @@ class DeviceManagerWindow:
                 self.profile.serial,
                 expected_role=self.hunt_role,
             )
+        return self._dispatch_task_target(target)
+
+    def _dispatch_task_target(self, target: HuntBatchTarget) -> Mapping[str, Any]:
         if target.category in {"hero", "rescue"}:
             return self.backend.battle_intel(
                 self.profile.serial,
@@ -2203,6 +2237,56 @@ class DeviceManagerWindow:
             expected_role=self.hunt_role,
         )
 
+    def _hunt_batch_dispatch_finished(
+        self,
+        expected_batch: HuntWaveBatch,
+        targets: Sequence[HuntBatchTarget],
+        value: Any | None,
+        error: Exception | None,
+    ) -> None:
+        batch = self.hunt_batch
+        if not self.exists or batch is not expected_batch:
+            return
+        if error is not None:
+            for target in targets:
+                self._record_target_dispatch_result(batch, target, None, error)
+            self._resolve_wave_dispatches()
+            return
+        payload = value if isinstance(value, Mapping) else {}
+        raw_results = payload.get("results")
+        results_by_id: dict[int, Mapping[str, Any]] = {}
+        if isinstance(raw_results, list):
+            for item in raw_results:
+                if not isinstance(item, Mapping):
+                    continue
+                target_payload = item.get("target")
+                runtime_id = (
+                    target_payload.get("runtime_id")
+                    if isinstance(target_payload, Mapping)
+                    else None
+                )
+                if isinstance(runtime_id, int) and not isinstance(runtime_id, bool):
+                    results_by_id[runtime_id] = item
+        for target in targets:
+            result = results_by_id.get(target.runtime_id)
+            if result is None:
+                self._record_target_dispatch_result(
+                    batch,
+                    target,
+                    None,
+                    HuntBatchError("批量回执缺少该目标结果"),
+                )
+            elif result.get("error"):
+                self._record_target_dispatch_result(
+                    batch,
+                    target,
+                    None,
+                    HuntBatchError(str(result["error"])),
+                )
+            else:
+                self._record_target_dispatch_result(batch, target, result, None)
+        self._resolve_wave_dispatches()
+
     def _hunt_finished(
         self,
         expected_batch: HuntWaveBatch,
@@ -2213,6 +2297,16 @@ class DeviceManagerWindow:
         batch = self.hunt_batch
         if not self.exists or batch is not expected_batch:
             return
+        self._record_target_dispatch_result(batch, target, value, error)
+        self._resolve_wave_dispatches()
+
+    def _record_target_dispatch_result(
+        self,
+        batch: HuntWaveBatch,
+        target: HuntBatchTarget,
+        value: Any | None,
+        error: Exception | None,
+    ) -> None:
         if target.runtime_id not in batch.dispatch_active_ids:
             self._log(f"忽略重复或过期的出征回执：目标 {target.runtime_id}。")
             return
@@ -2222,7 +2316,6 @@ class DeviceManagerWindow:
                 f"{target.label} 命令返回错误：{error}；"
                 "等待本波其余回执后统一刷新核对。"
             )
-            self._resolve_wave_dispatches()
             return
 
         payload = value if isinstance(value, Mapping) else {}
@@ -2230,7 +2323,6 @@ class DeviceManagerWindow:
         if expected_role is None:
             batch.mark_attempt_error(target.runtime_id, "批次开始角色未冻结")
             self._log("批次开始角色未冻结；等待本波其余回执后统一刷新核对。")
-            self._resolve_wave_dispatches()
             return
         try:
             runtime_id = validate_march_intel_receipt(
@@ -2246,7 +2338,6 @@ class DeviceManagerWindow:
                 f"{target.label} 回执验证失败：{detail}；"
                 "等待本波其余回执后统一刷新核对。"
             )
-            self._resolve_wave_dispatches()
             return
 
         status = str(payload.get("quest_status_after", "-"))
@@ -2260,7 +2351,6 @@ class DeviceManagerWindow:
             self._log(
                 f"已发起：{target.label}；任务状态 {status}。"
             )
-            self._resolve_wave_dispatches()
 
     def _resolve_wave_dispatches(self) -> None:
         batch = self.hunt_batch
