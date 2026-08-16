@@ -972,6 +972,142 @@ return table.concat({
 '''
 
 
+_INSPECT_FORMATION_BODY = r'''
+local role_hex, kingdom = checked_identity()
+local quest, config = require_target(
+    TARGET_RUNTIME_ID,
+    TARGET_QUEST_ID,
+    TARGET_QUALITY_ID,
+    TARGET_WORLD_X,
+    TARGET_WORLD_Y,
+    TARGET_EXPIRES_AT,
+    TARGET_MONSTER_ID,
+    TARGET_LEVEL,
+    TARGET_STAMINA_COST
+)
+local initial_status = integer(quest._status, "initial quest status", false)
+if initial_status ~= 1 then
+    fail("selected intelligence was not available before formation inspection")
+end
+local world_ok, quest_x, quest_y = pcall(quest.GetWorldPos, quest)
+if not world_ok or quest_x ~= TARGET_WORLD_X or quest_y ~= TARGET_WORLD_Y then
+    fail("selected intelligence world position changed")
+end
+local march_map_type = GDefine.WorldMarchDefine.MARCH_MAP_TYPE.NORMAL
+local march_type = WorldMapDefine.march_type.transaction_slg
+local map_object_type = WorldMapDefine.mapobj_type.map_monster
+local extra = { event_id = TARGET_RUNTIME_ID }
+local formation_march_type = GHelper.WorldMarchHelper.GetAttackMarchType(
+    map_object_type
+)
+local hero_list = GHelper.ExpeditionHelper.GetRecommendedHeroList(
+    false,
+    false,
+    formation_march_type,
+    config.condition,
+    march_map_type,
+    extra
+)
+if type(hero_list) ~= "table"
+    or GHelper.FormationHelper.IsHaveCaptain(hero_list) ~= true then
+    fail("formation inspection selected no captain")
+end
+local fight_type = GDefine.HeroDefine.HeroAttrType.SLG
+local formation_limit = GHelper.ExpeditionHelper.GetTroopLimit(
+    march_map_type,
+    hero_list,
+    fight_type,
+    extra
+)
+formation_limit = integer(formation_limit, "formation limit", false)
+local yields = GHelper.ExpeditionHelper.GetResourceYields(march_type, nil)
+if type(yields) ~= "number" then
+    fail("resource yields is not numeric")
+end
+local open_params = {
+    marchMapType = march_map_type,
+    marchType = march_type,
+    formationNumLimt = formation_limit,
+    targetId = config.condition,
+    yields = yields,
+    isAttack = false,
+}
+local soldier_list = GHelper.ExpeditionHelper.GetSoldierInfoByMarchType(
+    formation_march_type,
+    0,
+    false,
+    open_params,
+    nil
+)
+if type(soldier_list) ~= "table" then
+    fail("formation inspection soldier list is unavailable")
+end
+local averaged_soldiers = GHelper.FormationHelper.GetAverageSoldierList(
+    march_map_type,
+    soldier_list,
+    formation_limit,
+    false,
+    extra
+)
+if type(averaged_soldiers) ~= "table" then
+    fail("formation inspection average soldier list is unavailable")
+end
+local selected = 0
+for _, soldier_info in ipairs(averaged_soldiers) do
+    if type(soldier_info) == "table"
+        and type(soldier_info.selectNum) == "number" then
+        selected = selected + soldier_info.selectNum
+    end
+end
+if selected <= 0 then
+    fail("formation inspection selected no soldiers")
+end
+local hero_id, soldier = GHelper.FormationHelper.DealWithExpeditionInfo(
+    hero_list,
+    averaged_soldiers
+)
+if type(hero_id) ~= "table" or type(soldier) ~= "table" then
+    fail("formation inspection payload is unavailable")
+end
+local lines = {
+    "MUMU_AUTOTASK\t1\tFORMATION",
+    "ROLE\t" .. role_hex,
+    "KINGDOM\t" .. tostring(kingdom),
+    "TARGET\t" .. tostring(TARGET_RUNTIME_ID),
+    "STATUS\t" .. tostring(initial_status),
+    "POINT_END\t" .. tostring(TARGET_WORLD_X) .. "\t" .. tostring(TARGET_WORLD_Y),
+    "MONSTER\t" .. tostring(config.condition),
+    "STAMINA\t" .. tostring(TARGET_STAMINA_COST),
+    "MARCH_MAP_TYPE\t" .. tostring(march_map_type),
+    "MARCH_TYPE\t" .. tostring(march_type),
+    "MAP_OBJECT_TYPE\t" .. tostring(map_object_type),
+    "FORMATION_MARCH_TYPE\t" .. tostring(formation_march_type),
+    "FORMATION_LIMIT\t" .. tostring(formation_limit),
+    "SELECTED\t" .. tostring(selected),
+}
+for key, value in pairs(hero_id) do
+    if type(key) == "number" then
+        lines[#lines + 1] = table.concat({
+            "HERO",
+            tostring(key),
+            tostring(value),
+        }, "\t")
+    end
+end
+for key, value in pairs(soldier) do
+    if type(key) == "number" then
+        lines[#lines + 1] = table.concat({
+            "SOLDIER",
+            tostring(key),
+            tostring(value),
+        }, "\t")
+    end
+end
+lines[#lines + 1] = "END\t1"
+return table.concat(lines, "\n")
+'''
+
+
 _DIRECT_COMMIT_MARCH_BODY = r'''
 local role_hex, kingdom = checked_identity()
 local quest, config = require_target(
@@ -1599,6 +1735,10 @@ def build_commit_march_lua(roles: Sequence[str], target: IntelItem) -> str:
     return _target_lua(roles, target, _COMMIT_MARCH_BODY)
 
 
+def build_inspect_formation_lua(roles: Sequence[str], target: IntelItem) -> str:
+    return _target_lua(roles, target, _INSPECT_FORMATION_BODY)
+
+
 def build_direct_commit_march_lua(roles: Sequence[str], target: IntelItem) -> str:
     return _target_lua(roles, target, _DIRECT_COMMIT_MARCH_BODY)
 
@@ -2122,6 +2262,7 @@ __all__ = [
     "build_commit_march_lua",
     "build_direct_commit_march_lua",
     "build_install_march_capture_hook_lua",
+    "build_inspect_formation_lua",
     "build_inspect_intel_lua",
     "build_intel_status_lua",
     "build_march_ready_lua",

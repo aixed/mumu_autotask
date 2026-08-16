@@ -307,6 +307,33 @@ def capture_unhook_protocol(role: str) -> str:
     )
 
 
+def formation_protocol(role: str, target_id: int = 70) -> str:
+    return "\n".join(
+        (
+            "MUMU_AUTOTASK\t1\tFORMATION",
+            f"ROLE\t{role.encode('utf-8').hex()}",
+            "KINGDOM\t4549",
+            f"TARGET\t{target_id}",
+            "STATUS\t1",
+            "CITY\t700\t701",
+            "POINT_END\t759\t774",
+            "MONSTER\t813",
+            "STAMINA\t10",
+            "MARCH_MAP_TYPE\t1",
+            "MARCH_TYPE\t302",
+            "MAP_OBJECT_TYPE\t4",
+            "FORMATION_MARCH_TYPE\t302",
+            "FORMATION_LIMIT\t14000",
+            "SELECTED\t14000",
+            "HERO_COUNT\t3",
+            "HERO\t1\t50006",
+            "SOLDIER_COUNT\t1",
+            "SOLDIER\t10100\t14000",
+            "END\t1",
+        )
+    )
+
+
 def scene_protocol(
     role: str,
     *,
@@ -358,12 +385,13 @@ class CliTests(unittest.TestCase):
             "wait-intel",
             "claim-intel",
             "march",
+            "inspect-formation",
             "capture-march",
             "unhook-march-capture",
         ):
             with self.subTest(command=command):
                 args = [command, "--serial", "device-1"]
-                if command == "march":
+                if command in {"march", "inspect-formation"}:
                     args.extend(("--quality", "orange"))
                 elif command in {"wait-intel", "claim-intel"}:
                     args.extend(
@@ -497,6 +525,53 @@ class CliTests(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertIn("MARCH_CAPTURE_UNHOOK", result["output"])
         self.assertEqual(events.count("lua-execute"), 1)
+
+    def test_inspect_formation_executes_readonly_payload(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        role_hex = role.encode("utf-8").hex()
+        intel = "\n".join(
+            (
+                "MUMU_AUTOTASK\t1\tINTEL",
+                f"ROLE\t{role_hex}",
+                "KINGDOM\t4549",
+                "ITEM\t70\t1700\t1\t759\t774\t1900000000"
+                "\tpurple\t4\t813\t13\t10",
+                "END\t1",
+            )
+        )
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(
+                    events,
+                    outputs=(intel, formation_protocol(role, 70)),
+                ),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args(
+                        "inspect-formation",
+                        dry_run=False,
+                        quality="purple",
+                        target_id=70,
+                        expected_role=role,
+                    ),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["target"]["runtime_id"], 70)
+        self.assertFalse(result["request_dispatched"])
+        self.assertIn("MARCH_TYPE\t302", result["output"])
+        self.assertEqual(events.count("lua-execute"), 2)
+        self.assertFalse(any(event.startswith("input-tap:") for event in events))
 
     def test_devices_connect_restores_configured_frida_forwards(self) -> None:
         events: list[str] = []

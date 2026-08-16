@@ -21,6 +21,7 @@ from .business import (
     build_claim_intel_lua,
     build_close_expedition_lua,
     build_install_march_capture_hook_lua,
+    build_inspect_formation_lua,
     build_inspect_intel_lua,
     build_intel_status_lua,
     build_march_ready_lua,
@@ -249,6 +250,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="average the formation and march after all guards pass",
     )
     march.set_defaults(dry_run=True)
+
+    formation = subparsers.add_parser(
+        "inspect-formation",
+        help="compute a read-only average-formation payload by skull quality",
+    )
+    formation.add_argument("--serial", required=True)
+    formation.add_argument(
+        "--expected-role",
+        help="require this exact active role before target selection",
+    )
+    formation.add_argument(
+        "--quality",
+        required=True,
+        help=(
+            "green/绿色, blue/蓝色, purple/紫色, yellow/黄色 "
+            "(orange/橙色 is an alias for yellow)"
+        ),
+    )
+    formation.add_argument(
+        "--target-id",
+        type=int,
+        help="require this exact intelligence runtime ID instead of choosing by quality",
+    )
+    formation.add_argument(
+        "--execute",
+        dest="dry_run",
+        action="store_false",
+        help="run the read-only formation inspection after all guards pass",
+    )
+    formation.set_defaults(dry_run=True)
 
     capture_march = subparsers.add_parser(
         "capture-march",
@@ -888,6 +919,95 @@ def _execute_ensure_world(
             "scene_before": _scene_status_payload(initial_status)["scene"],
             "scene_after": _scene_status_payload(final_status)["scene"],
             "role": final_status.role,
+            "stage_script_sha256": stage_hashes,
+        }
+    )
+    return result
+
+
+def _execute_inspect_formation(
+    adb: AdbClient,
+    profile: DeviceProfile,
+    client: FridaLuaClient,
+    process: ProcessInfo,
+    quality: str,
+    *,
+    initial_roles: Sequence[str],
+    target_runtime_id: int | None = None,
+    output_capacity: int,
+) -> dict[str, Any]:
+    locked_initial_roles = validate_role_whitelist(initial_roles)
+    inspect_code = build_inspect_intel_lua(locked_initial_roles)
+    stage_hashes: dict[str, str] = {
+        "inspect": script_sha256(inspect_code),
+    }
+    scanner = _scanner(adb, profile)
+    state = _wait_unique_idle_lua_state(
+        adb,
+        profile,
+        scanner,
+        process,
+        "formation inspection initialization",
+    )
+    with client:
+        initialization = dict(client.initialize_bridge(profile.bridge_remote_path))
+        before = scanner.verify_idle_main(process.pid, state.address)
+        try:
+            inspect_result = _execute_lua_when_idle(
+                adb,
+                profile,
+                client,
+                process,
+                scanner,
+                state,
+                inspect_code,
+                output_capacity=output_capacity,
+                operation="formation intelligence inspection",
+            )
+            snapshot = parse_intel_output(
+                inspect_result.output,
+                locked_initial_roles,
+            )
+            target = select_march_target(snapshot, quality, target_runtime_id)
+            active_roles = (snapshot.role,)
+            formation_code = build_inspect_formation_lua(active_roles, target)
+            stage_hashes["formation"] = script_sha256(formation_code)
+            formation_result = _execute_lua_when_idle(
+                adb,
+                profile,
+                client,
+                process,
+                scanner,
+                state,
+                formation_code,
+                output_capacity=output_capacity,
+                operation="read-only formation inspection",
+            )
+        finally:
+            after = _verify_process_after_lua_finally(
+                adb,
+                profile,
+                scanner,
+                process,
+                state,
+                "inspect-formation",
+            )
+
+    result = _execution_payload(
+        initialization,
+        state,
+        before,
+        after,
+        formation_result,
+    )
+    result.update(
+        {
+            "dry_run": False,
+            "role": snapshot.role,
+            "item_count": len(snapshot.items),
+            "target": asdict(target),
+            "request_dispatched": False,
+            "output": formation_result.output,
             "stage_script_sha256": stage_hashes,
         }
     )
@@ -1641,6 +1761,7 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
             "wait-intel",
             "claim-intel",
             "march",
+            "inspect-formation",
             "capture-march",
             "unhook-march-capture",
         }
@@ -1663,11 +1784,13 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
         target_ids = normalize_target_ids(args.target_ids)
         timeout_seconds, poll_interval_seconds = _polling_options(args)
         code = build_intel_status_lua(operation_roles, target_ids)
-    elif args.command == "march":
+    elif args.command in {"march", "inspect-formation"}:
         quality = normalize_quality(args.quality)
         target_runtime_id = getattr(args, "target_id", None)
         if target_runtime_id is not None and target_runtime_id <= 0:
-            raise BusinessError("march target runtime id must be a positive integer")
+            raise BusinessError(
+                f"{args.command} target runtime id must be a positive integer"
+            )
         code = build_inspect_intel_lua(operation_roles)
     elif args.command == "capture-march":
         timeout_seconds, poll_interval_seconds = _polling_options(args)
@@ -1716,6 +1839,22 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
                 initial_roles=operation_roles,
                 target_runtime_id=target_runtime_id,
                 dry_run=args.dry_run,
+                output_capacity=settings.frida.output_capacity,
+            )
+        )
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+
+    if args.command == "inspect-formation":
+        payload.update(
+            _execute_inspect_formation(
+                adb,
+                profile,
+                client,
+                process,
+                quality,
+                initial_roles=operation_roles,
+                target_runtime_id=target_runtime_id,
                 output_capacity=settings.frida.output_capacity,
             )
         )

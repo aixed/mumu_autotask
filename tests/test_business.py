@@ -12,6 +12,7 @@ from mumu_autotask.business import (
     build_claim_intel_lua,
     build_close_expedition_lua,
     build_commit_march_lua,
+    build_inspect_formation_lua,
     build_inspect_intel_lua,
     build_intel_status_lua,
     build_march_ready_lua,
@@ -155,6 +156,7 @@ class BusinessTests(unittest.TestCase):
         )
         open_code = build_open_march_lua((ROLE,), target)
         commit_code = build_commit_march_lua((ROLE,), target)
+        formation_code = build_inspect_formation_lua((ROLE,), target)
         self.assertIn("TARGET_RUNTIME_ID = 71", open_code)
         self.assertIn("TARGET_WORLD_X = 759", open_code)
         self.assertIn("TARGET_MONSTER_ID = 813", open_code)
@@ -169,6 +171,13 @@ class BusinessTests(unittest.TestCase):
         self.assertNotIn("CheckSpecialWar", open_code)
         self.assertIn("GetSelfMarchMap", commit_code)
         self.assertIn("capture_self_march_ids(kingdom)", commit_code)
+        self.assertIn("GetRecommendedHeroList", formation_code)
+        self.assertIn("GetAverageSoldierList", formation_code)
+        self.assertIn("DealWithExpeditionInfo", formation_code)
+        self.assertIn("MUMU_AUTOTASK\\t1\\tFORMATION", formation_code)
+        self.assertNotIn("RequestMarchStartOff", formation_code)
+        self.assertNotIn("OpenView", formation_code)
+        self.assertNotIn("SendMsg", formation_code)
         verify_code = build_verify_march_lua((ROLE,), target)
         self.assertIn(
             'type(data) == "table" and data.transaction_slg or nil',

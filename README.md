@@ -182,6 +182,20 @@ python -m mumu_autotask --config config.json march `
 从初始状态 `1` 变为 `2/3` 也可作为 `PROOF=QUEST_STATUS`。没有这些证明就会失败，
 不会把普通成功码或单纯按钮调用当成出征成功。
 
+只读计算某个目标的平均配置 formation payload，用于和真实 UI 抓包对比；该命令不
+打开出征页、不点击、不发出征请求：
+
+```powershell
+python -m mumu_autotask --config config.json inspect-formation `
+  --serial 127.0.0.1:16480 --expected-role 打工仔 `
+  --quality blue --target-id 383 --execute
+```
+
+输出会包含 `MARCH_TYPE`、终点坐标、`event_id` 对应的 `TARGET`、`HERO` 和
+`SOLDIER` 表。若这些字段与真实 UI 抓到的
+`WorldMarchHelper.RequestMarchStartOff` 参数完全一致，但直接调用仍崩溃，则下一
+步重点不是继续猜 formation，而是把写入式调用切回游戏主线程/安全调度器执行。
+
 ### 诊断抓取真实出征参数
 
 `capture-march` 只用于分析真实 UI 点击时游戏自己传入
