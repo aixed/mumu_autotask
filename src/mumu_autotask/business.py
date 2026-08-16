@@ -365,7 +365,7 @@ local function exact_intel_statuses(target_ids)
                 fail("quest completion is not boolean")
             end
             raw_status = tostring(status)
-            if completed == true then
+            if status == 2 or completed == true then
                 state = "COMPLETED"
             else
                 state = "PENDING"

@@ -142,6 +142,7 @@ class BusinessTests(unittest.TestCase):
         self.assertIn("checked_identity()", status_code)
         self.assertIn("exact_intel_statuses(TARGET_RUNTIME_IDS)", status_code)
         self.assertIn('call(quest, "IsCompleted", "quest completion")', status_code)
+        self.assertIn("status == 2 or completed == true", status_code)
         self.assertNotIn("RequestReceiveAllQuestReward", status_code)
         self.assertNotIn("SendMsg", status_code)
         self.assertEqual(claim_code.count("RequestReceiveAllQuestReward"), 1)
@@ -282,16 +283,6 @@ class BusinessTests(unittest.TestCase):
             [INTEL_PENDING, INTEL_PENDING, INTEL_COMPLETED, INTEL_MISSING],
         )
         self.assertIsNone(snapshot.targets[-1].quest_status)
-        diagnostic_only = output.replace("PENDING\t1", "PENDING\t2").replace(
-            "COMPLETED\t2", "COMPLETED\t9"
-        )
-        diagnostic_snapshot = parse_intel_status_output(
-            diagnostic_only,
-            (ROLE,),
-            (71, 72, 73, 74),
-        )
-        self.assertEqual(diagnostic_snapshot.targets[0].quest_status, 2)
-        self.assertEqual(diagnostic_snapshot.targets[2].quest_status, 9)
         cases = (
             output.replace("TARGET\t72", "TARGET\t99", 1),
             output.replace("MISSING\tmissing", "MISSING\t2", 1),

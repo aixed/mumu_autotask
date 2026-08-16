@@ -222,6 +222,8 @@ def business_args(
     timeout: float = 1.0,
     poll_interval: float = 0.05,
     expected_role: str | None = None,
+    output_file=None,
+    keep_hook: bool = False,
 ) -> argparse.Namespace:
     return argparse.Namespace(
         command=command,
@@ -232,6 +234,8 @@ def business_args(
         timeout=timeout,
         poll_interval=poll_interval,
         expected_role=expected_role,
+        output_file=output_file,
+        keep_hook=keep_hook,
         dry_run=dry_run,
     )
 
@@ -258,6 +262,46 @@ def claim_protocol(role: str, target_ids: tuple[int, ...], *, sent: bool) -> str
             f"TARGETS\t{len(target_ids)}\t{targets}",
             f"SENT\t{int(sent)}",
             f"IDEMPOTENT\t{int(not sent)}",
+            "END\t1",
+        )
+    )
+
+
+def capture_records_protocol(role: str) -> str:
+    return "\n".join(
+        (
+            "MUMU_AUTOTASK\t1\tMARCH_CAPTURE_RECORDS",
+            f"ROLE\t{role.encode('utf-8').hex()}",
+            "KINGDOM\t4549",
+            "COUNT\t1",
+            "BEGIN_RECORD\t1",
+            "RECORD\t1\tWorldMarchHelper.RequestMarchStartOff",
+            "ARGC\t6",
+            "END_RECORD\t1",
+            "END\t1",
+        )
+    )
+
+
+def capture_install_protocol(role: str) -> str:
+    return "\n".join(
+        (
+            "MUMU_AUTOTASK\t1\tMARCH_CAPTURE_HOOK",
+            f"ROLE\t{role.encode('utf-8').hex()}",
+            "KINGDOM\t4549",
+            "INSTALLED\t1",
+            "END\t1",
+        )
+    )
+
+
+def capture_unhook_protocol(role: str) -> str:
+    return "\n".join(
+        (
+            "MUMU_AUTOTASK\t1\tMARCH_CAPTURE_UNHOOK",
+            f"ROLE\t{role.encode('utf-8').hex()}",
+            "KINGDOM\t4549",
+            "RESTORED\t2",
             "END\t1",
         )
     )
@@ -314,6 +358,8 @@ class CliTests(unittest.TestCase):
             "wait-intel",
             "claim-intel",
             "march",
+            "capture-march",
+            "unhook-march-capture",
         ):
             with self.subTest(command=command):
                 args = [command, "--serial", "device-1"]
@@ -332,6 +378,11 @@ class CliTests(unittest.TestCase):
                     )
                 self.assertTrue(parser.parse_args(args).dry_run)
                 self.assertFalse(parser.parse_args([*args, "--execute"]).dry_run)
+        capture_args = parser.parse_args(
+            ["capture-march", "--serial", "device-1", "--execute", "--keep-hook"]
+        )
+        self.assertFalse(capture_args.dry_run)
+        self.assertTrue(capture_args.keep_hook)
         for command in ("wait-intel", "claim-intel"):
             with self.subTest(command=command, missing="expected-role"):
                 with redirect_stderr(io.StringIO()):
@@ -339,6 +390,113 @@ class CliTests(unittest.TestCase):
                         parser.parse_args(
                             [command, "--serial", "device-1", "--target-id", "71"]
                         )
+
+    def test_capture_march_keep_hook_skips_uninstall(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(
+                    events,
+                    outputs=(
+                        capture_install_protocol(role),
+                        capture_records_protocol(role),
+                    ),
+                ),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args(
+                        "capture-march",
+                        dry_run=False,
+                        expected_role=role,
+                        keep_hook=True,
+                    ),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["captured_request"])
+        self.assertEqual(result["record_count"], 1)
+        self.assertFalse(result["hook_uninstalled"])
+        self.assertTrue(result["hook_left_installed"])
+        self.assertEqual(events.count("lua-execute"), 2)
+        self.assertEqual(events.count("frida-attach"), 1)
+        self.assertEqual(events.count("frida-detach"), 1)
+
+    def test_capture_march_default_uninstalls_after_capture(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(
+                    events,
+                    outputs=(
+                        capture_install_protocol(role),
+                        capture_records_protocol(role),
+                        capture_unhook_protocol(role),
+                    ),
+                ),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args(
+                        "capture-march",
+                        dry_run=False,
+                        expected_role=role,
+                    ),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["hook_uninstalled"])
+        self.assertFalse(result["hook_left_installed"])
+        self.assertEqual(events.count("lua-execute"), 3)
+
+    def test_unhook_march_capture_executes_uninstall_script(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(
+                    events,
+                    outputs=(capture_unhook_protocol(role),),
+                ),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args(
+                        "unhook-march-capture",
+                        dry_run=False,
+                        expected_role=role,
+                    ),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertIn("MARCH_CAPTURE_UNHOOK", result["output"])
+        self.assertEqual(events.count("lua-execute"), 1)
 
     def test_devices_connect_restores_configured_frida_forwards(self) -> None:
         events: list[str] = []

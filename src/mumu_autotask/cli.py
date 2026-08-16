@@ -277,12 +277,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="optional UTF-8 file to save the raw captured hook records",
     )
     capture_march.add_argument(
+        "--keep-hook",
+        action="store_true",
+        help=(
+            "leave the march capture hook installed after capture; "
+            "use unhook-march-capture to restore it later"
+        ),
+    )
+    capture_march.add_argument(
         "--execute",
         dest="dry_run",
         action="store_false",
         help="install the temporary hook after all guards pass",
     )
     capture_march.set_defaults(dry_run=True)
+
+    unhook_march = subparsers.add_parser(
+        "unhook-march-capture",
+        help="restore methods wrapped by capture-march --keep-hook",
+    )
+    unhook_march.add_argument("--serial", required=True)
+    unhook_march.add_argument(
+        "--expected-role",
+        help="require this exact active role before uninstalling the hook",
+    )
+    unhook_march.add_argument(
+        "--execute",
+        dest="dry_run",
+        action="store_false",
+        help="uninstall the march capture hook after all guards pass",
+    )
+    unhook_march.set_defaults(dry_run=True)
     return parser
 
 
@@ -1118,6 +1143,7 @@ def _execute_capture_march(
     timeout_seconds: float,
     poll_interval_seconds: float,
     output_file: Path | None,
+    keep_hook: bool = False,
 ) -> dict[str, Any]:
     locked_initial_roles = validate_role_whitelist(initial_roles)
     install_code = build_install_march_capture_hook_lua(locked_initial_roles)
@@ -1190,19 +1216,20 @@ def _execute_capture_march(
                 time.sleep(min(poll_interval_seconds, deadline - now))
         finally:
             try:
-                uninstall_result = _execute_lua_when_idle(
-                    adb,
-                    profile,
-                    client,
-                    process,
-                    scanner,
-                    state,
-                    uninstall_code,
-                    output_capacity=output_capacity,
-                    operation="capture hook uninstall",
-                )
-                uninstall_output = uninstall_result.output
-                last_result = uninstall_result if last_result is None else last_result
+                if not keep_hook:
+                    uninstall_result = _execute_lua_when_idle(
+                        adb,
+                        profile,
+                        client,
+                        process,
+                        scanner,
+                        state,
+                        uninstall_code,
+                        output_capacity=output_capacity,
+                        operation="capture hook uninstall",
+                    )
+                    uninstall_output = uninstall_result.output
+                    last_result = uninstall_result if last_result is None else last_result
             finally:
                 after = _verify_process_after_lua_finally(
                     adb,
@@ -1225,6 +1252,7 @@ def _execute_capture_march(
             "dry_run": False,
             "hook_installed": True,
             "hook_uninstalled": bool(uninstall_output),
+            "hook_left_installed": keep_hook and not bool(uninstall_output),
             "captured_request": captured_request,
             "record_count": record_count,
             "poll_count": poll_count,
@@ -1614,6 +1642,7 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
             "claim-intel",
             "march",
             "capture-march",
+            "unhook-march-capture",
         }
         else tuple(profile.roles)
     )
@@ -1643,6 +1672,8 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
     elif args.command == "capture-march":
         timeout_seconds, poll_interval_seconds = _polling_options(args)
         code = build_install_march_capture_hook_lua(operation_roles)
+    elif args.command == "unhook-march-capture":
+        code = build_uninstall_march_capture_hook_lua(operation_roles)
     else:
         raise ConfigError(f"unsupported command {args.command!r}")
 
@@ -1765,6 +1796,7 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
                 timeout_seconds=timeout_seconds,
                 poll_interval_seconds=poll_interval_seconds,
                 output_file=args.output_file,
+                keep_hook=args.keep_hook,
             )
         )
         print(json.dumps(payload, ensure_ascii=False))

@@ -22,8 +22,8 @@ Frida 的瞬态 `breakpoint triggered` 做短重试；`access violation` 会被�
 - 目标绑定运行 ID、任务 ID、品质、坐标、过期时间、怪物 ID、等级和体力消耗；
   任一字段变化都会停止。
 - 当前可安全执行的是：返回野外、只读读取情报、等待情报完成、一键领取。真实出征
-  的 FridaDirect 写入路径已被硬保护拦截；下一步需要补齐纯 UI marker 定位后再恢复
-  “平均配置 -> 出征”。
+  的 FridaDirect 写入路径已被硬保护拦截；下一步需要复原真实 formation 参数，并把
+  写入式调用放回游戏安全执行上下文后再恢复“平均配置 -> 出征”。
 
 | ADB serial | MuMu 实例 | 允许角色 | 本机 Frida 地址 | 实例内端口 |
 | --- | --- | --- | --- | --- |
@@ -95,7 +95,7 @@ python -m mumu_autotask --config config.json status --all
    等到 `WorldScene` 加载完成后再读取可用骷髅目标。
 4. 复选绿色、蓝色、紫色和黄色中的一个或多个品质。
 5. 用“同时出征”滑块选择每波 `1-3` 队。
-6. 点击“情报-自动狩猎野兽”不会再弹出二次确认；在纯 UI 出征路径补齐前，程序会在
+6. 点击“情报-自动狩猎野兽”不会再弹出二次确认；在底层出征调用恢复前，程序会在
    FridaDirect 环境下阻止真实出征，避免再次触发游戏退出。
 
 管理窗口会显示当前可用目标和运行记录。真实出征执行期间会禁用其他操作和窗口
@@ -173,14 +173,44 @@ python -m mumu_autotask --config config.json march `
 失败。
 
 当前 CLI 会先完成只读 INTEL；如果桥接线程是 FridaDirect，会在打开出征页前停止。
-旧的 OPEN/READY/ADB 点击平均配置/出征/VERIFY 路径仅保留在代码保护之后，不会在
-当前实机环境自动使用。VERIFY
+旧的 OPEN/READY/COMMIT/VERIFY 路径仅保留在代码保护之后，不会在当前实机环境自动
+使用。VERIFY
 优先寻找 COMMIT 前快照中不存在、且与目标坐标、怪物 ID、目标类型、行军类型和
 服务器完全匹配的 self-march。服务器的 `world_march.transaction_slg` 回包只定义
 `monster_id`，不保证回显请求中的 `event_id` 或怪物等级；存在 `event_id` 时仍要求
 精确匹配，缺失时使用 `PROOF=MARCH_FIELDS`。如果行军很快完成并被删除，同一会话中
 从初始状态 `1` 变为 `2/3` 也可作为 `PROOF=QUEST_STATUS`。没有这些证明就会失败，
 不会把普通成功码或单纯按钮调用当成出征成功。
+
+### 诊断抓取真实出征参数
+
+`capture-march` 只用于分析真实 UI 点击时游戏自己传入
+`WorldMarchHelper.RequestMarchStartOff` 的参数，不属于正式自动狩猎路径。默认抓到
+一次真实请求后会恢复 hook：
+
+```powershell
+python -m mumu_autotask --config config.json capture-march `
+  --serial 127.0.0.1:16480 --expected-role 打工仔 `
+  --output-file recon/captures/capture_16480_real_ui.txt --execute
+```
+
+如果怀疑恢复 hook 会导致崩溃，可以保留 hook 不立即卸载：
+
+```powershell
+python -m mumu_autotask --config config.json capture-march `
+  --serial 127.0.0.1:16480 --expected-role 打工仔 `
+  --output-file recon/captures/capture_16480_real_ui.txt `
+  --keep-hook --execute
+```
+
+之后需要恢复时，再单独执行：
+
+```powershell
+python -m mumu_autotask --config config.json unhook-march-capture `
+  --serial 127.0.0.1:16480 --expected-role 打工仔 --execute
+```
+
+这三个命令同样强制校验当前角色和 `4549`，不会在角色漂移或进错服务器时继续。
 
 ### 等待与领取
 
@@ -199,11 +229,10 @@ ID 绑定到产生它们的角色，避免双角色实例停在另一个白名�
 `server == 4549`。状态固定为：
 
 - `PENDING`：`quest:IsCompleted()` 为 `false`，继续等待。
-- `COMPLETED`：`quest:IsCompleted()` 为 `true`，可以领取。
+- `COMPLETED`：`quest._status == 2`，或 `quest:IsCompleted()` 为 `true`，可以领取。
 - `MISSING`：ID 已不在任务表中，视为已经领取或不再存在。
 
-回执中的 `quest_status` 是 `_status` 的诊断值，不参与完成判定；完成状态只以游戏
-对象公开的 `IsCompleted()` 为准。
+回执中的 `quest_status` 是 `_status` 的诊断值；实测 `_status == 2` 表示该出征情报已完成，因此与 `IsCompleted()` 一起作为完成判定。
 
 先做领取 dry-run，只检查状态，不发送请求：
 
