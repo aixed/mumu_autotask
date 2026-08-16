@@ -17,22 +17,26 @@ from .business import (
     INTEL_MISSING,
     INTEL_PENDING,
     IntelStatusSnapshot,
+    SceneStatus,
     build_claim_intel_lua,
     build_close_expedition_lua,
-    build_commit_march_lua,
+    build_install_march_capture_hook_lua,
     build_inspect_intel_lua,
     build_intel_status_lua,
     build_march_ready_lua,
     build_open_march_lua,
+    build_read_march_capture_hook_lua,
+    build_scene_status_lua,
+    build_uninstall_march_capture_hook_lua,
     build_verify_march_lua,
     normalize_quality,
     normalize_target_ids,
     parse_claim_intel_output,
-    parse_commit_output,
     parse_intel_output,
     parse_intel_status_output,
     parse_open_output,
     parse_ready_output,
+    parse_scene_status_output,
     parse_verify_output,
     select_march_target,
     script_sha256,
@@ -110,6 +114,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="run the read-only inspection after all guards pass",
     )
     inspect_intel.set_defaults(dry_run=True)
+
+    ensure_world = subparsers.add_parser(
+        "ensure-world",
+        help="ensure the game is on the outdoor world map",
+    )
+    ensure_world.add_argument("--serial", required=True)
+    ensure_world.add_argument(
+        "--expected-role",
+        help="require this exact active role before tapping the world button",
+    )
+    ensure_world.add_argument(
+        "--timeout",
+        type=float,
+        default=12.0,
+        help="maximum time in seconds to wait for WorldScene (default: 12)",
+    )
+    ensure_world.add_argument(
+        "--poll-interval",
+        type=float,
+        default=0.5,
+        help="seconds between scene polls (default: 0.5)",
+    )
+    ensure_world.add_argument(
+        "--execute",
+        dest="dry_run",
+        action="store_false",
+        help="tap the lower-right world button when the current scene is not WorldScene",
+    )
+    ensure_world.set_defaults(dry_run=True)
 
     wait_intel = subparsers.add_parser(
         "wait-intel",
@@ -216,6 +249,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="average the formation and march after all guards pass",
     )
     march.set_defaults(dry_run=True)
+
+    capture_march = subparsers.add_parser(
+        "capture-march",
+        help="install a temporary hook and capture one real UI march payload",
+    )
+    capture_march.add_argument("--serial", required=True)
+    capture_march.add_argument(
+        "--expected-role",
+        help="require this exact active role before installing the hook",
+    )
+    capture_march.add_argument(
+        "--timeout",
+        type=float,
+        default=90.0,
+        help="maximum time in seconds to wait for the real UI click (default: 90)",
+    )
+    capture_march.add_argument(
+        "--poll-interval",
+        type=float,
+        default=0.5,
+        help="seconds between hook-record polls (default: 0.5)",
+    )
+    capture_march.add_argument(
+        "--output-file",
+        type=Path,
+        help="optional UTF-8 file to save the raw captured hook records",
+    )
+    capture_march.add_argument(
+        "--execute",
+        dest="dry_run",
+        action="store_false",
+        help="install the temporary hook after all guards pass",
+    )
+    capture_march.set_defaults(dry_run=True)
     return parser
 
 
@@ -287,6 +354,40 @@ def _client(profile: DeviceProfile, *, pid: int | None = None) -> FridaLuaClient
         pid=pid if pid is not None else profile.pid,
         process_aliases=(profile.package_name,),
     )
+
+
+def _should_manage_frida_forward(profile: DeviceProfile) -> bool:
+    host = profile.frida_host.rpartition(":")[0].strip().lower()
+    return host in {"127.0.0.1", "localhost"}
+
+
+def _ensure_frida_forward(adb: AdbClient, profile: DeviceProfile) -> bool:
+    if not _should_manage_frida_forward(profile):
+        return False
+    local = f"tcp:{profile.frida_local_port}"
+    remote = f"tcp:{profile.frida_remote_port}"
+    forwards = adb.forward_list()
+    matches = [forward for forward in forwards if forward.local == local]
+    for forward in matches:
+        if forward.serial != profile.serial:
+            raise AdbError(
+                f"Frida local port {local} is already forwarded by "
+                f"{forward.serial}, not {profile.serial}"
+            )
+    if any(forward.remote == remote for forward in matches):
+        return False
+    adb.forward(profile.serial, local, remote)
+    return True
+
+
+def _ensure_frida_forwards(
+    adb: AdbClient,
+    profiles: Sequence[DeviceProfile],
+) -> dict[str, bool]:
+    return {
+        profile.serial: _ensure_frida_forward(adb, profile)
+        for profile in profiles
+    }
 
 
 def _adb_pid(adb: AdbClient, profile: DeviceProfile) -> int:
@@ -409,12 +510,18 @@ def _execute_lua(
     state = scanner.find_unique_idle_main(process.pid)
     with client:
         initialization = dict(client.initialize_bridge(profile.bridge_remote_path))
-        before = scanner.verify_idle_main(process.pid, state.address)
+        before = _wait_idle_lua_state(scanner, process, state)
         try:
-            result = client.execute_lua(
-                before.address,
+            result = _execute_lua_when_idle(
+                adb,
+                profile,
+                client,
+                process,
+                scanner,
+                state,
                 code,
                 output_capacity=output_capacity,
+                operation="Lua execution",
             )
         finally:
             after = _verify_process_after_lua_finally(
@@ -448,6 +555,277 @@ def _execution_payload(
     }
 
 
+def _scene_status_payload(status: SceneStatus) -> dict[str, Any]:
+    return {
+        "role": status.role,
+        "scene": {
+            "type": status.scene_type,
+            "map_type": status.map_type,
+            "class": status.class_name,
+            "is_world": status.is_world,
+            "is_city": status.is_city,
+            "loading": status.loading,
+            "transition": status.transition,
+        },
+    }
+
+
+def _scene_world_ready(status: SceneStatus) -> bool:
+    return status.is_world and status.loading is not True and status.transition is not True
+
+
+def _world_button_tap_coordinates(adb: AdbClient, profile: DeviceProfile) -> tuple[int, int]:
+    return _scaled_tap_coordinates(adb, profile, 0.906, 0.948, (652, 1214))
+
+
+def _expedition_average_tap_coordinates(
+    adb: AdbClient,
+    profile: DeviceProfile,
+) -> tuple[int, int]:
+    return _scaled_tap_coordinates(adb, profile, 0.278, 0.947, (200, 1212))
+
+
+def _expedition_go_tap_coordinates(
+    adb: AdbClient,
+    profile: DeviceProfile,
+) -> tuple[int, int]:
+    return _scaled_tap_coordinates(adb, profile, 0.763, 0.947, (550, 1212))
+
+
+def _scaled_tap_coordinates(
+    adb: AdbClient,
+    profile: DeviceProfile,
+    x_ratio: float,
+    y_ratio: float,
+    fallback: tuple[int, int],
+) -> tuple[int, int]:
+    try:
+        size = adb.window_size(profile.serial)
+        x = int(size.width * x_ratio)
+        y = int(size.height * y_ratio)
+        return (
+            max(0, min(size.width - 1, x)),
+            max(0, min(size.height - 1, y)),
+        )
+    except Exception as exc:
+        LOGGER.warning("could not read window size for %s: %s", profile.serial, exc)
+        return fallback
+
+
+def _require_same_foreground_process(
+    adb: AdbClient,
+    profile: DeviceProfile,
+    process: ProcessInfo,
+    operation: str,
+) -> None:
+    _require_game_foreground(adb, profile)
+    after_pid = adb.pidof(profile.serial, profile.package_name)
+    if after_pid != process.pid:
+        raise FridaDriverError(
+            f"{profile.serial}: game PID changed during {operation} "
+            f"({process.pid} -> {after_pid})"
+        )
+
+
+def _wait_idle_lua_state(
+    scanner: AdbLuaStateScanner,
+    process: ProcessInfo,
+    state: LuaStateCandidate,
+    *,
+    timeout_seconds: float = 5.0,
+    poll_interval_seconds: float = 0.05,
+) -> LuaStateCandidate:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: Exception | None = None
+    while True:
+        try:
+            return scanner.verify_idle_main(process.pid, state.address)
+        except LuaStateScanError as exc:
+            last_error = exc
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(poll_interval_seconds)
+
+
+def _execute_lua_when_idle(
+    adb: AdbClient,
+    profile: DeviceProfile,
+    client: FridaLuaClient,
+    process: ProcessInfo,
+    scanner: AdbLuaStateScanner,
+    state: LuaStateCandidate,
+    code: str,
+    *,
+    output_capacity: int,
+    operation: str,
+    timeout_seconds: float = 5.0,
+    poll_interval_seconds: float = 0.05,
+) -> LuaExecutionResult:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        _require_same_foreground_process(adb, profile, process, operation)
+        _wait_idle_lua_state(
+            scanner,
+            process,
+            state,
+            timeout_seconds=max(0.05, min(1.0, timeout_seconds)),
+            poll_interval_seconds=poll_interval_seconds,
+        )
+        try:
+            return client.execute_lua(
+                state.address,
+                code,
+                output_capacity=output_capacity,
+            )
+        except FridaDriverError as exc:
+            if "breakpoint triggered" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(poll_interval_seconds)
+
+
+def _execute_ensure_world(
+    adb: AdbClient,
+    profile: DeviceProfile,
+    client: FridaLuaClient,
+    process: ProcessInfo,
+    *,
+    initial_roles: Sequence[str],
+    dry_run: bool,
+    output_capacity: int,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+) -> dict[str, Any]:
+    locked_initial_roles = validate_role_whitelist(initial_roles)
+    code = build_scene_status_lua(locked_initial_roles)
+    stage_hashes = {"scene": script_sha256(code)}
+    scanner = _scanner(adb, profile)
+    state = scanner.find_unique_idle_main(process.pid)
+    final_status: SceneStatus | None = None
+    initial_status: SceneStatus | None = None
+    tapped = False
+    tap_coordinates: tuple[int, int] | None = None
+    poll_count = 0
+
+    with client:
+        initialization = dict(client.initialize_bridge(profile.bridge_remote_path))
+        before = scanner.verify_idle_main(process.pid, state.address)
+        try:
+            first_deadline = time.monotonic() + timeout_seconds
+            last_scene_error: Exception | None = None
+            while True:
+                try:
+                    first_result = _execute_lua_when_idle(
+                        adb,
+                        profile,
+                        client,
+                        process,
+                        scanner,
+                        state,
+                        code,
+                        output_capacity=output_capacity,
+                        operation="scene status",
+                        timeout_seconds=1.5,
+                    )
+                    last_result = first_result
+                    initial_status = parse_scene_status_output(
+                        first_result.output,
+                        locked_initial_roles,
+                    )
+                    break
+                except LuaExecutionError as exc:
+                    last_scene_error = exc
+                    if dry_run or time.monotonic() >= first_deadline:
+                        raise BusinessError(
+                            "game scene state was not ready before timeout; "
+                            f"last error: {exc}"
+                        ) from exc
+                    time.sleep(poll_interval_seconds)
+                    _require_same_foreground_process(
+                        adb,
+                        profile,
+                        process,
+                        "scene initialization wait",
+                    )
+            final_status = initial_status
+            active_roles = (initial_status.role,)
+            if not dry_run and not _scene_world_ready(initial_status):
+                if not initial_status.is_world:
+                    tap_coordinates = _world_button_tap_coordinates(adb, profile)
+                    adb.input_tap(profile.serial, *tap_coordinates)
+                    tapped = True
+                deadline = time.monotonic() + timeout_seconds
+                while True:
+                    time.sleep(poll_interval_seconds)
+                    _require_game_foreground(adb, profile)
+                    after_pid = adb.pidof(profile.serial, profile.package_name)
+                    if after_pid != process.pid:
+                        raise FridaDriverError(
+                            f"{profile.serial}: game PID changed while switching "
+                            f"to world ({process.pid} -> {after_pid})"
+                        )
+                    try:
+                        poll_result = _execute_lua_when_idle(
+                            adb,
+                            profile,
+                            client,
+                            process,
+                            scanner,
+                            state,
+                            build_scene_status_lua(active_roles),
+                            output_capacity=output_capacity,
+                            operation="scene status poll",
+                            timeout_seconds=1.5,
+                        )
+                        last_result = poll_result
+                        poll_count += 1
+                        final_status = parse_scene_status_output(
+                            poll_result.output,
+                            active_roles,
+                        )
+                    except LuaExecutionError as exc:
+                        last_scene_error = exc
+                    if _scene_world_ready(final_status):
+                        break
+                    if time.monotonic() >= deadline:
+                        detail = (
+                            f"; last error: {last_scene_error}"
+                            if last_scene_error is not None
+                            else ""
+                        )
+                        raise BusinessError(
+                            "WorldScene did not become ready "
+                            f"before timeout; current scene is "
+                            f"{final_status.class_name}{detail}"
+                        )
+        finally:
+            after = _verify_process_after_lua_finally(
+                adb,
+                profile,
+                scanner,
+                process,
+                state,
+                "ensure-world",
+            )
+
+    if initial_status is None or final_status is None:
+        raise BusinessError("ensure-world produced no scene status")
+    result = _execution_payload(initialization, state, before, after, last_result)
+    result.update(
+        {
+            "dry_run": dry_run,
+            "world_ready": _scene_world_ready(final_status),
+            "tap_invoked": tapped,
+            "tap_coordinates": list(tap_coordinates) if tap_coordinates else None,
+            "poll_count": poll_count,
+            "scene_before": _scene_status_payload(initial_status)["scene"],
+            "scene_after": _scene_status_payload(final_status)["scene"],
+            "role": final_status.role,
+            "stage_script_sha256": stage_hashes,
+        }
+    )
+    return result
+
+
 def _execute_march(
     adb: AdbClient,
     profile: DeviceProfile,
@@ -467,6 +845,10 @@ def _execute_march(
     inspect_code = build_inspect_intel_lua(locked_initial_roles)
     opened = False
     accepted = False
+    average_tapped = False
+    go_tapped = False
+    average_tap_coordinates: tuple[int, int] | None = None
+    go_tap_coordinates: tuple[int, int] | None = None
     status_after = "not-sent"
     verification_polls = 0
     stage_hashes: dict[str, str] = {
@@ -479,10 +861,16 @@ def _execute_march(
         initialization = dict(client.initialize_bridge(profile.bridge_remote_path))
         before = scanner.verify_idle_main(process.pid, state.address)
         try:
-            inspect_result = client.execute_lua(
-                before.address,
+            inspect_result = _execute_lua_when_idle(
+                adb,
+                profile,
+                client,
+                process,
+                scanner,
+                state,
                 inspect_code,
                 output_capacity=output_capacity,
+                operation="march intelligence inspection",
             )
             last_result = inspect_result
             snapshot = parse_intel_output(
@@ -493,37 +881,42 @@ def _execute_march(
             active_roles = (snapshot.role,)
 
             if not dry_run:
-                if inspect_result.thread_name != "UnityMain":
-                    raise BusinessError(
-                        "已安全停止：当前直连模式不能使用旧的出征界面链路，"
-                        "否则可能导致游戏卡死"
-                    )
+                verify_code = build_verify_march_lua(active_roles, target)
                 open_code = build_open_march_lua(active_roles, target)
                 ready_code = build_march_ready_lua(active_roles, target)
-                commit_code = build_commit_march_lua(active_roles, target)
-                verify_code = build_verify_march_lua(active_roles, target)
                 stage_hashes.update(
                     {
                         "open": script_sha256(open_code),
                         "ready": script_sha256(ready_code),
-                        "commit": script_sha256(commit_code),
                         "verify": script_sha256(verify_code),
                     }
                 )
-                open_result = client.execute_lua(
-                    state.address,
+                open_result = _execute_lua_when_idle(
+                    adb,
+                    profile,
+                    client,
+                    process,
+                    scanner,
+                    state,
                     open_code,
                     output_capacity=output_capacity,
+                    operation="opening expedition view",
                 )
-                opened = True
                 parse_open_output(open_result.output, active_roles, target)
+                opened = True
 
                 ready_deadline = time.monotonic() + ready_timeout_seconds
                 while True:
-                    ready_result = client.execute_lua(
-                        state.address,
+                    ready_result = _execute_lua_when_idle(
+                        adb,
+                        profile,
+                        client,
+                        process,
+                        scanner,
+                        state,
                         ready_code,
                         output_capacity=output_capacity,
+                        operation="expedition readiness check",
                     )
                     if parse_ready_output(ready_result.output, active_roles, target):
                         break
@@ -533,21 +926,43 @@ def _execute_march(
                         )
                     time.sleep(0.2)
 
-                commit_result = client.execute_lua(
-                    state.address,
-                    commit_code,
-                    output_capacity=output_capacity,
+                average_tap_coordinates = _expedition_average_tap_coordinates(
+                    adb,
+                    profile,
                 )
-                parse_commit_output(commit_result.output, active_roles, target)
-                last_result = commit_result
+                adb.input_tap(profile.serial, *average_tap_coordinates)
+                average_tapped = True
+                _require_same_foreground_process(
+                    adb,
+                    profile,
+                    process,
+                    "average formation UI tap",
+                )
+                time.sleep(0.35)
+                go_tap_coordinates = _expedition_go_tap_coordinates(adb, profile)
+                adb.input_tap(profile.serial, *go_tap_coordinates)
+                go_tapped = True
+                _require_same_foreground_process(
+                    adb,
+                    profile,
+                    process,
+                    "expedition go UI tap",
+                )
 
                 verify_deadline = time.monotonic() + verify_timeout_seconds
                 while True:
-                    verify_result = client.execute_lua(
-                        state.address,
+                    verify_result = _execute_lua_when_idle(
+                        adb,
+                        profile,
+                        client,
+                        process,
+                        scanner,
+                        state,
                         verify_code,
                         output_capacity=output_capacity,
+                        operation="march result verification",
                     )
+                    last_result = verify_result
                     verification_polls += 1
                     accepted, status_after = parse_verify_output(
                         verify_result.output,
@@ -569,10 +984,16 @@ def _execute_march(
                 try:
                     close_code = build_close_expedition_lua(active_roles)
                     stage_hashes["cleanup"] = script_sha256(close_code)
-                    client.execute_lua(
-                        state.address,
+                    _execute_lua_when_idle(
+                        adb,
+                        profile,
+                        client,
+                        process,
+                        scanner,
+                        state,
                         close_code,
                         output_capacity=output_capacity,
+                        operation="expedition cleanup",
                     )
                 except Exception as cleanup_error:
                     LOGGER.warning("expedition cleanup failed: %s", cleanup_error)
@@ -593,11 +1014,160 @@ def _execute_march(
             "dry_run": dry_run,
             "march_executed": not dry_run,
             "request_dispatched": accepted,
+            "expedition_opened": opened,
+            "average_tapped": average_tapped,
+            "go_tapped": go_tapped,
+            "average_tap_coordinates": (
+                list(average_tap_coordinates) if average_tap_coordinates else None
+            ),
+            "go_tap_coordinates": list(go_tap_coordinates) if go_tap_coordinates else None,
             "quest_status_after": status_after,
             "verification_polls": verification_polls,
             "role": snapshot.role,
             "item_count": len(snapshot.items),
             "target": asdict(target),
+            "stage_script_sha256": stage_hashes,
+        }
+    )
+    return result
+
+
+_MARCH_CAPTURE_REQUEST_MARKERS = (
+    "WorldMarchHelper.RequestMarchStartOff",
+    "WorldMarchCtrl.RequestWorldMarchStartOff",
+)
+
+
+def _march_capture_record_count(output: str) -> int:
+    for line in output.splitlines():
+        if line.startswith("COUNT\t"):
+            try:
+                return int(line.split("\t", 1)[1])
+            except ValueError as exc:
+                raise BusinessError("capture hook returned an invalid COUNT") from exc
+    raise BusinessError("capture hook output is missing COUNT")
+
+
+def _march_capture_has_request(output: str) -> bool:
+    return any(marker in output for marker in _MARCH_CAPTURE_REQUEST_MARKERS)
+
+
+def _execute_capture_march(
+    adb: AdbClient,
+    profile: DeviceProfile,
+    client: FridaLuaClient,
+    process: ProcessInfo,
+    *,
+    initial_roles: Sequence[str],
+    output_capacity: int,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+    output_file: Path | None,
+) -> dict[str, Any]:
+    locked_initial_roles = validate_role_whitelist(initial_roles)
+    install_code = build_install_march_capture_hook_lua(locked_initial_roles)
+    read_code = build_read_march_capture_hook_lua(locked_initial_roles)
+    uninstall_code = build_uninstall_march_capture_hook_lua(locked_initial_roles)
+    stage_hashes = {
+        "install": script_sha256(install_code),
+        "read": script_sha256(read_code),
+        "uninstall": script_sha256(uninstall_code),
+    }
+    scanner = _scanner(adb, profile)
+    state = scanner.find_unique_idle_main(process.pid)
+    deadline = time.monotonic() + timeout_seconds
+    poll_count = 0
+    record_count = 0
+    captured_request = False
+    records_output = ""
+    uninstall_output = ""
+    last_result: LuaExecutionResult | None = None
+
+    with client:
+        initialization = dict(client.initialize_bridge(profile.bridge_remote_path))
+        before = _wait_idle_lua_state(scanner, process, state)
+        try:
+            install_result = _execute_lua_when_idle(
+                adb,
+                profile,
+                client,
+                process,
+                scanner,
+                state,
+                install_code,
+                output_capacity=output_capacity,
+                operation="capture hook installation",
+            )
+            last_result = install_result
+            while True:
+                read_result = _execute_lua_when_idle(
+                    adb,
+                    profile,
+                    client,
+                    process,
+                    scanner,
+                    state,
+                    read_code,
+                    output_capacity=output_capacity,
+                    operation="capture hook read",
+                )
+                last_result = read_result
+                poll_count += 1
+                records_output = read_result.output
+                record_count = _march_capture_record_count(records_output)
+                captured_request = _march_capture_has_request(records_output)
+                if captured_request:
+                    break
+                now = time.monotonic()
+                if now >= deadline:
+                    raise BusinessError(
+                        "capture-march timed out before a real UI march request "
+                        "was observed"
+                    )
+                time.sleep(min(poll_interval_seconds, deadline - now))
+        finally:
+            try:
+                uninstall_result = _execute_lua_when_idle(
+                    adb,
+                    profile,
+                    client,
+                    process,
+                    scanner,
+                    state,
+                    uninstall_code,
+                    output_capacity=output_capacity,
+                    operation="capture hook uninstall",
+                )
+                uninstall_output = uninstall_result.output
+                last_result = uninstall_result if last_result is None else last_result
+            finally:
+                after = _verify_process_after_lua_finally(
+                    adb,
+                    profile,
+                    scanner,
+                    process,
+                    state,
+                    "capture-march",
+                )
+
+    if last_result is None:
+        raise BusinessError("capture-march did not execute any Lua stage")
+    if output_file is not None:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        output_file.write_text(records_output, encoding="utf-8")
+
+    result = _execution_payload(initialization, state, before, after, last_result)
+    result.update(
+        {
+            "dry_run": False,
+            "hook_installed": True,
+            "hook_uninstalled": bool(uninstall_output),
+            "captured_request": captured_request,
+            "record_count": record_count,
+            "poll_count": poll_count,
+            "records_output": records_output,
+            "uninstall_output": uninstall_output,
+            "output_file": str(output_file) if output_file is not None else None,
             "stage_script_sha256": stage_hashes,
         }
     )
@@ -648,17 +1218,23 @@ def _execute_wait_intel(
 
     with client:
         initialization = dict(client.initialize_bridge(profile.bridge_remote_path))
-        before = scanner.verify_idle_main(process.pid, state.address)
+        before = _wait_idle_lua_state(scanner, process, state)
         try:
             while True:
                 allowed_roles = (
                     locked_initial_roles if locked_role is None else (locked_role,)
                 )
                 code = build_intel_status_lua(allowed_roles, normalized_ids)
-                result = client.execute_lua(
-                    state.address,
+                result = _execute_lua_when_idle(
+                    adb,
+                    profile,
+                    client,
+                    process,
+                    scanner,
+                    state,
                     code,
                     output_capacity=output_capacity,
+                    operation="wait-intel status poll",
                 )
                 poll_count += 1
                 last_result = result
@@ -747,12 +1323,18 @@ def _execute_claim_intel(
 
     with client:
         initialization = dict(client.initialize_bridge(profile.bridge_remote_path))
-        before = scanner.verify_idle_main(process.pid, state.address)
+        before = _wait_idle_lua_state(scanner, process, state)
         try:
-            initial_result = client.execute_lua(
-                before.address,
+            initial_result = _execute_lua_when_idle(
+                adb,
+                profile,
+                client,
+                process,
+                scanner,
+                state,
                 initial_code,
                 output_capacity=output_capacity,
+                operation="claim-intel initial status",
             )
             last_result = initial_result
             before_snapshot = parse_intel_status_output(
@@ -786,10 +1368,16 @@ def _execute_claim_intel(
                 )
 
             if not dry_run and not pending_ids and not idempotent:
-                claim_result = client.execute_lua(
-                    state.address,
+                claim_result = _execute_lua_when_idle(
+                    adb,
+                    profile,
+                    client,
+                    process,
+                    scanner,
+                    state,
                     claim_code,
                     output_capacity=output_capacity,
+                    operation="claim-intel request",
                 )
                 claim_invoked = True
                 last_result = claim_result
@@ -803,10 +1391,16 @@ def _execute_claim_intel(
 
                 deadline = time.monotonic() + timeout_seconds
                 while True:
-                    verify_result = client.execute_lua(
-                        state.address,
+                    verify_result = _execute_lua_when_idle(
+                        adb,
+                        profile,
+                        client,
+                        process,
+                        scanner,
+                        state,
                         status_code,
                         output_capacity=output_capacity,
+                        operation="claim-intel verification",
                     )
                     verification_polls += 1
                     last_result = verify_result
@@ -881,11 +1475,11 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
 
     if args.command == "devices":
         adb = _adb(settings)
-        devices = (
-            adb.connect_configured(settings.adb.connect_targets)
-            if args.connect
-            else adb.devices()
-        )
+        if args.connect:
+            devices = adb.connect_configured(settings.adb.connect_targets)
+            _ensure_frida_forwards(adb, settings.devices)
+        else:
+            devices = adb.devices()
         for device in devices:
             model = device.details.get("model", "-")
             print(f"{device.serial}\t{device.state}\t{model}")
@@ -933,7 +1527,15 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
     expected_role = getattr(args, "expected_role", None)
     operation_roles = (
         _operation_roles(profile, expected_role)
-        if args.command in {"inspect-intel", "wait-intel", "claim-intel", "march"}
+        if args.command
+        in {
+            "inspect-intel",
+            "ensure-world",
+            "wait-intel",
+            "claim-intel",
+            "march",
+            "capture-march",
+        }
         else tuple(profile.roles)
     )
     quality: str | None = None
@@ -946,6 +1548,9 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
         require_safe_lua(code, allow_unsafe=args.allow_unsafe_lua)
     elif args.command == "inspect-intel":
         code = build_inspect_intel_lua(operation_roles)
+    elif args.command == "ensure-world":
+        timeout_seconds, poll_interval_seconds = _polling_options(args)
+        code = build_scene_status_lua(operation_roles)
     elif args.command in {"wait-intel", "claim-intel"}:
         target_ids = normalize_target_ids(args.target_ids)
         timeout_seconds, poll_interval_seconds = _polling_options(args)
@@ -956,6 +1561,9 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
         if target_runtime_id is not None and target_runtime_id <= 0:
             raise BusinessError("march target runtime id must be a positive integer")
         code = build_inspect_intel_lua(operation_roles)
+    elif args.command == "capture-march":
+        timeout_seconds, poll_interval_seconds = _polling_options(args)
+        code = build_install_march_capture_hook_lua(operation_roles)
     else:
         raise ConfigError(f"unsupported command {args.command!r}")
 
@@ -982,7 +1590,7 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
     if expected_role is not None:
         payload["expected_role"] = expected_role
 
-    if args.dry_run and args.command not in {"march", "claim-intel"}:
+    if args.dry_run and args.command not in {"march", "claim-intel", "ensure-world"}:
         payload.update({"dry_run": True, "lua_executed": False})
         print(json.dumps(payload, ensure_ascii=False))
         return 0
@@ -999,6 +1607,25 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
                 target_runtime_id=target_runtime_id,
                 dry_run=args.dry_run,
                 output_capacity=settings.frida.output_capacity,
+            )
+        )
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+
+    if args.command == "ensure-world":
+        assert timeout_seconds is not None
+        assert poll_interval_seconds is not None
+        payload.update(
+            _execute_ensure_world(
+                adb,
+                profile,
+                client,
+                process,
+                initial_roles=operation_roles,
+                dry_run=args.dry_run,
+                output_capacity=settings.frida.output_capacity,
+                timeout_seconds=timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds,
             )
         )
         print(json.dumps(payload, ensure_ascii=False))
@@ -1040,6 +1667,25 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
                 output_capacity=settings.frida.output_capacity,
                 timeout_seconds=timeout_seconds,
                 poll_interval_seconds=poll_interval_seconds,
+            )
+        )
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+
+    if args.command == "capture-march":
+        assert timeout_seconds is not None
+        assert poll_interval_seconds is not None
+        payload.update(
+            _execute_capture_march(
+                adb,
+                profile,
+                client,
+                process,
+                initial_roles=operation_roles,
+                output_capacity=settings.frida.output_capacity,
+                timeout_seconds=timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+                output_file=args.output_file,
             )
         )
         print(json.dumps(payload, ensure_ascii=False))

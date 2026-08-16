@@ -16,6 +16,7 @@ from mumu_autotask.business import (
     build_intel_status_lua,
     build_march_ready_lua,
     build_open_march_lua,
+    build_scene_status_lua,
     build_verify_march_lua,
     normalize_quality,
     normalize_target_ids,
@@ -26,6 +27,7 @@ from mumu_autotask.business import (
     parse_march_output,
     parse_open_output,
     parse_ready_output,
+    parse_scene_status_output,
     parse_verify_output,
     select_march_target,
     script_sha256,
@@ -61,6 +63,30 @@ def intel_status_output(
             f"KINGDOM\t{kingdom}",
             *targets,
             f"END\t{len(targets)}",
+        )
+    )
+
+
+def scene_output(
+    *,
+    scene_type: str = "3",
+    class_name: str = "WorldScene",
+    map_type: str = "1",
+    world: str = "1",
+    city: str = "0",
+    loading: str = "false",
+    transition: str = "false",
+) -> str:
+    return "\n".join(
+        (
+            "MUMU_AUTOTASK\t1\tSCENE",
+            f"ROLE\t{ROLE_HEX}",
+            "KINGDOM\t4549",
+            f"SCENE\t{scene_type}\tCLASS\t{class_name}",
+            f"MAP\t{map_type}",
+            f"WORLD\t{world}\tCITY\t{city}",
+            f"BUSY\tLOADING\t{loading}\tTRANSITION\t{transition}",
+            "END\t1",
         )
     )
 
@@ -167,6 +193,44 @@ class BusinessTests(unittest.TestCase):
         self.assertIn('proof = march_event_id ~= nil and "MARCH_EVENT" or "MARCH_FIELDS"', verify_code)
         self.assertIn('"PROOF\\t" .. proof', build_verify_march_lua((ROLE,), target))
 
+    def test_scene_status_script_and_parser_report_world_readiness_inputs(self) -> None:
+        code = build_scene_status_lua((ROLE,))
+        self.assertIn('GModule.SceneModule', code)
+        self.assertIn('IsLoading', code)
+        self.assertIn('IsInTransition', code)
+
+        status = parse_scene_status_output(scene_output(), (ROLE,))
+
+        self.assertEqual(status.role, ROLE)
+        self.assertEqual(status.kingdom, 4549)
+        self.assertEqual(status.scene_type, 3)
+        self.assertEqual(status.map_type, 1)
+        self.assertEqual(status.class_name, "WorldScene")
+        self.assertTrue(status.is_world)
+        self.assertFalse(status.is_city)
+        self.assertFalse(status.loading)
+        self.assertFalse(status.transition)
+
+    def test_scene_status_parser_accepts_missing_busy_values(self) -> None:
+        status = parse_scene_status_output(
+            scene_output(
+                scene_type="missing",
+                map_type="missing",
+                class_name="unknown",
+                world="0",
+                city="0",
+                loading="missing",
+                transition="missing",
+            ),
+            (ROLE,),
+        )
+
+        self.assertIsNone(status.scene_type)
+        self.assertIsNone(status.map_type)
+        self.assertEqual(status.class_name, "unknown")
+        self.assertIsNone(status.loading)
+        self.assertIsNone(status.transition)
+
     def test_all_guarded_stage_scripts_fit_native_bridge_source_buffer(self) -> None:
         target = IntelItem(
             71, 1701, 1, 759, 774, 1900000000, "purple", 4, 813, 13, 10
@@ -180,6 +244,7 @@ class BusinessTests(unittest.TestCase):
             build_commit_march_lua((ROLE,), target),
             build_verify_march_lua((ROLE,), target),
             build_close_expedition_lua((ROLE,)),
+            build_scene_status_lua((ROLE,)),
         )
         for code in scripts:
             with self.subTest(size=len(code.encode("utf-8"))):

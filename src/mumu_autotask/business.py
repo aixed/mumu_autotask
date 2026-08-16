@@ -88,6 +88,19 @@ class ClaimReceipt:
     idempotent: bool
 
 
+@dataclass(frozen=True, slots=True)
+class SceneStatus:
+    role: str
+    kingdom: int
+    scene_type: int | None
+    map_type: int | None
+    class_name: str
+    is_world: bool
+    is_city: bool
+    loading: bool | None
+    transition: bool | None
+
+
 INTEL_PENDING = "PENDING"
 INTEL_COMPLETED = "COMPLETED"
 INTEL_MISSING = "MISSING"
@@ -959,6 +972,151 @@ return table.concat({
 '''
 
 
+_DIRECT_COMMIT_MARCH_BODY = r'''
+local role_hex, kingdom = checked_identity()
+local quest, config = require_target(
+    TARGET_RUNTIME_ID,
+    TARGET_QUEST_ID,
+    TARGET_QUALITY_ID,
+    TARGET_WORLD_X,
+    TARGET_WORLD_Y,
+    TARGET_EXPIRES_AT,
+    TARGET_MONSTER_ID,
+    TARGET_LEVEL,
+    TARGET_STAMINA_COST
+)
+local initial_status = integer(quest._status, "initial quest status", false)
+if initial_status ~= 1 then
+    fail("selected intelligence was not available before direct march")
+end
+local march_map_type = GDefine.WorldMarchDefine.MARCH_MAP_TYPE.NORMAL
+local march_type = WorldMapDefine.march_type.transaction_slg
+local map_object_type = WorldMapDefine.mapobj_type.map_monster
+if not GHelper.WorldMarchHelper.CheckHasIdleMarch(
+    march_map_type,
+    march_type,
+    nil,
+    true
+) then
+    fail("no idle march queue is available")
+end
+local world_ok, quest_x, quest_y = pcall(quest.GetWorldPos, quest)
+if not world_ok or quest_x ~= TARGET_WORLD_X or quest_y ~= TARGET_WORLD_Y then
+    fail("selected intelligence world position changed")
+end
+local extra = { event_id = TARGET_RUNTIME_ID }
+local formation_march_type = GHelper.WorldMarchHelper.GetAttackMarchType(
+    map_object_type
+)
+local hero_list = GHelper.ExpeditionHelper.GetRecommendedHeroList(
+    false,
+    false,
+    formation_march_type,
+    config.condition,
+    march_map_type,
+    extra
+)
+if type(hero_list) ~= "table"
+    or GHelper.FormationHelper.IsHaveCaptain(hero_list) ~= true then
+    fail("direct average formation selected no captain")
+end
+local fight_type = GDefine.HeroDefine.HeroAttrType.SLG
+local formation_limit = GHelper.ExpeditionHelper.GetTroopLimit(
+    march_map_type,
+    hero_list,
+    fight_type,
+    extra
+)
+formation_limit = integer(formation_limit, "formation limit", false)
+local yields = GHelper.ExpeditionHelper.GetResourceYields(march_type, nil)
+if type(yields) ~= "number" then
+    fail("resource yields is not numeric")
+end
+local open_params = {
+    marchMapType = march_map_type,
+    marchType = march_type,
+    formationNumLimt = formation_limit,
+    targetId = config.condition,
+    yields = yields,
+    isAttack = false,
+}
+local soldier_list = GHelper.ExpeditionHelper.GetSoldierInfoByMarchType(
+    formation_march_type,
+    0,
+    false,
+    open_params,
+    nil
+)
+if type(soldier_list) ~= "table" then
+    fail("direct soldier list is unavailable")
+end
+local averaged_soldiers = GHelper.FormationHelper.GetAverageSoldierList(
+    march_map_type,
+    soldier_list,
+    formation_limit,
+    false,
+    extra
+)
+if type(averaged_soldiers) ~= "table" then
+    fail("direct average soldier list is unavailable")
+end
+local selected = 0
+for _, soldier in ipairs(averaged_soldiers) do
+    if type(soldier) == "table" and type(soldier.selectNum) == "number" then
+        selected = selected + soldier.selectNum
+    end
+end
+if selected <= 0 then
+    fail("direct average formation selected no soldiers")
+end
+local hero_id, soldier = GHelper.FormationHelper.DealWithExpeditionInfo(
+    hero_list,
+    averaged_soldiers
+)
+if type(hero_id) ~= "table" or type(soldier) ~= "table" then
+    fail("direct formation payload is unavailable")
+end
+local blocked_ok, blocked = pcall(
+    GHelper.ExpeditionHelper.IsBeforehandMarch,
+    march_map_type,
+    march_type,
+    map_object_type,
+    extra,
+    true
+)
+if blocked_ok and blocked then
+    fail("selected intelligence is already marching")
+end
+capture_self_march_ids(kingdom)
+_G.__MUMU_AUTOTASK_INITIAL_STATUS = initial_status
+_G.__MUMU_AUTOTASK_GO_INVOKED = true
+local request_ok = pcall(
+    GHelper.WorldMarchHelper.RequestMarchStartOff,
+    march_map_type,
+    march_type,
+    TARGET_WORLD_X,
+    TARGET_WORLD_Y,
+    {
+        hero_id = hero_id,
+        soldier = soldier,
+    },
+    extra
+)
+if not request_ok then
+    fail("direct march request failed")
+end
+return table.concat({
+    "MUMU_AUTOTASK\t1\tCOMMIT",
+    "ROLE\t" .. role_hex,
+    "KINGDOM\t" .. tostring(kingdom),
+    "TARGET\t" .. tostring(TARGET_RUNTIME_ID),
+    "AVERAGE\t1",
+    "GO\t1",
+    "END\t1",
+}, "\n")
+'''
+
+
 _VERIFY_MARCH_BODY = r'''
 local role_hex, kingdom = checked_identity()
 local quest_map = call(GCtrl.RadarCtrl, "GetQuestDataMap", "quest map")
@@ -1042,6 +1200,393 @@ return "MUMU_AUTOTASK\t1\tCLOSE\nEND\t1"
 '''
 
 
+_SCENE_STATUS_BODY = r'''
+local role_hex, kingdom = checked_identity()
+
+local function maybe_call(object, method_name)
+    if type(object) ~= "table" or type(object[method_name]) ~= "function" then
+        return nil
+    end
+    local ok, value = pcall(object[method_name], object)
+    if not ok then
+        return nil
+    end
+    return value
+end
+
+local scene_module = type(GModule) == "table" and GModule.SceneModule or nil
+local scene_type = maybe_call(scene_module, "GetSceneType")
+local map_type = maybe_call(scene_module, "GetMapType")
+local loading = maybe_call(scene_module, "IsLoading")
+local transition = maybe_call(scene_module, "IsInTransition")
+local cur_scene = type(scene_module) == "table" and scene_module._curScene or nil
+local class_name = "unknown"
+if type(cur_scene) == "table"
+    and type(cur_scene.class) == "table"
+    and type(cur_scene.class.__cname) == "string" then
+    class_name = cur_scene.class.__cname
+end
+local is_world = class_name == "WorldScene" or scene_type == 3
+local is_city = class_name == "CityScene" or scene_type == 2
+
+return table.concat({
+    "MUMU_AUTOTASK\t1\tSCENE",
+    "ROLE\t" .. role_hex,
+    "KINGDOM\t" .. tostring(kingdom),
+    "SCENE\t" .. (type(scene_type) == "number" and tostring(scene_type) or "missing")
+        .. "\tCLASS\t" .. class_name,
+    "MAP\t" .. (type(map_type) == "number" and tostring(map_type) or "missing"),
+    "WORLD\t" .. (is_world and "1" or "0")
+        .. "\tCITY\t" .. (is_city and "1" or "0"),
+    "BUSY\tLOADING\t" .. (type(loading) == "boolean" and tostring(loading) or "missing")
+        .. "\tTRANSITION\t" .. (type(transition) == "boolean" and tostring(transition) or "missing"),
+    "END\t1",
+}, "\n")
+'''
+
+
+_INSTALL_MARCH_CAPTURE_HOOK_BODY = r'''
+local role_hex, kingdom = checked_identity()
+local HOOK_KEY = "__MUMU_AUTOTASK_MARCH_CAPTURE_HOOK"
+
+local function safe_text(value)
+    local text = tostring(value)
+    text = text:gsub("\\", "\\\\")
+        :gsub("\t", "\\t")
+        :gsub("\r", "\\r")
+        :gsub("\n", "\\n")
+    if #text > 240 then
+        text = text:sub(1, 240) .. "...<truncated>"
+    end
+    return text
+end
+
+local function key_text(value)
+    if type(value) == "number" or type(value) == "boolean" then
+        return tostring(value)
+    end
+    return safe_text(value)
+end
+
+local function emit(lines, path, value, depth, seen, budget)
+    if budget.count >= budget.limit then
+        return
+    end
+    local value_type = type(value)
+    if value_type == "nil"
+        or value_type == "boolean"
+        or value_type == "number"
+        or value_type == "string" then
+        budget.count = budget.count + 1
+        lines[#lines + 1] = table.concat({
+            "FIELD",
+            path,
+            value_type,
+            safe_text(value),
+        }, "\t")
+        return
+    end
+    if value_type ~= "table" then
+        budget.count = budget.count + 1
+        lines[#lines + 1] = table.concat({
+            "FIELD",
+            path,
+            value_type,
+            safe_text(value),
+        }, "\t")
+        return
+    end
+    if seen[value] then
+        budget.count = budget.count + 1
+        lines[#lines + 1] = table.concat({
+            "FIELD",
+            path,
+            "table",
+            "<cycle>",
+        }, "\t")
+        return
+    end
+    seen[value] = true
+    budget.count = budget.count + 1
+    lines[#lines + 1] = table.concat({
+        "FIELD",
+        path,
+        "table",
+        safe_text(value),
+    }, "\t")
+    if depth >= 5 then
+        return
+    end
+    local ok, first_key = pcall(next, value, nil)
+    if not ok then
+        budget.count = budget.count + 1
+        lines[#lines + 1] = table.concat({
+            "FIELD",
+            path .. ".<pairs>",
+            "error",
+            safe_text(first_key),
+        }, "\t")
+        return
+    end
+    local keys = {}
+    local key = first_key
+    local guard = 0
+    while key ~= nil and guard < 120 do
+        guard = guard + 1
+        keys[#keys + 1] = key
+        local next_ok, next_key = pcall(next, value, key)
+        if not next_ok then
+            break
+        end
+        key = next_key
+    end
+    table.sort(keys, function(left, right)
+        local left_type = type(left)
+        local right_type = type(right)
+        if left_type == right_type and left_type == "number" then
+            return left < right
+        end
+        return tostring(left) < tostring(right)
+    end)
+    for _, child_key in ipairs(keys) do
+        if budget.count >= budget.limit then
+            break
+        end
+        local child_ok, child_value = pcall(function()
+            return value[child_key]
+        end)
+        if child_ok then
+            emit(
+                lines,
+                path .. "." .. key_text(child_key),
+                child_value,
+                depth + 1,
+                seen,
+                budget
+            )
+        else
+            budget.count = budget.count + 1
+            lines[#lines + 1] = table.concat({
+                "FIELD",
+                path .. "." .. key_text(child_key),
+                "error",
+                safe_text(child_value),
+            }, "\t")
+        end
+    end
+end
+
+local function snapshot_call(event_name, ...)
+    local hook = _G[HOOK_KEY]
+    if type(hook) ~= "table" then
+        return
+    end
+    local lines = {
+        "RECORD\t" .. tostring((hook.sequence or 0) + 1) .. "\t" .. event_name,
+    }
+    hook.sequence = (hook.sequence or 0) + 1
+    local argc = select("#", ...)
+    lines[#lines + 1] = "ARGC\t" .. tostring(argc)
+    local budget = { count = 0, limit = 360 }
+    for index = 1, argc do
+        local value = select(index, ...)
+        emit(lines, "arg" .. tostring(index), value, 0, {}, budget)
+    end
+    local record = table.concat(lines, "\n")
+    if #record > 12000 then
+        record = record:sub(1, 12000) .. "\nTRUNCATED\t1"
+    end
+    hook.records[#hook.records + 1] = record
+    while #hook.records > 12 do
+        table.remove(hook.records, 1)
+    end
+end
+
+local function protected_snapshot(event_name, ...)
+    local ok, err = pcall(snapshot_call, event_name, ...)
+    if not ok then
+        local hook = _G[HOOK_KEY]
+        if type(hook) == "table" and type(hook.records) == "table" then
+            hook.sequence = (hook.sequence or 0) + 1
+            hook.records[#hook.records + 1] = table.concat({
+                "RECORD\t" .. tostring(hook.sequence) .. "\t" .. event_name,
+                "CAPTURE_ERROR\t" .. safe_text(err),
+            }, "\n")
+        end
+    end
+end
+
+local hook = _G[HOOK_KEY]
+if type(hook) ~= "table" then
+    hook = {
+        installed = false,
+        originals = {},
+        records = {},
+        sequence = 0,
+    }
+    _G[HOOK_KEY] = hook
+end
+
+local wrapped = {}
+local function wrap(owner, method_name, event_name)
+    if type(owner) ~= "table" or type(method_name) ~= "string" then
+        return false, "owner unavailable"
+    end
+    local original = owner[method_name]
+    if type(original) ~= "function" then
+        return false, "function unavailable"
+    end
+    if hook.originals[event_name] ~= nil then
+        wrapped[#wrapped + 1] = event_name .. ":already"
+        return true, "already wrapped"
+    end
+    local wrapper = function(...)
+        protected_snapshot(event_name, ...)
+        return original(...)
+    end
+    hook.originals[event_name] = {
+        owner = owner,
+        method_name = method_name,
+        original = original,
+        wrapper = wrapper,
+    }
+    owner[method_name] = wrapper
+    wrapped[#wrapped + 1] = event_name .. ":wrapped"
+    return true, "wrapped"
+end
+
+local expedition_view = nil
+local view_ok, view_or_error = pcall(
+    require,
+    "game.module.ui.view.formation.ExpeditionView"
+)
+if view_ok and type(view_or_error) == "table" then
+    expedition_view = view_or_error
+end
+
+wrap(GHelper and GHelper.WorldMarchHelper, "RequestMarchStartOff",
+    "WorldMarchHelper.RequestMarchStartOff")
+wrap(GCtrl and GCtrl.WorldMarchCtrl, "RequestWorldMarchStartOff",
+    "WorldMarchCtrl.RequestWorldMarchStartOff")
+hook.installed = true
+
+local lines = {
+    "MUMU_AUTOTASK\t1\tMARCH_CAPTURE_HOOK",
+    "ROLE\t" .. role_hex,
+    "KINGDOM\t" .. tostring(kingdom),
+    "INSTALLED\t1",
+    "EXPEDITION_VIEW\t" .. (expedition_view ~= nil and "1" or "0"),
+}
+for _, item in ipairs(wrapped) do
+    lines[#lines + 1] = "WRAP\t" .. item
+end
+lines[#lines + 1] = "END\t1"
+return table.concat(lines, "\n")
+'''
+
+
+_MARCH_CAPTURE_COMMON = r'''
+local EXPECTED_KINGDOM = 4549
+local ALLOWED_ROLES = { __ROLE_TABLE__ }
+
+local function fail(message)
+    error("mumu-autotask: " .. message, 0)
+end
+
+local function hex(value)
+    if type(value) ~= "string" or value == "" then
+        fail("active role is unavailable")
+    end
+    return (value:gsub(".", function(character)
+        return string.format("%02x", string.byte(character))
+    end))
+end
+
+local function checked_identity()
+    if type(GCtrl) ~= "table" or type(GCtrl.PlayerCtrl) ~= "table" then
+        fail("PlayerCtrl is unavailable")
+    end
+    local player = GCtrl.PlayerCtrl
+    if type(player.GetPlayerName) ~= "function"
+        or type(player.GetPlayerKid) ~= "function"
+        or type(player.GetPlayerServerId) ~= "function" then
+        fail("player identity methods are unavailable")
+    end
+    local ok_name, name = pcall(player.GetPlayerName, player)
+    if not ok_name then
+        fail("player name lookup failed")
+    end
+    local role_hex = hex(name)
+    if ALLOWED_ROLES[role_hex] ~= true then
+        fail("active role is not in this device whitelist")
+    end
+    local ok_kid, kid = pcall(player.GetPlayerKid, player)
+    local ok_server, server_id = pcall(player.GetPlayerServerId, player)
+    if not ok_kid or not ok_server or kid ~= EXPECTED_KINGDOM
+        or server_id ~= EXPECTED_KINGDOM then
+        fail("active player kingdom/server is not 4549")
+    end
+    return role_hex, server_id
+end
+'''
+
+
+_READ_MARCH_CAPTURE_HOOK_BODY = r'''
+local role_hex, kingdom = checked_identity()
+local HOOK_KEY = "__MUMU_AUTOTASK_MARCH_CAPTURE_HOOK"
+local hook = _G[HOOK_KEY]
+local records = {}
+if type(hook) == "table" and type(hook.records) == "table" then
+    records = hook.records
+end
+local lines = {
+    "MUMU_AUTOTASK\t1\tMARCH_CAPTURE_RECORDS",
+    "ROLE\t" .. role_hex,
+    "KINGDOM\t" .. tostring(kingdom),
+    "COUNT\t" .. tostring(#records),
+}
+for index, record in ipairs(records) do
+    lines[#lines + 1] = "BEGIN_RECORD\t" .. tostring(index)
+    lines[#lines + 1] = record
+    lines[#lines + 1] = "END_RECORD\t" .. tostring(index)
+end
+lines[#lines + 1] = "END\t1"
+local output = table.concat(lines, "\n")
+if #output > 15000 then
+    output = output:sub(1, 15000) .. "\nOUTPUT_TRUNCATED\t1\nEND\t1"
+end
+return output
+'''
+
+
+_UNINSTALL_MARCH_CAPTURE_HOOK_BODY = r'''
+local role_hex, kingdom = checked_identity()
+local HOOK_KEY = "__MUMU_AUTOTASK_MARCH_CAPTURE_HOOK"
+local hook = _G[HOOK_KEY]
+local restored = 0
+if type(hook) == "table" and type(hook.originals) == "table" then
+    for _, entry in pairs(hook.originals) do
+        if type(entry) == "table"
+            and type(entry.owner) == "table"
+            and type(entry.method_name) == "string"
+            and type(entry.original) == "function"
+            and entry.owner[entry.method_name] == entry.wrapper then
+            entry.owner[entry.method_name] = entry.original
+            restored = restored + 1
+        end
+    end
+end
+_G[HOOK_KEY] = nil
+return table.concat({
+    "MUMU_AUTOTASK\t1\tMARCH_CAPTURE_UNHOOK",
+    "ROLE\t" .. role_hex,
+    "KINGDOM\t" .. tostring(kingdom),
+    "RESTORED\t" .. tostring(restored),
+    "END\t1",
+}, "\n")
+'''
+
+
 def build_open_march_lua(roles: Sequence[str], target: IntelItem) -> str:
     return _target_lua(roles, target, _OPEN_MARCH_BODY)
 
@@ -1054,6 +1599,10 @@ def build_commit_march_lua(roles: Sequence[str], target: IntelItem) -> str:
     return _target_lua(roles, target, _COMMIT_MARCH_BODY)
 
 
+def build_direct_commit_march_lua(roles: Sequence[str], target: IntelItem) -> str:
+    return _target_lua(roles, target, _DIRECT_COMMIT_MARCH_BODY)
+
+
 def build_verify_march_lua(roles: Sequence[str], target: IntelItem) -> str:
     return _target_lua(roles, target, _VERIFY_MARCH_BODY)
 
@@ -1061,6 +1610,30 @@ def build_verify_march_lua(roles: Sequence[str], target: IntelItem) -> str:
 def build_close_expedition_lua(roles: Sequence[str]) -> str:
     common = _LUA_COMMON.replace("__ROLE_TABLE__", _lua_role_table(roles))
     return _finalize_lua(textwrap.dedent(common + _CLOSE_EXPEDITION_BODY))
+
+
+def build_scene_status_lua(roles: Sequence[str]) -> str:
+    common = _LUA_COMMON.replace("__ROLE_TABLE__", _lua_role_table(roles))
+    return _finalize_lua(textwrap.dedent(common + _SCENE_STATUS_BODY))
+
+
+def build_install_march_capture_hook_lua(roles: Sequence[str]) -> str:
+    common = _MARCH_CAPTURE_COMMON.replace("__ROLE_TABLE__", _lua_role_table(roles))
+    return _finalize_lua(
+        textwrap.dedent(common + _INSTALL_MARCH_CAPTURE_HOOK_BODY)
+    )
+
+
+def build_read_march_capture_hook_lua(roles: Sequence[str]) -> str:
+    common = _MARCH_CAPTURE_COMMON.replace("__ROLE_TABLE__", _lua_role_table(roles))
+    return _finalize_lua(textwrap.dedent(common + _READ_MARCH_CAPTURE_HOOK_BODY))
+
+
+def build_uninstall_march_capture_hook_lua(roles: Sequence[str]) -> str:
+    common = _MARCH_CAPTURE_COMMON.replace("__ROLE_TABLE__", _lua_role_table(roles))
+    return _finalize_lua(
+        textwrap.dedent(common + _UNINSTALL_MARCH_CAPTURE_HOOK_BODY)
+    )
 
 
 def select_march_target(
@@ -1295,6 +1868,80 @@ def parse_claim_intel_output(
     )
 
 
+def _parse_missing_integer(value: str, location: str) -> int | None:
+    if value == "missing":
+        return None
+    return _parse_integer(value, location, allow_zero=True)
+
+
+def _parse_missing_bool(value: str, location: str) -> bool | None:
+    if value == "missing":
+        return None
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise BusinessError(f"{location} must be true, false, or missing")
+
+
+def parse_scene_status_output(
+    output: str,
+    allowed_roles: Sequence[str],
+) -> SceneStatus:
+    lines = _protocol_lines(output, "SCENE")
+    if len(lines) != 8:
+        raise BusinessError("SCENE output must contain exactly 8 lines")
+    if len(lines[1]) != 2 or lines[1][0] != "ROLE":
+        raise BusinessError("SCENE output is missing ROLE")
+    role = _parse_role(lines[1][1], allowed_roles)
+    if lines[2] != ["KINGDOM", str(ALLOWED_KINGDOM)]:
+        raise BusinessError("SCENE output kingdom is not 4549")
+    scene_line = lines[3]
+    if (
+        len(scene_line) != 4
+        or scene_line[0] != "SCENE"
+        or scene_line[2] != "CLASS"
+        or not scene_line[3]
+        or any(ord(char) < 32 or ord(char) == 127 for char in scene_line[3])
+    ):
+        raise BusinessError("SCENE output has an invalid scene descriptor")
+    scene_type = _parse_missing_integer(scene_line[1], "SCENE scene type")
+    map_line = lines[4]
+    if len(map_line) != 2 or map_line[0] != "MAP":
+        raise BusinessError("SCENE output is missing MAP")
+    map_type = _parse_missing_integer(map_line[1], "SCENE map type")
+    world_line = lines[5]
+    if (
+        len(world_line) != 4
+        or world_line[0] != "WORLD"
+        or world_line[1] not in {"0", "1"}
+        or world_line[2] != "CITY"
+        or world_line[3] not in {"0", "1"}
+    ):
+        raise BusinessError("SCENE output has an invalid world/city state")
+    busy_line = lines[6]
+    if (
+        len(busy_line) != 5
+        or busy_line[0] != "BUSY"
+        or busy_line[1] != "LOADING"
+        or busy_line[3] != "TRANSITION"
+    ):
+        raise BusinessError("SCENE output has an invalid busy state")
+    if lines[7] != ["END", "1"]:
+        raise BusinessError("SCENE output has an invalid terminator")
+    return SceneStatus(
+        role=role,
+        kingdom=ALLOWED_KINGDOM,
+        scene_type=scene_type,
+        map_type=map_type,
+        class_name=scene_line[3],
+        is_world=world_line[1] == "1",
+        is_city=world_line[3] == "1",
+        loading=_parse_missing_bool(busy_line[2], "SCENE loading"),
+        transition=_parse_missing_bool(busy_line[4], "SCENE transition"),
+    )
+
+
 def _parse_target_stage(
     output: str,
     kind: str,
@@ -1469,13 +2116,19 @@ __all__ = [
     "QUALITY_ALIASES",
     "QUALITY_BY_ID",
     "QUALITY_IDS",
+    "SceneStatus",
     "build_claim_intel_lua",
     "build_close_expedition_lua",
     "build_commit_march_lua",
+    "build_direct_commit_march_lua",
+    "build_install_march_capture_hook_lua",
     "build_inspect_intel_lua",
     "build_intel_status_lua",
     "build_march_ready_lua",
     "build_open_march_lua",
+    "build_read_march_capture_hook_lua",
+    "build_scene_status_lua",
+    "build_uninstall_march_capture_hook_lua",
     "build_verify_march_lua",
     "normalize_quality",
     "normalize_target_ids",
@@ -1486,6 +2139,7 @@ __all__ = [
     "parse_march_output",
     "parse_open_output",
     "parse_ready_output",
+    "parse_scene_status_output",
     "parse_verify_output",
     "select_march_target",
     "script_sha256",

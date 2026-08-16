@@ -260,6 +260,30 @@ class GuiBackendTests(unittest.TestCase):
             ),
         )
 
+    def test_backend_ensure_world_uses_explicit_execute_and_expected_role(self) -> None:
+        runner = FakeRunner(
+            ['{"serial":"device-1","world_ready":true}\n']
+        )
+        backend = GuiBackend(runner)  # type: ignore[arg-type]
+
+        payload = backend.ensure_world("device-1", expected_role="打工人")
+
+        self.assertTrue(payload["world_ready"])
+        self.assertEqual(
+            runner.calls[0],
+            (
+                (
+                    "ensure-world",
+                    "--serial",
+                    "device-1",
+                    "--expected-role",
+                    "打工人",
+                    "--execute",
+                ),
+                45,
+            ),
+        )
+
     def test_backend_march_can_bind_an_exact_runtime_id(self) -> None:
         runner = FakeRunner(
             ['{"serial":"device-1","request_dispatched":true}\n']

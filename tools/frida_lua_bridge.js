@@ -229,11 +229,13 @@ rpc.exports = {
     }
     const symbols = {
       install: ["Java_mumu_autotask_Bridge_install", "J"],
-      installAt: ["Java_mumu_autotask_Bridge_installAt", "JJ"],
       state: ["Java_mumu_autotask_Bridge_state", "J"],
       submit: ["Java_mumu_autotask_Bridge_submit", "JJJ"],
       poll: ["Java_mumu_autotask_Bridge_poll", "JJJ"],
       execute: ["Java_mumu_autotask_Bridge_execute", "JJJJJJ"],
+    };
+    const optionalSymbols = {
+      installAt: ["Java_mumu_autotask_Bridge_installAt", "JJ"],
     };
     const trampolines = { probe: probeTrampoline };
     for (const [name, [symbol, shorty]] of Object.entries(symbols)) {
@@ -244,17 +246,31 @@ rpc.exports = {
         shorty,
       );
     }
+    for (const [name, [symbol, shorty]] of Object.entries(optionalSymbols)) {
+      try {
+        trampolines[name] = getJniTrampoline(
+          loaded.table,
+          loaded.handle,
+          symbol,
+          shorty,
+        );
+      } catch (error) {
+        trampolines[name] = NULL;
+      }
+    }
     bridge = {
       handle: loaded.handle,
       attempts: loaded.attempts,
       trampolines,
       probe,
       install: new NativeFunction(trampolines.install, "pointer", ["pointer", "pointer"]),
-      installAt: new NativeFunction(trampolines.installAt, "pointer", [
-        "pointer",
-        "pointer",
-        "pointer",
-      ]),
+      installAt: trampolines.installAt.isNull()
+        ? null
+        : new NativeFunction(trampolines.installAt, "pointer", [
+          "pointer",
+          "pointer",
+          "pointer",
+        ]),
       state: new NativeFunction(trampolines.state, "pointer", ["pointer", "pointer"]),
       submit: new NativeFunction(trampolines.submit, "pointer", [
         "pointer",
@@ -296,6 +312,9 @@ rpc.exports = {
 
   installAt(targetAddress) {
     const current = requireBridge();
+    if (current.installAt === null) {
+      return -32;
+    }
     return invokeJni(current.installAt, [ptr(targetAddress)]).toInt32();
   },
 

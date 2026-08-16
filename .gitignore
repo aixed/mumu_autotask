@@ -5,6 +5,8 @@ __pycache__/
 .pytest_cache/
 node_modules/
 recon/live/
+recon/*.png
+recon/captures/
 config.json
 mumu_autotask_gui_preferences.json
 *.log

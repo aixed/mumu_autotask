@@ -47,6 +47,12 @@ class ForegroundActivity:
         return self.component == _canonical_component(expected_component)
 
 
+@dataclass(frozen=True, slots=True)
+class WindowSize:
+    width: int
+    height: int
+
+
 CommandRunner = Callable[[Sequence[str], float], subprocess.CompletedProcess[str]]
 BinaryCommandRunner = Callable[
     [Sequence[str], float], subprocess.CompletedProcess[bytes]
@@ -63,6 +69,35 @@ _ACTIVITY_MARKERS = (
     "mCurrentFocus",
     "mFocusedApp",
 )
+_WINDOW_SIZE_PATTERN = re.compile(r"\b(\d+)x(\d+)\b")
+
+
+def _pid_tokens(output: str) -> list[int]:
+    pids: list[int] = []
+    for token in output.split():
+        if token.isdecimal():
+            pids.append(int(token))
+    return pids
+
+
+def _pid_from_ps(output: str, process_name: str) -> list[int]:
+    """Return PIDs whose final ps name column exactly equals process_name."""
+
+    pids: list[int] = []
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        if fields[0].upper() == "USER" or fields[-1] != process_name:
+            continue
+        pid: int | None = None
+        if fields[0].isdecimal():
+            pid = int(fields[0])
+        elif fields[1].isdecimal():
+            pid = int(fields[1])
+        if pid is not None:
+            pids.append(pid)
+    return pids
 
 
 def _canonical_component(component: str) -> str:
@@ -232,12 +267,23 @@ class AdbClient:
         return self._run("-s", serial, "shell", *args)
 
     def pidof(self, serial: str, package_name: str) -> int:
-        values = self.shell(serial, "pidof", package_name).split()
-        if len(values) != 1 or not values[0].isdecimal():
+        pids = _pid_tokens(self.shell(serial, "pidof", package_name))
+        if len(pids) == 1:
+            return pids[0]
+        if len(pids) > 1:
+            try:
+                exact = _pid_from_ps(self.shell(serial, "ps", "-A"), package_name)
+            except AdbError:
+                exact = []
+            if len(exact) == 1:
+                return exact[0]
             raise AdbError(
-                f"expected one PID for {package_name!r} on {serial}, found {values!r}"
+                f"expected one main PID for {package_name!r} on {serial}, "
+                f"found {pids!r}"
             )
-        return int(values[0])
+        raise AdbError(
+            f"expected one PID for {package_name!r} on {serial}, found {pids!r}"
+        )
 
     def foreground_activity(self, serial: str) -> ForegroundActivity:
         for source, args in (
@@ -254,6 +300,29 @@ class AdbClient:
 
     def start_activity(self, serial: str, component: str) -> str:
         return self.shell(serial, "am", "start", "-n", component)
+
+    def input_tap(self, serial: str, x: int, y: int) -> str:
+        if (
+            isinstance(x, bool)
+            or isinstance(y, bool)
+            or not isinstance(x, int)
+            or not isinstance(y, int)
+            or x < 0
+            or y < 0
+        ):
+            raise AdbError("tap coordinates must be non-negative integers")
+        return self.shell(serial, "input", "tap", str(x), str(y))
+
+    def window_size(self, serial: str) -> WindowSize:
+        output = self.shell(serial, "wm", "size")
+        match = _WINDOW_SIZE_PATTERN.search(output)
+        if match is None:
+            raise AdbError(f"could not parse window size on {serial}: {output!r}")
+        width = int(match.group(1))
+        height = int(match.group(2))
+        if width <= 0 or height <= 0:
+            raise AdbError(f"invalid window size on {serial}: {width}x{height}")
+        return WindowSize(width, height)
 
     def exec_out(self, serial: str, *args: str) -> bytes:
         if not args:

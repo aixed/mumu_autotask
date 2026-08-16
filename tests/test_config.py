@@ -50,11 +50,29 @@ class ConfigTests(unittest.TestCase):
         )
         profile = settings.devices[0]
         self.assertEqual(profile.frida_host, "127.0.0.1:27042")
+        self.assertEqual(profile.frida_local_port, 27042)
+        self.assertEqual(profile.frida_remote_port, 27042)
         self.assertEqual(profile.expected_kingdom, 4549)
         self.assertEqual(
             profile.resolved_playerprefs_path,
             "/data/data/com.gof.global/shared_prefs/com.gof.global.v2.playerprefs.xml",
         )
+
+    def test_frida_remote_port_can_be_configured_for_nondefault_server(self) -> None:
+        settings = Settings.from_dict(
+            {
+                "devices": [
+                    {
+                        "serial": "127.0.0.1:16416",
+                        "frida_host": "127.0.0.1:27052",
+                        "frida_remote_port": 38417,
+                    }
+                ]
+            }
+        )
+        profile = settings.devices[0]
+        self.assertEqual(profile.frida_local_port, 27052)
+        self.assertEqual(profile.frida_remote_port, 38417)
 
     def test_other_kingdom_is_rejected_during_config_load(self) -> None:
         with self.assertRaisesRegex(ConfigError, "must be 4549"):

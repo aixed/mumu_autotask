@@ -1611,12 +1611,18 @@ class DeviceManagerWindow:
             return
         self.current_items = []
         self._render_items()
-        self._set_busy(True, "正在读取当前角色和情报...")
-        self._log("开始只读情报检查。")
+        self._set_busy(True, "正在确保游戏位于野外并读取情报...")
+        self._log("开始返回野外检查。")
         self.dispatcher.submit(
-            lambda: self.backend.inspect_intel(self.profile.serial),
+            self._ensure_world_then_inspect,
             self._intel_refreshed,
         )
+
+    def _ensure_world_then_inspect(self) -> Mapping[str, Any]:
+        ensure_world = getattr(self.backend, "ensure_world", None)
+        if callable(ensure_world):
+            ensure_world(self.profile.serial)
+        return self.backend.inspect_intel(self.profile.serial)
 
     def _intel_refreshed(self, value: Any | None, error: Exception | None) -> None:
         if not self.exists:
@@ -1791,18 +1797,27 @@ class DeviceManagerWindow:
             f"连续发起 {ordinal}/{len(batch.targets)}：{target.label}。"
         )
         self.dispatcher.submit(
-            lambda target=target: self.backend.march(
-                self.profile.serial,
-                target.quality,
-                runtime_id=target.runtime_id,
-                expected_role=self.hunt_role,
-            ),
+            lambda target=target: self._guarded_march_target(target),
             lambda value, error, batch=batch, target=target: self._hunt_finished(
                 batch,
                 target,
                 value,
                 error,
             ),
+        )
+
+    def _guarded_march_target(self, target: HuntBatchTarget) -> Mapping[str, Any]:
+        ensure_world = getattr(self.backend, "ensure_world", None)
+        if callable(ensure_world):
+            ensure_world(
+                self.profile.serial,
+                expected_role=self.hunt_role,
+            )
+        return self.backend.march(
+            self.profile.serial,
+            target.quality,
+            runtime_id=target.runtime_id,
+            expected_role=self.hunt_role,
         )
 
     def _hunt_finished(

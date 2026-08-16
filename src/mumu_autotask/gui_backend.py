@@ -489,6 +489,22 @@ class GuiBackend:
             raise GuiBackendError("情报检查命令返回了意外的数据条数")
         return payloads[0]
 
+    def ensure_world(
+        self,
+        serial: str,
+        *,
+        expected_role: str | None = None,
+    ) -> Mapping[str, Any]:
+        arguments = ["ensure-world", "--serial", serial]
+        if expected_role is not None:
+            arguments.extend(("--expected-role", _validate_expected_role(expected_role)))
+        arguments.append("--execute")
+        result = self.runner.run(arguments, timeout=45)
+        payloads = parse_json_lines(result.stdout)
+        if len(payloads) != 1:
+            raise GuiBackendError("返回野外命令返回了意外的数据条数")
+        return payloads[0]
+
     def march(
         self,
         serial: str,

@@ -8,12 +8,13 @@ from contextlib import redirect_stderr, redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from mumu_autotask.adb import ForegroundActivity
+from mumu_autotask.adb import AdbDevice, ForegroundActivity
 from mumu_autotask.cli import build_parser, execute, main
 from mumu_autotask.business import (
     BusinessError,
     build_inspect_intel_lua,
     build_intel_status_lua,
+    build_scene_status_lua,
     script_sha256,
 )
 from mumu_autotask.config import DeviceProfile, Settings
@@ -47,15 +48,39 @@ class FakeAdb:
         pids: tuple[int, ...] = (7359,),
         activity: str | None = "com.gof.global/com.unity3d.player.MyMainPlayerActivity",
         activities: tuple[str | None, ...] | None = None,
+        window_size: tuple[int, int] = (720, 1280),
     ) -> None:
         self.events = events
         self.playerprefs_kingdom = playerprefs_kingdom
         self.sdk_server_id = sdk_server_id
         self.pids = list(pids)
         self.activities = list(activities) if activities is not None else [activity]
+        self.window_size_value = window_size
 
     def require_connected(self, serials) -> None:
         self.events.append("adb-ready")
+
+    def devices(self):
+        self.events.append("adb-devices")
+        return [
+            AdbDevice("device-1", "device", {"model": "fake"}),
+            AdbDevice("device-2", "device", {"model": "fake"}),
+        ]
+
+    def connect_configured(self, targets):
+        self.events.append("adb-connect:" + ",".join(targets))
+        return [
+            AdbDevice(str(target), "device", {"model": "fake"})
+            for target in targets
+        ]
+
+    def forward_list(self):
+        self.events.append("forward-list")
+        return []
+
+    def forward(self, serial: str, local: str, remote: str) -> str:
+        self.events.append(f"forward:{serial}:{local}->{remote}")
+        return local.rpartition(":")[2]
 
     def shell(self, serial: str, *args: str) -> str:
         if args[-1].endswith("com.cg.sdk.xml"):
@@ -78,6 +103,17 @@ class FakeAdb:
             component = self.activities[0]
         return ForegroundActivity(component, "fake", f"fake {component}")
 
+    def window_size(self, serial: str):
+        self.events.append("window-size")
+        return SimpleNamespace(
+            width=self.window_size_value[0],
+            height=self.window_size_value[1],
+        )
+
+    def input_tap(self, serial: str, x: int, y: int) -> str:
+        self.events.append(f"input-tap:{x},{y}")
+        return ""
+
 
 class FakeClient:
     def __init__(
@@ -87,7 +123,7 @@ class FakeClient:
         fail_initialize: bool = False,
         fail_execute: bool = False,
         output: str = "Lua 5.1",
-        outputs: tuple[str, ...] | None = None,
+        outputs: tuple[str | Exception, ...] | None = None,
         thread_name: str = "UnityMain",
     ) -> None:
         self.events = events
@@ -128,6 +164,8 @@ class FakeClient:
                 result_code=-12,
             )
         output = self.outputs.pop(0) if self.outputs is not None else self.output
+        if isinstance(output, Exception):
+            raise output
         return LuaExecutionResult(output, 8, 8123, self.thread_name)
 
 
@@ -211,6 +249,31 @@ def claim_protocol(role: str, target_ids: tuple[int, ...], *, sent: bool) -> str
     )
 
 
+def scene_protocol(
+    role: str,
+    *,
+    scene_type: str = "3",
+    class_name: str = "WorldScene",
+    map_type: str = "1",
+    is_world: bool = True,
+    is_city: bool = False,
+    loading: str = "false",
+    transition: str = "false",
+) -> str:
+    return "\n".join(
+        (
+            "MUMU_AUTOTASK\t1\tSCENE",
+            f"ROLE\t{role.encode('utf-8').hex()}",
+            "KINGDOM\t4549",
+            f"SCENE\t{scene_type}\tCLASS\t{class_name}",
+            f"MAP\t{map_type}",
+            f"WORLD\t{int(is_world)}\tCITY\t{int(is_city)}",
+            f"BUSY\tLOADING\t{loading}\tTRANSITION\t{transition}",
+            "END\t1",
+        )
+    )
+
+
 class CliTests(unittest.TestCase):
     def setUp(self) -> None:
         scanner_patch = patch(
@@ -231,7 +294,13 @@ class CliTests(unittest.TestCase):
         ]
         self.assertTrue(parser.parse_args(base).dry_run)
         self.assertFalse(parser.parse_args([*base, "--execute"]).dry_run)
-        for command in ("inspect-intel", "wait-intel", "claim-intel", "march"):
+        for command in (
+            "inspect-intel",
+            "ensure-world",
+            "wait-intel",
+            "claim-intel",
+            "march",
+        ):
             with self.subTest(command=command):
                 args = [command, "--serial", "device-1"]
                 if command == "march":
@@ -256,6 +325,39 @@ class CliTests(unittest.TestCase):
                         parser.parse_args(
                             [command, "--serial", "device-1", "--target-id", "71"]
                         )
+
+    def test_devices_connect_restores_configured_frida_forwards(self) -> None:
+        events: list[str] = []
+        settings = Settings.from_dict(
+            {
+                "adb": {"connect_targets": ["device-1", "device-2"]},
+                "devices": [
+                    {
+                        "serial": "device-1",
+                        "frida_host": "127.0.0.1:27042",
+                    },
+                    {
+                        "serial": "device-2",
+                        "frida_host": "127.0.0.1:27052",
+                        "frida_remote_port": 38417,
+                    },
+                ],
+            }
+        )
+        output = io.StringIO()
+        args = argparse.Namespace(command="devices", connect=True)
+
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(execute(args, settings), 0)
+
+        self.assertIn("adb-connect:device-1,device-2", events)
+        self.assertIn("forward:device-1:tcp:27042->tcp:27042", events)
+        self.assertIn("forward:device-2:tcp:27052->tcp:38417", events)
+        self.assertIn("device-1\tdevice\tfake", output.getvalue())
+        self.assertIn("device-2\tdevice\tfake", output.getvalue())
 
     def test_status_reports_both_kingdom_sources_without_ui_input(self) -> None:
         events: list[str] = []
@@ -334,8 +436,9 @@ class CliTests(unittest.TestCase):
         self.assertTrue(result["lua_executed"])
         self.assertEqual(result["lua_state"], "0x7b7029221380")
         self.assertEqual(result["execution_thread_name"], "UnityMain")
-        self.assertEqual(events.count("state-verify"), 2)
-        self.assertEqual(events.count("foreground-activity"), 2)
+        self.assertEqual(events.count("state-verify"), 3)
+        self.assertEqual(events.count("foreground-activity"), 3)
+        self.assertEqual(events.count("adb-pid"), 3)
         ordered = [
             "prefs-read",
             "sdk-read",
@@ -345,6 +448,9 @@ class CliTests(unittest.TestCase):
             "state-scan",
             "frida-attach",
             "bridge-initialize",
+            "state-verify",
+            "foreground-activity",
+            "adb-pid",
             "state-verify",
             "lua-execute",
             "foreground-activity",
@@ -475,7 +581,7 @@ class CliTests(unittest.TestCase):
                     exec_args("return tostring(_VERSION)", dry_run=False),
                     settings,
                 )
-        self.assertEqual(events.count("state-verify"), 2)
+        self.assertEqual(events.count("state-verify"), 3)
         self.assertEqual(events[-4:], ["foreground-activity", "adb-pid", "state-verify", "frida-detach"])
 
     def test_changed_adb_pid_fails_after_execution_and_before_post_verify(self) -> None:
@@ -496,7 +602,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(events[-3:], ["foreground-activity", "adb-pid", "frida-detach"])
         self.assertEqual(events.count("state-verify"), 1)
 
-    def test_foreground_drift_after_execution_fails_before_post_state_verify(self) -> None:
+    def test_foreground_drift_before_execution_fails_before_lua_call(self) -> None:
         events: list[str] = []
         settings = Settings(devices=(DeviceProfile("device-1"),))
         with (
@@ -517,7 +623,7 @@ class CliTests(unittest.TestCase):
                     exec_args("return tostring(_VERSION)", dry_run=False),
                     settings,
                 )
-        self.assertEqual(events.count("lua-execute"), 1)
+        self.assertEqual(events.count("lua-execute"), 0)
         self.assertEqual(events.count("state-verify"), 1)
         self.assertEqual(events[-2:], ["foreground-activity", "frida-detach"])
 
@@ -598,6 +704,112 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result["item_count"], 1)
         self.assertEqual(result["items"][0]["quality"], "green")
 
+    def test_ensure_world_dry_run_reports_scene_without_tapping(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(
+                    events,
+                    output=scene_protocol(role),
+                ),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(execute(business_args("ensure-world"), settings), 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(
+            result["script_sha256"],
+            script_sha256(build_scene_status_lua((role,))),
+        )
+        self.assertTrue(result["world_ready"])
+        self.assertFalse(result["tap_invoked"])
+        self.assertEqual(result["scene_after"]["class"], "WorldScene")
+        self.assertNotIn("input-tap:652,1213", events)
+
+    def test_ensure_world_execute_taps_city_and_waits_until_world_ready(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        outputs = (
+            scene_protocol(
+                role,
+                scene_type="2",
+                class_name="CityScene",
+                is_world=False,
+                is_city=True,
+            ),
+            scene_protocol(role, loading="true", transition="true"),
+            scene_protocol(role),
+        )
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, outputs=outputs),
+            ),
+            patch("mumu_autotask.cli.time.sleep"),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args("ensure-world", dry_run=False),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["world_ready"])
+        self.assertTrue(result["tap_invoked"])
+        self.assertEqual(result["tap_coordinates"], [652, 1213])
+        self.assertEqual(result["poll_count"], 2)
+        self.assertIn("input-tap:652,1213", events)
+
+    def test_ensure_world_execute_waits_for_scene_modules_after_cold_start(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(
+                    events,
+                    outputs=(
+                        LuaExecutionError(
+                            "Lua execution failed with bridge result -80: "
+                            "game/module/logic/PlayerTop:0: "
+                            "attempt to index field 'm_modules' (a nil value)",
+                            output="not ready",
+                            result_code=-80,
+                        ),
+                        scene_protocol(role),
+                    ),
+                ),
+            ),
+            patch("mumu_autotask.cli.time.sleep") as sleep,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args("ensure-world", dry_run=False),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["world_ready"])
+        self.assertFalse(result["tap_invoked"])
+        self.assertEqual(events.count("lua-execute"), 2)
+        self.assertNotIn("input-tap:652,1213", events)
+        sleep.assert_called_once_with(0.05)
+
     def test_march_dry_run_selects_target_without_opening_expedition(self) -> None:
         events: list[str] = []
         role = "打工的"
@@ -675,17 +887,6 @@ class CliTests(unittest.TestCase):
             ),
             "\n".join(
                 (
-                    "MUMU_AUTOTASK\t1\tCOMMIT",
-                    f"ROLE\t{role_hex}",
-                    "KINGDOM\t4549",
-                    "TARGET\t70",
-                    "AVERAGE\t1",
-                    "GO\t1",
-                    "END\t1",
-                )
-            ),
-            "\n".join(
-                (
                     "MUMU_AUTOTASK\t1\tVERIFY",
                     f"ROLE\t{role_hex}",
                     "KINGDOM\t4549",
@@ -717,12 +918,87 @@ class CliTests(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertTrue(result["request_dispatched"])
         self.assertEqual(result["quest_status_after"], "1")
+        self.assertTrue(result["average_tapped"])
+        self.assertTrue(result["go_tapped"])
         self.assertEqual(events.count("frida-attach"), 1)
         self.assertEqual(events.count("frida-detach"), 1)
-        self.assertEqual(events.count("lua-execute"), 5)
+        self.assertEqual(events.count("lua-execute"), 4)
         self.assertEqual(result["verification_polls"], 1)
 
-    def test_march_execute_blocks_ui_path_in_direct_frida_mode(self) -> None:
+    def test_march_execute_uses_ui_taps_in_frida_direct_mode(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        role_hex = role.encode("utf-8").hex()
+        item = (
+            "ITEM\t70\t1700\t1\t700\t701\t1900000000"
+            "\tpurple\t4\t808\t8\t10"
+        )
+        def stage(kind: str, *body: str) -> str:
+            return "\n".join(
+                (
+                    f"MUMU_AUTOTASK\t1\t{kind}",
+                    f"ROLE\t{role_hex}",
+                    "KINGDOM\t4549",
+                    "TARGET\t70",
+                    *body,
+                    "END\t1",
+                )
+            )
+
+        outputs = (
+            "\n".join(
+                (
+                    "MUMU_AUTOTASK\t1\tINTEL",
+                    f"ROLE\t{role_hex}",
+                    "KINGDOM\t4549",
+                    item,
+                    "END\t1",
+                )
+            ),
+            stage("OPEN", "OPENED\t1"),
+            stage("READY", "READY\t1"),
+            stage(
+                "VERIFY",
+                "ACCEPTED\t1\tSTATUS\t1",
+                "MARCH\t1\tEVENT\tmissing",
+                "PROOF\tMARCH_FIELDS",
+            ),
+        )
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(
+                    events,
+                    outputs=outputs,
+                    thread_name="FridaDirect",
+                ),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args("march", dry_run=False, quality="purple"),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["request_dispatched"])
+        self.assertNotIn("direct_commit", result["stage_script_sha256"])
+        self.assertIn("open", result["stage_script_sha256"])
+        self.assertIn("ready", result["stage_script_sha256"])
+        self.assertTrue(result["average_tapped"])
+        self.assertTrue(result["go_tapped"])
+        self.assertEqual(result["average_tap_coordinates"], [200, 1212])
+        self.assertEqual(result["go_tap_coordinates"], [549, 1212])
+        self.assertIn("input-tap:200,1212", events)
+        self.assertIn("input-tap:549,1212", events)
+        self.assertEqual(events.count("lua-execute"), 4)
+
+    def test_march_execute_surfaces_open_protocol_errors_without_ui_taps(self) -> None:
         events: list[str] = []
         role = "打工的"
         role_hex = role.encode("utf-8").hex()
@@ -743,18 +1019,18 @@ class CliTests(unittest.TestCase):
                 "mumu_autotask.cli._client",
                 return_value=FakeClient(
                     events,
-                    output=protocol,
+                    outputs=(protocol, protocol),
                     thread_name="FridaDirect",
                 ),
             ),
         ):
-            with self.assertRaisesRegex(BusinessError, "当前直连模式"):
+            with self.assertRaisesRegex(BusinessError, "OPEN protocol"):
                 execute(
                     business_args("march", dry_run=False, quality="purple"),
                     settings,
                 )
-        self.assertEqual(events.count("lua-execute"), 1)
-        self.assertNotIn("expedition", "".join(events))
+        self.assertEqual(events.count("lua-execute"), 2)
+        self.assertFalse(any(event.startswith("input-tap:") for event in events))
         self.assertEqual(events.count("frida-detach"), 1)
 
     def test_march_retries_until_exact_server_proof_appears(self) -> None:
@@ -787,7 +1063,6 @@ class CliTests(unittest.TestCase):
             ),
             stage("OPEN", "OPENED\t1"),
             stage("READY", "READY\t1"),
-            stage("COMMIT", "AVERAGE\t1", "GO\t1"),
             stage(
                 "VERIFY",
                 "ACCEPTED\t0\tSTATUS\t1",
@@ -822,8 +1097,9 @@ class CliTests(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertTrue(result["request_dispatched"])
         self.assertEqual(result["verification_polls"], 2)
-        self.assertEqual(events.count("lua-execute"), 6)
-        sleep.assert_called_once_with(0.2)
+        self.assertEqual(events.count("lua-execute"), 5)
+        sleep.assert_any_call(0.35)
+        sleep.assert_any_call(0.2)
 
     def test_march_rejects_role_drift_after_intel_stage(self) -> None:
         events: list[str] = []
@@ -852,7 +1128,6 @@ class CliTests(unittest.TestCase):
                     "END\t1",
                 )
             ),
-            "MUMU_AUTOTASK\t1\tCLOSE\nEND\t1",
         )
         settings = Settings(
             devices=(
@@ -873,7 +1148,7 @@ class CliTests(unittest.TestCase):
                 )
         self.assertEqual(events.count("frida-attach"), 1)
         self.assertEqual(events.count("frida-detach"), 1)
-        self.assertEqual(events.count("lua-execute"), 3)
+        self.assertEqual(events.count("lua-execute"), 2)
 
     def test_wait_intel_dry_run_hashes_exact_ids_without_attach(self) -> None:
         events: list[str] = []

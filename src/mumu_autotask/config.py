@@ -64,14 +64,19 @@ def _positive_integer(value: Any, location: str) -> int:
     return value
 
 
+def _tcp_port(value: Any, location: str) -> int:
+    port = _positive_integer(value, location)
+    if port > 65535:
+        raise ConfigError(f"{location} must be between 1 and 65535")
+    return port
+
+
 def _frida_host(value: Any, location: str) -> str:
     host = _string(value, location)
     name, separator, raw_port = host.rpartition(":")
     if not separator or not name or not raw_port.isdecimal():
         raise ConfigError(f"{location} must have the form HOST:PORT")
-    port = int(raw_port)
-    if not 1 <= port <= 65535:
-        raise ConfigError(f"{location} port must be between 1 and 65535")
+    _tcp_port(int(raw_port), f"{location} port")
     return host
 
 
@@ -168,6 +173,7 @@ class DeviceProfile:
     base_url: str | None = None
     headers: Mapping[str, str] = field(default_factory=dict)
     frida_host: str = "127.0.0.1:27042"
+    frida_remote_port: int = 27042
     bridge_remote_path: str = DEFAULT_BRIDGE_REMOTE_PATH
     expected_kingdom: int = ALLOWED_KINGDOM
     package_name: str = DEFAULT_PACKAGE
@@ -186,6 +192,10 @@ class DeviceProfile:
         frida_host = _frida_host(
             raw.get("frida_host", "127.0.0.1:27042"),
             f"{location}.frida_host",
+        )
+        frida_remote_port = _tcp_port(
+            raw.get("frida_remote_port", 27042),
+            f"{location}.frida_remote_port",
         )
         expected_kingdom = raw.get("expected_kingdom", ALLOWED_KINGDOM)
         if (
@@ -254,6 +264,7 @@ class DeviceProfile:
         return cls(
             serial=serial,
             frida_host=frida_host,
+            frida_remote_port=frida_remote_port,
             bridge_remote_path=bridge_remote_path,
             expected_kingdom=ALLOWED_KINGDOM,
             package_name=package_name,
@@ -277,6 +288,10 @@ class DeviceProfile:
             f"{self.package_name}.v2.playerprefs.xml"
         )
         return self.playerprefs_path or canonical
+
+    @property
+    def frida_local_port(self) -> int:
+        return int(self.frida_host.rpartition(":")[2])
 
 
 @dataclass(frozen=True, slots=True)

@@ -26,6 +26,7 @@
       "instance_name": "MuMuPlayer-12.0-1",
       "roles": ["打工的"],
       "frida_host": "127.0.0.1:27052",
+      "frida_remote_port": 38417,
       "bridge_remote_path": "/data/local/tmp/libmumu_bridge.so",
       "activity_name": "com.gof.global/com.unity3d.player.MyMainPlayerActivity",
       "expected_kingdom": 4549

@@ -109,7 +109,66 @@ class AdbTests(unittest.TestCase):
 
     def test_pidof_rejects_multiple_processes(self) -> None:
         client = AdbClient("fake-adb", runner=FakeRunner("7359 7360"))
-        with self.assertRaisesRegex(AdbError, "expected one PID"):
+        with self.assertRaisesRegex(AdbError, "expected one main PID"):
+            client.pidof("device-1", "com.gof.global")
+
+    def test_pidof_selects_exact_main_process_when_child_process_matches_prefix(self) -> None:
+        runner = MappingRunner(
+            {
+                (
+                    "fake-adb",
+                    "-s",
+                    "device-1",
+                    "shell",
+                    "pidof",
+                    "com.gof.global",
+                ): "7359 7360\n",
+                (
+                    "fake-adb",
+                    "-s",
+                    "device-1",
+                    "shell",
+                    "ps",
+                    "-A",
+                ): (
+                    "USER PID PPID VSZ RSS WCHAN ADDR S NAME\n"
+                    "u0_a123 7359 333 123 45 0 0 S com.gof.global\n"
+                    "u0_a123 7360 333 123 45 0 0 S com.gof.global:push\n"
+                ),
+            }
+        )
+        client = AdbClient("fake-adb", runner=runner)
+
+        self.assertEqual(client.pidof("device-1", "com.gof.global"), 7359)
+
+    def test_pidof_rejects_ambiguous_exact_main_processes(self) -> None:
+        runner = MappingRunner(
+            {
+                (
+                    "fake-adb",
+                    "-s",
+                    "device-1",
+                    "shell",
+                    "pidof",
+                    "com.gof.global",
+                ): "7359 7360\n",
+                (
+                    "fake-adb",
+                    "-s",
+                    "device-1",
+                    "shell",
+                    "ps",
+                    "-A",
+                ): (
+                    "USER PID PPID VSZ RSS WCHAN ADDR S NAME\n"
+                    "u0_a123 7359 333 123 45 0 0 S com.gof.global\n"
+                    "u0_a123 7360 333 123 45 0 0 S com.gof.global\n"
+                ),
+            }
+        )
+        client = AdbClient("fake-adb", runner=runner)
+
+        with self.assertRaisesRegex(AdbError, "expected one main PID"):
             client.pidof("device-1", "com.gof.global")
 
     def test_foreground_activity_parses_resumed_activity(self) -> None:
@@ -226,6 +285,43 @@ class AdbTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(AdbError, "binary failure"):
             client.exec_out("device-1", "su", "0", "cat", "/proc/7/mem")
+
+    def test_input_tap_uses_adb_shell_coordinates(self) -> None:
+        runner = FakeRunner("")
+        client = AdbClient("fake-adb", runner=runner)
+
+        client.input_tap("device-1", 200, 1212)
+
+        self.assertEqual(
+            runner.calls[-1],
+            ["fake-adb", "-s", "device-1", "shell", "input", "tap", "200", "1212"],
+        )
+
+    def test_input_tap_rejects_invalid_coordinates(self) -> None:
+        client = AdbClient("fake-adb", runner=FakeRunner(""))
+
+        for x, y in ((-1, 0), (0, -1), (True, 0), (0, False)):
+            with self.subTest(x=x, y=y):
+                with self.assertRaisesRegex(AdbError, "tap coordinates"):
+                    client.input_tap("device-1", x, y)  # type: ignore[arg-type]
+
+    def test_window_size_parses_physical_size(self) -> None:
+        runner = FakeRunner("Physical size: 720x1280\n")
+        client = AdbClient("fake-adb", runner=runner)
+
+        size = client.window_size("device-1")
+
+        self.assertEqual((size.width, size.height), (720, 1280))
+        self.assertEqual(
+            runner.calls[-1],
+            ["fake-adb", "-s", "device-1", "shell", "wm", "size"],
+        )
+
+    def test_window_size_rejects_unparseable_output(self) -> None:
+        client = AdbClient("fake-adb", runner=FakeRunner("no size here\n"))
+
+        with self.assertRaisesRegex(AdbError, "could not parse window size"):
+            client.window_size("device-1")
 
 
 if __name__ == "__main__":

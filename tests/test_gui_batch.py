@@ -531,6 +531,15 @@ class HuntWaveBatchTests(unittest.TestCase):
             ("wait", manager.hunt_batch.wait_target_ids)
         )
         march_calls: list[int] = []
+        call_order: list[tuple[str, object]] = []
+
+        def ensure_world(
+            serial: str,
+            *,
+            expected_role: str,
+        ) -> None:
+            self.assertEqual((serial, expected_role), ("device-1", "打工人"))
+            call_order.append(("ensure-world", expected_role))
 
         def march(
             serial: str,
@@ -541,6 +550,7 @@ class HuntWaveBatchTests(unittest.TestCase):
         ) -> dict[str, object]:
             self.assertEqual((serial, quality, expected_role), ("device-1", "purple", "打工人"))
             march_calls.append(runtime_id)
+            call_order.append(("march", runtime_id))
             return {
                 "serial": serial,
                 "kingdom": 4549,
@@ -550,7 +560,10 @@ class HuntWaveBatchTests(unittest.TestCase):
                 "quest_status_after": 1,
             }
 
-        manager.backend = SimpleNamespace(march=march)
+        manager.backend = SimpleNamespace(
+            ensure_world=ensure_world,
+            march=march,
+        )
 
         class CapturingDispatcher:
             def __init__(self) -> None:
@@ -583,6 +596,17 @@ class HuntWaveBatchTests(unittest.TestCase):
                 self.assertNotIn(("wait", (100, 101, 102)), events)
 
         self.assertEqual(march_calls, [100, 101, 102])
+        self.assertEqual(
+            call_order,
+            [
+                ("ensure-world", "打工人"),
+                ("march", 100),
+                ("ensure-world", "打工人"),
+                ("march", 101),
+                ("ensure-world", "打工人"),
+                ("march", 102),
+            ],
+        )
         self.assertEqual(len(dispatcher.submissions), 3)
         self.assertEqual(manager.hunt_batch.dispatch_pending_ids, ())
         self.assertEqual(manager.hunt_batch.wait_target_ids, (100, 101, 102))
