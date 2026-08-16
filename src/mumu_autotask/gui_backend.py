@@ -601,8 +601,8 @@ class GuiBackend:
 
     def status(self, serial: str) -> Mapping[str, Any]:
         result = self.runner.run(
-            ("status", "--serial", serial),
-            timeout=30,
+            ("status", "--serial", serial, "--prepare-frida"),
+            timeout=60,
         )
         payloads = parse_json_lines(result.stdout)
         if len(payloads) != 1:

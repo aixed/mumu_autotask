@@ -332,6 +332,9 @@ class AdbClient:
     def forward(self, serial: str, local: str, remote: str) -> str:
         return self._run("-s", serial, "forward", local, remote)
 
+    def forward_remove(self, serial: str, local: str) -> str:
+        return self._run("-s", serial, "forward", "--remove", local)
+
     def forward_list(self) -> list[AdbForward]:
         output = self._run("forward", "--list")
         forwards: list[AdbForward] = []

@@ -83,6 +83,10 @@ class FakeAdb:
         self.events.append(f"forward:{serial}:{local}->{remote}")
         return local.rpartition(":")[2]
 
+    def forward_remove(self, serial: str, local: str) -> str:
+        self.events.append(f"forward-remove:{serial}:{local}")
+        return ""
+
     def shell(self, serial: str, *args: str) -> str:
         if args[-1].endswith("com.cg.sdk.xml"):
             self.events.append("sdk-read")
@@ -682,6 +686,11 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result["playerprefs_kingdom"], 4549)
         self.assertEqual(result["sdk_server_id"], 4549)
         self.assertEqual(result["roles"], ["打工的"])
+        self.assertTrue(result["frida_forward_ready"])
+        self.assertTrue(result["frida_forward_created"])
+        self.assertTrue(result["frida_ready"])
+        self.assertFalse(result["bridge_initialized"])
+        self.assertIsNone(result["bridge_arch"])
         self.assertEqual(
             result["activity"],
             "com.gof.global/com.unity3d.player.MyMainPlayerActivity",
@@ -689,6 +698,43 @@ class CliTests(unittest.TestCase):
         self.assertTrue(result["game_activity_foreground"])
         self.assertNotIn("background", events)
         self.assertIn("foreground-activity", events)
+        self.assertIn("forward:device-1:tcp:27042->tcp:27042", events)
+        self.assertIn("frida-inspect", events)
+        self.assertNotIn("frida-attach", events)
+        self.assertNotIn("bridge-initialize", events)
+
+    def test_status_prepare_frida_initializes_bridge_once(self) -> None:
+        events: list[str] = []
+        settings = Settings(
+            devices=(
+                DeviceProfile(
+                    "device-1",
+                    instance_name="MuMuPlayer-12.0-1",
+                    roles=("打工的",),
+                ),
+            )
+        )
+        output = io.StringIO()
+        args = argparse.Namespace(
+            command="status",
+            serial="device-1",
+            prepare_frida=True,
+        )
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch("mumu_autotask.cli._client", return_value=FakeClient(events)),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(execute(args, settings), 0)
+
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["frida_ready"])
+        self.assertTrue(result["bridge_initialized"])
+        self.assertEqual(result["bridge_arch"], "x64")
+        self.assertIn("frida-attach", events)
+        self.assertIn("bridge-initialize", events)
+        self.assertIn("frida-detach", events)
+        self.assertLess(events.index("frida-attach"), events.index("bridge-initialize"))
 
     def test_default_dry_run_stops_before_scan_or_attach(self) -> None:
         events: list[str] = []
@@ -864,6 +910,9 @@ class CliTests(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertFalse(result["game_activity_foreground"])
         self.assertEqual(result["process"], "-")
+        self.assertFalse(result["frida_ready"])
+        self.assertFalse(result["bridge_initialized"])
+        self.assertIsNone(result["bridge_arch"])
         self.assertNotIn("frida-inspect", events)
 
     def test_unsafe_lua_is_rejected_before_adb(self) -> None:

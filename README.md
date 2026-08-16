@@ -85,9 +85,11 @@ python -m mumu_autotask --config config.json status --all
 
 ### 窗口启动器
 
-双击项目根目录的 `start_mumu_autotask.bat`。启动器会自动连接并检查配置中的
-三台 MuMu 实例，只将 ADB、Frida、游戏进程、PlayerPrefs 和 SDK Server ID
-全部通过且等于 `4549` 的实例标记为在线。
+双击项目根目录的 `start_mumu_autotask.bat`。启动器窗口名为“多开控制器”。它会
+自动连接并检查配置中的三台 MuMu 实例；刷新设备时会先补齐 ADB forward，并在游戏
+位于前台时主动恢复 Frida Server、attach 一次并初始化 native bridge。只有 ADB、
+Frida/bridge、游戏进程、PlayerPrefs 和 SDK Server ID 全部通过且等于 `4549` 的
+实例才会标记为在线。
 
 1. 在启动器表格中选中需要操作的模拟器。
 2. 点击“启动管理”，打开只绑定该 ADB serial 的管理窗口。

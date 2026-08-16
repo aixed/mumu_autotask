@@ -59,6 +59,7 @@ from .config import ConfigError, DeviceProfile, Settings, load_settings
 from .frida_driver import (
     FridaDriverError,
     FridaLuaClient,
+    FridaServerRecovery,
     LuaExecutionError,
     LuaExecutionResult,
     ProcessInfo,
@@ -93,6 +94,14 @@ def build_parser() -> argparse.ArgumentParser:
     status_target.add_argument("--serial")
     status_target.add_argument(
         "--all", action="store_true", help="check every configured device (default)"
+    )
+    status.add_argument(
+        "--prepare-frida",
+        action="store_true",
+        help=(
+            "when the game is foreground, recover Frida if needed and attach once "
+            "to initialize the native bridge"
+        ),
     )
 
     exec_lua = subparsers.add_parser(
@@ -537,12 +546,22 @@ def _lua_source(args: argparse.Namespace) -> str:
         raise ConfigError(f"cannot read Lua file {args.file}: {exc}") from exc
 
 
-def _client(profile: DeviceProfile, *, pid: int | None = None) -> FridaLuaClient:
+def _client(
+    profile: DeviceProfile,
+    *,
+    pid: int | None = None,
+    adb: AdbClient | None = None,
+) -> FridaLuaClient:
     return FridaLuaClient(
         profile.frida_host,
         process_name=profile.process_name,
         pid=pid if pid is not None else profile.pid,
         process_aliases=(profile.package_name,),
+        server_recovery=(
+            FridaServerRecovery(profile.frida_host, adb=adb)
+            if adb is not None
+            else None
+        ),
     )
 
 
@@ -566,6 +585,8 @@ def _ensure_frida_forward(adb: AdbClient, profile: DeviceProfile) -> bool:
             )
     if any(forward.remote == remote for forward in matches):
         return False
+    if matches:
+        adb.forward_remove(profile.serial, local)
     adb.forward(profile.serial, local, remote)
     return True
 
@@ -2494,16 +2515,30 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
             validate_role_whitelist(profile.roles)
         adb = _adb(settings)
         adb.require_connected([profile.serial for profile in profiles])
+        forwarded = _ensure_frida_forwards(adb, profiles)
         guard = KingdomGuard(adb)
         for profile in profiles:
             kingdom = guard.require(profile)
             activity = _foreground_activity(adb, profile)
             adb_pid = _adb_pid(adb, profile)
-            process = (
-                _client(profile, pid=adb_pid).inspect_process()
-                if activity.matches(profile.activity_name)
-                else ProcessInfo(adb_pid, "-")
-            )
+            process = ProcessInfo(adb_pid, "-")
+            frida_ready = False
+            bridge_initialized = False
+            bridge_arch: str | None = None
+            if activity.matches(profile.activity_name):
+                client = _client(profile, pid=adb_pid, adb=adb)
+                if getattr(args, "prepare_frida", False):
+                    with client:
+                        initialization = dict(
+                            client.initialize_bridge(profile.bridge_remote_path)
+                        )
+                        process = client.inspect_process()
+                    frida_ready = True
+                    bridge_initialized = True
+                    bridge_arch = str(initialization.get("arch", ""))
+                else:
+                    process = client.inspect_process()
+                    frida_ready = True
             print(
                 json.dumps(
                     {
@@ -2515,6 +2550,11 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
                         "playerprefs_kingdom": kingdom.playerprefs_kingdom,
                         "sdk_server_id": kingdom.sdk_server_id,
                         "frida_host": profile.frida_host,
+                        "frida_forward_ready": True,
+                        "frida_forward_created": forwarded.get(profile.serial, False),
+                        "frida_ready": frida_ready,
+                        "bridge_initialized": bridge_initialized,
+                        "bridge_arch": bridge_arch,
                         "pid": process.pid,
                         "process": process.name,
                         "activity": activity.component,
@@ -2600,7 +2640,8 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
     kingdom = KingdomGuard(adb).require(profile)
     activity = _require_game_foreground(adb, profile)
     adb_pid = _adb_pid(adb, profile)
-    client = _client(profile, pid=adb_pid)
+    _ensure_frida_forward(adb, profile)
+    client = _client(profile, pid=adb_pid, adb=adb)
     process = client.inspect_process()
     payload = _base_payload(profile, kingdom, process, activity)
     payload.update(

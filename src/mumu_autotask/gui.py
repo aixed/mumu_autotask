@@ -27,6 +27,7 @@ from .gui_backend import (
 
 
 LOGGER = logging.getLogger(__name__)
+APP_TITLE = "多开控制器"
 
 QUALITY_META: dict[str, tuple[str, str]] = {
     "green": ("绿色", "#2F855A"),
@@ -962,6 +963,8 @@ def _is_online_status(payload: Mapping[str, Any]) -> bool:
         and payload.get("kingdom") == ALLOWED_KINGDOM
         and payload.get("playerprefs_kingdom") == ALLOWED_KINGDOM
         and payload.get("sdk_server_id") == ALLOWED_KINGDOM
+        and payload.get("frida_ready") is True
+        and payload.get("bridge_initialized") is True
         and isinstance(payload.get("pid"), int)
         and payload.get("process") == "Whiteout Survival"
         and payload.get("game_activity_foreground") is True
@@ -1129,7 +1132,7 @@ class LauncherApp:
         self.managers: dict[str, DeviceManagerWindow] = {}
         self.busy = False
 
-        self.root.title("MuMu 情报自动狩猎")
+        self.root.title(APP_TITLE)
         self.root.geometry("1020x570")
         self.root.minsize(840, 500)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
@@ -1196,7 +1199,7 @@ class LauncherApp:
         title_bar = ttk.Frame(outer)
         title_bar.grid(row=0, column=0, sticky="ew")
         title_bar.columnconfigure(0, weight=1)
-        ttk.Label(title_bar, text="MuMu 情报自动狩猎", style="Title.TLabel").grid(
+        ttk.Label(title_bar, text=APP_TITLE, style="Title.TLabel").grid(
             row=0, column=0, sticky="w"
         )
         self.refresh_button = ttk.Button(
@@ -1315,7 +1318,7 @@ class LauncherApp:
         if self.busy:
             return
         self._set_busy(True)
-        self.summary_text.set("正在连接 ADB 并检查三台实例的 4549、Frida 和游戏进程...")
+        self.summary_text.set("正在连接 ADB、准备 Frida，并检查三台实例的 4549 和游戏进程...")
         for row_id in self.row_serials:
             values = list(self.tree.item(row_id, "values"))
             values[0] = "检查中"
@@ -1487,7 +1490,7 @@ class DeviceManagerWindow:
         self.hunt_batch: HuntWaveBatch | None = None
 
         self.window = tk.Toplevel(launcher.root)
-        self.window.title(f"自动狩猎管理 - {_profile_name(profile)}")
+        self.window.title(f"{APP_TITLE} - {_profile_name(profile)}")
         self.window.geometry("900x780")
         self.window.minsize(780, 700)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
@@ -2895,6 +2898,7 @@ __all__ = [
     "HuntBatchTarget",
     "HuntWaveBatch",
     "LauncherApp",
+    "APP_TITLE",
     "CATEGORY_META",
     "QUALITY_META",
     "TaskDispatcher",

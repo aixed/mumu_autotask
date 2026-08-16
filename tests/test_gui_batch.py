@@ -47,6 +47,8 @@ class HuntBatchQueueTests(unittest.TestCase):
             "kingdom": 4549,
             "playerprefs_kingdom": 4549,
             "sdk_server_id": 4549,
+            "frida_ready": True,
+            "bridge_initialized": True,
             "pid": 7359,
             "process": "Whiteout Survival",
             "game_activity_foreground": True,
@@ -62,6 +64,12 @@ class HuntBatchQueueTests(unittest.TestCase):
             if key != "game_activity_foreground"
         }
         self.assertFalse(_is_online_status(without_activity))
+        without_bridge = {
+            key: value
+            for key, value in payload.items()
+            if key != "bridge_initialized"
+        }
+        self.assertFalse(_is_online_status(without_bridge))
 
     def test_selected_qualities_expand_by_fixed_quality_order_and_current_count(
         self,

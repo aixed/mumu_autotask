@@ -275,7 +275,7 @@ class GuiBackendTests(unittest.TestCase):
         self.assertEqual(
             runner.calls,
             [
-                (("status", "--serial", "device-1"), 30),
+                (("status", "--serial", "device-1", "--prepare-frida"), 60),
                 (("inspect-intel", "--serial", "device-1", "--execute"), 90),
             ],
         )
