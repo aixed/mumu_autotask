@@ -1,0 +1,1187 @@
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from mumu_autotask.adb import ForegroundActivity
+from mumu_autotask.cli import build_parser, execute, main
+from mumu_autotask.business import (
+    BusinessError,
+    build_inspect_intel_lua,
+    build_intel_status_lua,
+    script_sha256,
+)
+from mumu_autotask.config import DeviceProfile, Settings
+from mumu_autotask.frida_driver import (
+    FridaDriverError,
+    LuaExecutionError,
+    LuaExecutionResult,
+)
+from mumu_autotask.kingdom import KingdomGuardError
+from mumu_autotask.lua_safety import LuaSafetyError
+
+
+def prefs_xml(value: int) -> str:
+    return f'<map><int name="__KEY_KINGDOM__" value="{value}" /></map>'
+
+
+def sdk_xml(value: int) -> str:
+    return (
+        '<map><string name="CONTEXT_UTILS_RECENTLY_SERVERID">'
+        f"{value}</string></map>"
+    )
+
+
+class FakeAdb:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        playerprefs_kingdom: int = 4549,
+        sdk_server_id: int = 4549,
+        pids: tuple[int, ...] = (7359,),
+        activity: str | None = "com.gof.global/com.unity3d.player.MyMainPlayerActivity",
+        activities: tuple[str | None, ...] | None = None,
+    ) -> None:
+        self.events = events
+        self.playerprefs_kingdom = playerprefs_kingdom
+        self.sdk_server_id = sdk_server_id
+        self.pids = list(pids)
+        self.activities = list(activities) if activities is not None else [activity]
+
+    def require_connected(self, serials) -> None:
+        self.events.append("adb-ready")
+
+    def shell(self, serial: str, *args: str) -> str:
+        if args[-1].endswith("com.cg.sdk.xml"):
+            self.events.append("sdk-read")
+            return sdk_xml(self.sdk_server_id)
+        self.events.append("prefs-read")
+        return prefs_xml(self.playerprefs_kingdom)
+
+    def pidof(self, serial: str, package_name: str) -> int:
+        self.events.append("adb-pid")
+        if len(self.pids) > 1:
+            return self.pids.pop(0)
+        return self.pids[0]
+
+    def foreground_activity(self, serial: str) -> ForegroundActivity:
+        self.events.append("foreground-activity")
+        if len(self.activities) > 1:
+            component = self.activities.pop(0)
+        else:
+            component = self.activities[0]
+        return ForegroundActivity(component, "fake", f"fake {component}")
+
+
+class FakeClient:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        fail_initialize: bool = False,
+        fail_execute: bool = False,
+        output: str = "Lua 5.1",
+        outputs: tuple[str, ...] | None = None,
+        thread_name: str = "UnityMain",
+    ) -> None:
+        self.events = events
+        self.fail_initialize = fail_initialize
+        self.fail_execute = fail_execute
+        self.output = output
+        self.outputs = list(outputs) if outputs is not None else None
+        self.thread_name = thread_name
+        self.candidate = SimpleNamespace(
+            address=0x7B7029221380,
+            address_text="0x7b7029221380",
+            cframe=0,
+        )
+
+    def __enter__(self):
+        self.events.append("frida-attach")
+        return self
+
+    def __exit__(self, *args) -> None:
+        self.events.append("frida-detach")
+
+    def inspect_process(self):
+        self.events.append("frida-inspect")
+        return SimpleNamespace(pid=7359, name="Whiteout Survival")
+
+    def initialize_bridge(self, path: str):
+        self.events.append("bridge-initialize")
+        if self.fail_initialize:
+            raise FridaDriverError("initialize failed")
+        return {"arch": "x64", "probe": "81985529216486895"}
+
+    def execute_lua(self, state_address: int, code: str, **kwargs):
+        self.events.append("lua-execute")
+        if self.fail_execute:
+            raise LuaExecutionError(
+                "execution failed",
+                output="load error",
+                result_code=-12,
+            )
+        output = self.outputs.pop(0) if self.outputs is not None else self.output
+        return LuaExecutionResult(output, 8, 8123, self.thread_name)
+
+
+class FakeScanner:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.candidate = SimpleNamespace(
+            address=0x7B7029221380,
+            address_text="0x7b7029221380",
+            cframe=0,
+        )
+
+    def find_unique_idle_main(self, pid: int):
+        self.events.append("state-scan")
+        return self.candidate
+
+    def verify_idle_main(self, pid: int, address: int):
+        self.events.append("state-verify")
+        return self.candidate
+
+
+def exec_args(code: str, *, dry_run: bool = True) -> argparse.Namespace:
+    return argparse.Namespace(
+        command="exec-lua",
+        serial="device-1",
+        code=code,
+        file=None,
+        allow_unsafe_lua=False,
+        dry_run=dry_run,
+    )
+
+
+def business_args(
+    command: str,
+    *,
+    dry_run: bool = True,
+    quality: str | None = None,
+    target_id: int | None = None,
+    target_ids: list[int] | None = None,
+    timeout: float = 1.0,
+    poll_interval: float = 0.05,
+    expected_role: str | None = None,
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        command=command,
+        serial="device-1",
+        quality=quality,
+        target_id=target_id,
+        target_ids=target_ids,
+        timeout=timeout,
+        poll_interval=poll_interval,
+        expected_role=expected_role,
+        dry_run=dry_run,
+    )
+
+
+def status_protocol(role: str, *targets: str) -> str:
+    return "\n".join(
+        (
+            "MUMU_AUTOTASK\t1\tINTEL_STATUS",
+            f"ROLE\t{role.encode('utf-8').hex()}",
+            "KINGDOM\t4549",
+            *targets,
+            f"END\t{len(targets)}",
+        )
+    )
+
+
+def claim_protocol(role: str, target_ids: tuple[int, ...], *, sent: bool) -> str:
+    targets = "\t".join(str(runtime_id) for runtime_id in target_ids)
+    return "\n".join(
+        (
+            "MUMU_AUTOTASK\t1\tCLAIM_INTEL",
+            f"ROLE\t{role.encode('utf-8').hex()}",
+            "KINGDOM\t4549",
+            f"TARGETS\t{len(target_ids)}\t{targets}",
+            f"SENT\t{int(sent)}",
+            f"IDEMPOTENT\t{int(not sent)}",
+            "END\t1",
+        )
+    )
+
+
+class CliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        scanner_patch = patch(
+            "mumu_autotask.cli._scanner",
+            side_effect=lambda adb, profile: FakeScanner(adb.events),
+        )
+        scanner_patch.start()
+        self.addCleanup(scanner_patch.stop)
+
+    def test_parser_defaults_to_dry_run_and_requires_execute_opt_in(self) -> None:
+        parser = build_parser()
+        base = [
+            "exec-lua",
+            "--serial",
+            "device-1",
+            "--code",
+            "return tostring(_VERSION)",
+        ]
+        self.assertTrue(parser.parse_args(base).dry_run)
+        self.assertFalse(parser.parse_args([*base, "--execute"]).dry_run)
+        for command in ("inspect-intel", "wait-intel", "claim-intel", "march"):
+            with self.subTest(command=command):
+                args = [command, "--serial", "device-1"]
+                if command == "march":
+                    args.extend(("--quality", "orange"))
+                elif command in {"wait-intel", "claim-intel"}:
+                    args.extend(
+                        (
+                            "--expected-role",
+                            "打工的",
+                            "--target-id",
+                            "71",
+                            "--target-id",
+                            "72",
+                        )
+                    )
+                self.assertTrue(parser.parse_args(args).dry_run)
+                self.assertFalse(parser.parse_args([*args, "--execute"]).dry_run)
+        for command in ("wait-intel", "claim-intel"):
+            with self.subTest(command=command, missing="expected-role"):
+                with redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        parser.parse_args(
+                            [command, "--serial", "device-1", "--target-id", "71"]
+                        )
+
+    def test_status_reports_both_kingdom_sources_without_ui_input(self) -> None:
+        events: list[str] = []
+        settings = Settings(
+            devices=(
+                DeviceProfile(
+                    "device-1",
+                    instance_name="MuMuPlayer-12.0-1",
+                    roles=("打工的",),
+                ),
+            )
+        )
+        output = io.StringIO()
+        args = argparse.Namespace(command="status", serial="device-1")
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch("mumu_autotask.cli._client", return_value=FakeClient(events)),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(execute(args, settings), 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["playerprefs_kingdom"], 4549)
+        self.assertEqual(result["sdk_server_id"], 4549)
+        self.assertEqual(result["roles"], ["打工的"])
+        self.assertEqual(
+            result["activity"],
+            "com.gof.global/com.unity3d.player.MyMainPlayerActivity",
+        )
+        self.assertTrue(result["game_activity_foreground"])
+        self.assertNotIn("background", events)
+        self.assertIn("foreground-activity", events)
+
+    def test_default_dry_run_stops_before_scan_or_attach(self) -> None:
+        events: list[str] = []
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch("mumu_autotask.cli._client", return_value=FakeClient(events)),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(exec_args("return tostring(_VERSION)"), settings),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["dry_run"])
+        self.assertFalse(result["lua_executed"])
+        self.assertLess(events.index("prefs-read"), events.index("frida-inspect"))
+        self.assertLess(events.index("sdk-read"), events.index("frida-inspect"))
+        self.assertLess(events.index("foreground-activity"), events.index("frida-inspect"))
+        self.assertLess(events.index("adb-pid"), events.index("frida-inspect"))
+        self.assertNotIn("state-scan", events)
+        self.assertNotIn("frida-attach", events)
+        self.assertNotIn("bridge-initialize", events)
+        self.assertNotIn("lua-execute", events)
+
+    def test_execute_uses_direct_rpc_with_pre_and_post_state_checks(self) -> None:
+        events: list[str] = []
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch("mumu_autotask.cli._client", return_value=FakeClient(events)),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    exec_args("return tostring(_VERSION)", dry_run=False),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["dry_run"])
+        self.assertTrue(result["lua_executed"])
+        self.assertEqual(result["lua_state"], "0x7b7029221380")
+        self.assertEqual(result["execution_thread_name"], "UnityMain")
+        self.assertEqual(events.count("state-verify"), 2)
+        self.assertEqual(events.count("foreground-activity"), 2)
+        ordered = [
+            "prefs-read",
+            "sdk-read",
+            "foreground-activity",
+            "adb-pid",
+            "frida-inspect",
+            "state-scan",
+            "frida-attach",
+            "bridge-initialize",
+            "state-verify",
+            "lua-execute",
+            "foreground-activity",
+            "adb-pid",
+            "state-verify",
+            "frida-detach",
+        ]
+        positions: list[int] = []
+        for item in ordered:
+            positions.append(events.index(item, positions[-1] + 1 if positions else 0))
+        self.assertEqual(positions, sorted(positions))
+
+    def test_wrong_or_disagreeing_kingdom_stops_before_frida(self) -> None:
+        for playerprefs, sdk in ((4550, 4550), (4549, 4550)):
+            with self.subTest(playerprefs=playerprefs, sdk=sdk):
+                events: list[str] = []
+                settings = Settings(devices=(DeviceProfile("device-1"),))
+                with (
+                    patch(
+                        "mumu_autotask.cli._adb",
+                        return_value=FakeAdb(
+                            events,
+                            playerprefs_kingdom=playerprefs,
+                            sdk_server_id=sdk,
+                        ),
+                    ),
+                    patch(
+                        "mumu_autotask.cli._client",
+                        return_value=FakeClient(events),
+                    ),
+                ):
+                    with self.assertRaises(KingdomGuardError):
+                        execute(
+                            exec_args(
+                                "return tostring(_VERSION)",
+                                dry_run=False,
+                            ),
+                            settings,
+                        )
+                self.assertNotIn("frida-inspect", events)
+                self.assertNotIn("frida-attach", events)
+
+    def test_background_service_pid_stops_before_frida(self) -> None:
+        events: list[str] = []
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        with (
+            patch(
+                "mumu_autotask.cli._adb",
+                return_value=FakeAdb(
+                    events,
+                    activity="com.android.launcher/.Launcher",
+                ),
+            ),
+            patch("mumu_autotask.cli._client", return_value=FakeClient(events)),
+        ):
+            with self.assertRaisesRegex(FridaDriverError, "not in foreground"):
+                execute(
+                    exec_args("return tostring(_VERSION)", dry_run=False),
+                    settings,
+                )
+        self.assertIn("foreground-activity", events)
+        self.assertNotIn("adb-pid", events)
+        self.assertNotIn("frida-inspect", events)
+        self.assertNotIn("frida-attach", events)
+
+    def test_status_reports_background_service_as_not_foreground_without_frida(self) -> None:
+        events: list[str] = []
+        settings = Settings(devices=(DeviceProfile("device-1", roles=("打工的",)),))
+        output = io.StringIO()
+        with (
+            patch(
+                "mumu_autotask.cli._adb",
+                return_value=FakeAdb(
+                    events,
+                    activity="com.android.launcher/.Launcher",
+                ),
+            ),
+            patch("mumu_autotask.cli._client", return_value=FakeClient(events)),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(argparse.Namespace(command="status", serial="device-1"), settings),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["game_activity_foreground"])
+        self.assertEqual(result["process"], "-")
+        self.assertNotIn("frida-inspect", events)
+
+    def test_unsafe_lua_is_rejected_before_adb(self) -> None:
+        events: list[str] = []
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        with patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)):
+            with self.assertRaises(LuaSafetyError):
+                execute(exec_args("GoOnMarch()", dry_run=False), settings)
+        self.assertEqual(events, [])
+
+    def test_initialize_failure_detaches_after_adb_state_scan(self) -> None:
+        events: list[str] = []
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, fail_initialize=True),
+            ),
+        ):
+            with self.assertRaisesRegex(FridaDriverError, "initialize failed"):
+                execute(
+                    exec_args("return tostring(_VERSION)", dry_run=False),
+                    settings,
+                )
+        self.assertEqual(events.count("state-scan"), 1)
+        self.assertEqual(events[-2:], ["bridge-initialize", "frida-detach"])
+
+    def test_execute_failure_still_revalidates_and_detaches(self) -> None:
+        events: list[str] = []
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, fail_execute=True),
+            ),
+        ):
+            with self.assertRaises(LuaExecutionError):
+                execute(
+                    exec_args("return tostring(_VERSION)", dry_run=False),
+                    settings,
+                )
+        self.assertEqual(events.count("state-verify"), 2)
+        self.assertEqual(events[-4:], ["foreground-activity", "adb-pid", "state-verify", "frida-detach"])
+
+    def test_changed_adb_pid_fails_after_execution_and_before_post_verify(self) -> None:
+        events: list[str] = []
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        with (
+            patch(
+                "mumu_autotask.cli._adb",
+                return_value=FakeAdb(events, pids=(7359, 9001)),
+            ),
+            patch("mumu_autotask.cli._client", return_value=FakeClient(events)),
+        ):
+            with self.assertRaisesRegex(FridaDriverError, "PID changed"):
+                execute(
+                    exec_args("return tostring(_VERSION)", dry_run=False),
+                    settings,
+                )
+        self.assertEqual(events[-3:], ["foreground-activity", "adb-pid", "frida-detach"])
+        self.assertEqual(events.count("state-verify"), 1)
+
+    def test_foreground_drift_after_execution_fails_before_post_state_verify(self) -> None:
+        events: list[str] = []
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        with (
+            patch(
+                "mumu_autotask.cli._adb",
+                return_value=FakeAdb(
+                    events,
+                    activities=(
+                        "com.gof.global/com.unity3d.player.MyMainPlayerActivity",
+                        "com.android.launcher/.Launcher",
+                    ),
+                ),
+            ),
+            patch("mumu_autotask.cli._client", return_value=FakeClient(events)),
+        ):
+            with self.assertRaisesRegex(FridaDriverError, "not in foreground"):
+                execute(
+                    exec_args("return tostring(_VERSION)", dry_run=False),
+                    settings,
+                )
+        self.assertEqual(events.count("lua-execute"), 1)
+        self.assertEqual(events.count("state-verify"), 1)
+        self.assertEqual(events[-2:], ["foreground-activity", "frida-detach"])
+
+    def test_inspect_intel_dry_run_validates_roles_before_adb(self) -> None:
+        settings = Settings(devices=(DeviceProfile("device-1", roles=()),))
+        with patch("mumu_autotask.cli._adb") as adb_factory:
+            with self.assertRaisesRegex(BusinessError, "no configured role"):
+                execute(business_args("inspect-intel"), settings)
+        adb_factory.assert_not_called()
+
+    def test_main_converts_business_errors_to_exit_code_two(self) -> None:
+        settings = Settings(
+            devices=(DeviceProfile("device-1", roles=("打工的",)),)
+        )
+        with (
+            patch("mumu_autotask.cli.load_settings", return_value=settings),
+            patch(
+                "mumu_autotask.cli.execute",
+                side_effect=BusinessError("blocked business operation"),
+            ),
+        ):
+            self.assertEqual(main(["--config", "ignored.json", "validate"]), 2)
+
+    def test_inspect_intel_dry_run_reports_script_hash_without_attach(self) -> None:
+        events: list[str] = []
+        roles = ("打工的",)
+        settings = Settings(devices=(DeviceProfile("device-1", roles=roles),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch("mumu_autotask.cli._client", return_value=FakeClient(events)),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(execute(business_args("inspect-intel"), settings), 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(
+            result["script_sha256"],
+            script_sha256(build_inspect_intel_lua(roles)),
+        )
+        self.assertEqual(result["operation"], "inspect-intel")
+        self.assertNotIn("frida-attach", events)
+        self.assertNotIn("state-scan", events)
+
+    def test_inspect_intel_execute_parses_role_and_items(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        role_hex = role.encode("utf-8").hex()
+        protocol = "\n".join(
+            (
+                "MUMU_AUTOTASK\t1\tINTEL",
+                f"ROLE\t{role_hex}",
+                "KINGDOM\t4549",
+                "ITEM\t70\t1700\t0\t700\t701\t1800000000\tgreen\t2\t808\t8\t10",
+                "END\t1",
+            )
+        )
+        settings = Settings(
+            devices=(DeviceProfile("device-1", roles=(role,)),)
+        )
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, output=protocol),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args("inspect-intel", dry_run=False),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["role"], role)
+        self.assertEqual(result["item_count"], 1)
+        self.assertEqual(result["items"][0]["quality"], "green")
+
+    def test_march_dry_run_selects_target_without_opening_expedition(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        role_hex = role.encode("utf-8").hex()
+        protocol = "\n".join(
+            (
+                "MUMU_AUTOTASK\t1\tINTEL",
+                f"ROLE\t{role_hex}",
+                "KINGDOM\t4549",
+                "ITEM\t70\t1700\t1\t700\t701\t1900000000\tyellow\t5\t808\t8\t10",
+                "END\t1",
+            )
+        )
+        settings = Settings(
+            devices=(DeviceProfile("device-1", roles=(role,)),)
+        )
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, output=protocol),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(business_args("march", quality="orange"), settings),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["quality"], "yellow")
+        self.assertTrue(result["dry_run"])
+        self.assertFalse(result["march_executed"])
+        self.assertFalse(result["request_dispatched"])
+        self.assertEqual(result["target"]["runtime_id"], 70)
+        self.assertEqual(events.count("lua-execute"), 1)
+
+    def test_march_execute_accepts_new_self_march_before_status_change(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        role_hex = role.encode("utf-8").hex()
+        item = (
+            "ITEM\t70\t1700\t1\t700\t701\t1900000000"
+            "\tpurple\t4\t808\t8\t10"
+        )
+        target_lines = (
+            "\n".join(
+                (
+                    "MUMU_AUTOTASK\t1\tINTEL",
+                    f"ROLE\t{role_hex}",
+                    "KINGDOM\t4549",
+                    item,
+                    "END\t1",
+                )
+            ),
+            "\n".join(
+                (
+                    "MUMU_AUTOTASK\t1\tOPEN",
+                    f"ROLE\t{role_hex}",
+                    "KINGDOM\t4549",
+                    "TARGET\t70",
+                    "OPENED\t1",
+                    "END\t1",
+                )
+            ),
+            "\n".join(
+                (
+                    "MUMU_AUTOTASK\t1\tREADY",
+                    f"ROLE\t{role_hex}",
+                    "KINGDOM\t4549",
+                    "TARGET\t70",
+                    "READY\t1",
+                    "END\t1",
+                )
+            ),
+            "\n".join(
+                (
+                    "MUMU_AUTOTASK\t1\tCOMMIT",
+                    f"ROLE\t{role_hex}",
+                    "KINGDOM\t4549",
+                    "TARGET\t70",
+                    "AVERAGE\t1",
+                    "GO\t1",
+                    "END\t1",
+                )
+            ),
+            "\n".join(
+                (
+                    "MUMU_AUTOTASK\t1\tVERIFY",
+                    f"ROLE\t{role_hex}",
+                    "KINGDOM\t4549",
+                    "TARGET\t70",
+                    "ACCEPTED\t1\tSTATUS\t1",
+                    "MARCH\t1\tEVENT\tmissing",
+                    "PROOF\tMARCH_FIELDS",
+                    "END\t1",
+                )
+            ),
+        )
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, outputs=target_lines),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args("march", dry_run=False, quality="purple"),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["request_dispatched"])
+        self.assertEqual(result["quest_status_after"], "1")
+        self.assertEqual(events.count("frida-attach"), 1)
+        self.assertEqual(events.count("frida-detach"), 1)
+        self.assertEqual(events.count("lua-execute"), 5)
+        self.assertEqual(result["verification_polls"], 1)
+
+    def test_march_execute_blocks_ui_path_in_direct_frida_mode(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        role_hex = role.encode("utf-8").hex()
+        protocol = "\n".join(
+            (
+                "MUMU_AUTOTASK\t1\tINTEL",
+                f"ROLE\t{role_hex}",
+                "KINGDOM\t4549",
+                "ITEM\t70\t1700\t1\t700\t701\t1900000000"
+                "\tpurple\t4\t808\t8\t10",
+                "END\t1",
+            )
+        )
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(
+                    events,
+                    output=protocol,
+                    thread_name="FridaDirect",
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(BusinessError, "当前直连模式"):
+                execute(
+                    business_args("march", dry_run=False, quality="purple"),
+                    settings,
+                )
+        self.assertEqual(events.count("lua-execute"), 1)
+        self.assertNotIn("expedition", "".join(events))
+        self.assertEqual(events.count("frida-detach"), 1)
+
+    def test_march_retries_until_exact_server_proof_appears(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        role_hex = role.encode("utf-8").hex()
+
+        def stage(kind: str, *body: str) -> str:
+            return "\n".join(
+                (
+                    f"MUMU_AUTOTASK\t1\t{kind}",
+                    f"ROLE\t{role_hex}",
+                    "KINGDOM\t4549",
+                    "TARGET\t70",
+                    *body,
+                    "END\t1",
+                )
+            )
+
+        outputs = (
+            "\n".join(
+                (
+                    "MUMU_AUTOTASK\t1\tINTEL",
+                    f"ROLE\t{role_hex}",
+                    "KINGDOM\t4549",
+                    "ITEM\t70\t1700\t1\t700\t701\t1900000000"
+                    "\tpurple\t4\t808\t8\t10",
+                    "END\t1",
+                )
+            ),
+            stage("OPEN", "OPENED\t1"),
+            stage("READY", "READY\t1"),
+            stage("COMMIT", "AVERAGE\t1", "GO\t1"),
+            stage(
+                "VERIFY",
+                "ACCEPTED\t0\tSTATUS\t1",
+                "MARCH\t0\tEVENT\t0",
+                "PROOF\tNONE",
+            ),
+            stage(
+                "VERIFY",
+                "ACCEPTED\t1\tSTATUS\t1",
+                "MARCH\t1\tEVENT\tmissing",
+                "PROOF\tMARCH_FIELDS",
+            ),
+        )
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, outputs=outputs),
+            ),
+            patch("mumu_autotask.cli.time.sleep") as sleep,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args("march", dry_run=False, quality="purple"),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["request_dispatched"])
+        self.assertEqual(result["verification_polls"], 2)
+        self.assertEqual(events.count("lua-execute"), 6)
+        sleep.assert_called_once_with(0.2)
+
+    def test_march_rejects_role_drift_after_intel_stage(self) -> None:
+        events: list[str] = []
+        first_role = "打工人"
+        second_role = "打工魂"
+        first_hex = first_role.encode("utf-8").hex()
+        second_hex = second_role.encode("utf-8").hex()
+        outputs = (
+            "\n".join(
+                (
+                    "MUMU_AUTOTASK\t1\tINTEL",
+                    f"ROLE\t{first_hex}",
+                    "KINGDOM\t4549",
+                    "ITEM\t70\t1700\t1\t700\t701\t1900000000"
+                    "\tpurple\t4\t808\t8\t10",
+                    "END\t1",
+                )
+            ),
+            "\n".join(
+                (
+                    "MUMU_AUTOTASK\t1\tOPEN",
+                    f"ROLE\t{second_hex}",
+                    "KINGDOM\t4549",
+                    "TARGET\t70",
+                    "OPENED\t1",
+                    "END\t1",
+                )
+            ),
+            "MUMU_AUTOTASK\t1\tCLOSE\nEND\t1",
+        )
+        settings = Settings(
+            devices=(
+                DeviceProfile("device-1", roles=(first_role, second_role)),
+            )
+        )
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, outputs=outputs),
+            ),
+        ):
+            with self.assertRaisesRegex(BusinessError, "device whitelist"):
+                execute(
+                    business_args("march", dry_run=False, quality="purple"),
+                    settings,
+                )
+        self.assertEqual(events.count("frida-attach"), 1)
+        self.assertEqual(events.count("frida-detach"), 1)
+        self.assertEqual(events.count("lua-execute"), 3)
+
+    def test_wait_intel_dry_run_hashes_exact_ids_without_attach(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        target_ids = [71, 72]
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch("mumu_autotask.cli._client", return_value=FakeClient(events)),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args(
+                        "wait-intel",
+                        target_ids=target_ids,
+                        expected_role=role,
+                    ),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["requested_target_ids"], target_ids)
+        self.assertEqual(result["expected_role"], role)
+        self.assertEqual(
+            result["script_sha256"],
+            script_sha256(build_intel_status_lua((role,), target_ids)),
+        )
+        self.assertNotIn("frida-attach", events)
+        self.assertNotIn("state-scan", events)
+
+    def test_expected_role_outside_device_whitelist_stops_before_adb(self) -> None:
+        settings = Settings(
+            devices=(DeviceProfile("device-1", roles=("打工的",)),)
+        )
+        with patch("mumu_autotask.cli._adb") as adb_factory:
+            with self.assertRaisesRegex(BusinessError, "device whitelist"):
+                execute(
+                    business_args(
+                        "wait-intel",
+                        target_ids=[71],
+                        expected_role="4583角色",
+                    ),
+                    settings,
+                )
+        adb_factory.assert_not_called()
+
+    def test_wait_intel_polls_exact_ids_until_all_are_terminal(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        outputs = (
+            status_protocol(
+                role,
+                "TARGET\t71\tPENDING\t3",
+                "TARGET\t72\tMISSING\tmissing",
+            ),
+            status_protocol(
+                role,
+                "TARGET\t71\tCOMPLETED\t2",
+                "TARGET\t72\tMISSING\tmissing",
+            ),
+        )
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, outputs=outputs),
+            ),
+            patch("mumu_autotask.cli.time.sleep"),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args(
+                        "wait-intel",
+                        dry_run=False,
+                        target_ids=[71, 72],
+                        expected_role=role,
+                    ),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["wait_completed"])
+        self.assertEqual(result["poll_count"], 2)
+        self.assertEqual(result["status_counts"], {"pending": 0, "completed": 1, "missing": 1})
+        self.assertEqual(events.count("lua-execute"), 2)
+        self.assertEqual(events.count("frida-attach"), 1)
+        self.assertEqual(events.count("frida-detach"), 1)
+
+    def test_wait_intel_rejects_role_drift_between_polls(self) -> None:
+        events: list[str] = []
+        outputs = (
+            status_protocol("打工人", "TARGET\t71\tPENDING\t1"),
+            status_protocol("打工魂", "TARGET\t71\tCOMPLETED\t2"),
+        )
+        settings = Settings(
+            devices=(DeviceProfile("device-1", roles=("打工人", "打工魂")),)
+        )
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, outputs=outputs),
+            ),
+            patch("mumu_autotask.cli.time.sleep"),
+        ):
+            with self.assertRaisesRegex(BusinessError, "device whitelist"):
+                execute(
+                    business_args(
+                        "wait-intel",
+                        dry_run=False,
+                        target_ids=[71],
+                        expected_role="打工人",
+                    ),
+                    settings,
+                )
+        self.assertEqual(events.count("lua-execute"), 2)
+
+    def test_claim_intel_all_missing_is_idempotent_without_request_stage(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        precheck = status_protocol(
+            role,
+            "TARGET\t71\tMISSING\tmissing",
+            "TARGET\t72\tMISSING\tmissing",
+        )
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, output=precheck),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args(
+                        "claim-intel",
+                        dry_run=False,
+                        target_ids=[71, 72],
+                        expected_role=role,
+                    ),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["idempotent"])
+        self.assertFalse(result["claim_invoked"])
+        self.assertFalse(result["request_dispatched"])
+        self.assertTrue(result["verified_missing"])
+        self.assertEqual(events.count("lua-execute"), 1)
+
+    def test_claim_intel_pending_target_blocks_before_request_stage(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        precheck = status_protocol(
+            role,
+            "TARGET\t71\tCOMPLETED\t2",
+            "TARGET\t72\tPENDING\t3",
+        )
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, output=precheck),
+            ),
+        ):
+            with self.assertRaisesRegex(BusinessError, "pending: 72"):
+                execute(
+                    business_args(
+                        "claim-intel",
+                        dry_run=False,
+                        target_ids=[71, 72],
+                        expected_role=role,
+                    ),
+                    settings,
+                )
+        self.assertEqual(events.count("lua-execute"), 1)
+
+    def test_claim_intel_sends_once_then_verifies_all_ids_missing(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        target_ids = (71, 72)
+        outputs = (
+            status_protocol(
+                role,
+                "TARGET\t71\tCOMPLETED\t2",
+                "TARGET\t72\tMISSING\tmissing",
+            ),
+            claim_protocol(role, target_ids, sent=True),
+            status_protocol(
+                role,
+                "TARGET\t71\tCOMPLETED\t2",
+                "TARGET\t72\tMISSING\tmissing",
+            ),
+            status_protocol(
+                role,
+                "TARGET\t71\tMISSING\tmissing",
+                "TARGET\t72\tMISSING\tmissing",
+            ),
+        )
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, outputs=outputs),
+            ),
+            patch("mumu_autotask.cli.time.sleep"),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args(
+                        "claim-intel",
+                        dry_run=False,
+                        target_ids=list(target_ids),
+                        expected_role=role,
+                    ),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["claim_invoked"])
+        self.assertTrue(result["request_dispatched"])
+        self.assertFalse(result["idempotent"])
+        self.assertTrue(result["verified_missing"])
+        self.assertEqual(result["verification_polls"], 2)
+        self.assertEqual(events.count("lua-execute"), 4)
+
+    def test_claim_intel_rejects_role_drift_at_claim_stage(self) -> None:
+        events: list[str] = []
+        outputs = (
+            status_protocol("打工人", "TARGET\t71\tCOMPLETED\t2"),
+            claim_protocol("打工魂", (71,), sent=True),
+        )
+        settings = Settings(
+            devices=(DeviceProfile("device-1", roles=("打工人", "打工魂")),)
+        )
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, outputs=outputs),
+            ),
+        ):
+            with self.assertRaisesRegex(BusinessError, "device whitelist"):
+                execute(
+                    business_args(
+                        "claim-intel",
+                        dry_run=False,
+                        target_ids=[71],
+                        expected_role="打工人",
+                    ),
+                    settings,
+                )
+        self.assertEqual(events.count("lua-execute"), 2)
+
+    def test_march_dry_run_honors_exact_runtime_id(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        role_hex = role.encode("utf-8").hex()
+        protocol = "\n".join(
+            (
+                "MUMU_AUTOTASK\t1\tINTEL",
+                f"ROLE\t{role_hex}",
+                "KINGDOM\t4549",
+                "ITEM\t71\t1701\t1\t700\t701\t1900000000\tpurple\t4\t808\t8\t10",
+                "ITEM\t72\t1702\t1\t702\t703\t1900000100\tpurple\t4\t809\t9\t10",
+                "END\t2",
+            )
+        )
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, output=protocol),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args(
+                        "march",
+                        quality="purple",
+                        target_id=72,
+                    ),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["requested_target_id"], 72)
+        self.assertEqual(result["target"]["runtime_id"], 72)
+
+if __name__ == "__main__":
+    unittest.main()

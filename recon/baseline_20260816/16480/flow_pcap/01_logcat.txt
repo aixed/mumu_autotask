@@ -1,0 +1,83 @@
+--------- beginning of main
+08-16 01:01:35.840  5378  5378 I logcat  : type=1400 audit(0.0:6007): avc: denied { write } for name="logd" dev="tmpfs" ino=11045 scontext=u:r:adbd:s0 tcontext=u:object_r:logd_socket:s0 tclass=sock_file permissive=1
+08-16 01:01:35.861  5382  5382 D ProcessState: Binder ioctl to enable oneway spam detection failed: Invalid argument
+08-16 01:01:35.860  1017  1017 I servicemanager: type=1400 audit(0.0:6008): avc: denied { transfer } for scontext=u:r:init:s0 tcontext=u:r:adbd:s0 tclass=binder permissive=1
+08-16 01:01:35.874  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:35.940  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:36.007  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:36.074  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:36.142  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:36.206  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:36.274  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:36.340  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:36.408  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:36.474  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:36.542  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:36.607  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:36.673  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:36.742  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:36.807  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:36.874  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:36.943  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:37.007  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:37.074  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:37.142  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:37.207  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:37.274  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:37.341  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:37.409  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:37.475  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:37.540  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:37.607  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:37.673  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:37.741  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:37.808  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:37.873  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:37.941  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:38.008  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:38.074  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:38.141  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:38.209  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:38.274  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:38.341  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:38.407  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:38.474  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:38.540  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:38.607  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:38.666  1153  1153 D opengl-gc: Check pid 2245: running 1
+08-16 01:01:38.673  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:38.742  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:38.807  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:38.873  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:38.924  5388  5388 D ProcessState: Binder ioctl to enable oneway spam detection failed: Invalid argument
+08-16 01:01:38.924  1128  2173 D gralloc_x86: gralloc_alloc: Creating ashmem region of size 3690496
+08-16 01:01:38.923  5388  5388 I screencap: type=1400 audit(0.0:6009): avc: denied { transfer } for scontext=u:r:adbd:s0 tcontext=u:r:init:s0 tclass=binder permissive=1
+08-16 01:01:38.923  1128  1128 I surfaceflinger: type=1400 audit(0.0:6010): avc: denied { call } for scontext=u:r:init:s0 tcontext=u:r:adbd:s0 tclass=binder permissive=1
+08-16 01:01:38.926  5388  5389 D hw-ProcessState: Binder ioctl to enable oneway spam detection failed: Invalid argument
+08-16 01:01:38.927  1018  1018 I hwservicemanager: getTransport: Cannot find entry android.hardware.graphics.mapper@4.0::IMapper/default in either framework or device VINTF manifest.
+08-16 01:01:38.927  5388  5389 E HidlServiceManagement: getService: Potential race detected, descriptor: android.hardware.graphics.mapper@4.0::IMapper instance: default
+08-16 01:01:38.927  1018  1018 I hwservicemanager: Since android.hardware.graphics.mapper@4.0::IMapper/default is not registered, trying to start it as a lazy HAL.
+08-16 01:01:38.927  5388  5389 I Gralloc4: mapper 4.x is not supported
+08-16 01:01:38.927  1018  1018 I hwservicemanager: getTransport: Cannot find entry android.hardware.graphics.mapper@3.0::IMapper/default in either framework or device VINTF manifest.
+08-16 01:01:38.927  5388  5389 E HidlServiceManagement: getService: Potential race detected, descriptor: android.hardware.graphics.mapper@3.0::IMapper instance: default
+08-16 01:01:38.927  1018  1018 I hwservicemanager: Since android.hardware.graphics.mapper@3.0::IMapper/default is not registered, trying to start it as a lazy HAL.
+08-16 01:01:38.927  5388  5389 W Gralloc3: mapper 3.x is not supported
+08-16 01:01:38.927  5388  5389 E HidlServiceManagement: getService: Potential race detected, descriptor: android.hardware.graphics.mapper@2.0::IMapper instance: default
+08-16 01:01:38.923  1018  1018 I hwservicemanage: type=1400 audit(0.0:6011): avc: denied { connectto } for path="/dev/socket/property_service" scontext=u:r:init:s0 tcontext=u:r:kernel:s0 tclass=unix_stream_socket permissive=1
+08-16 01:01:38.923     1     1 I init    : type=1400 audit(0.0:6012): avc: denied { search } for name="1018" dev="proc" ino=154852 scontext=u:r:kernel:s0 tcontext=u:r:init:s0 tclass=dir permissive=1
+08-16 01:01:38.929  1018  5390 W libc    : Unable to set property "ctl.interface_start" to "android.hardware.graphics.mapper@4.0::IMapper/default": error code: 0x20
+08-16 01:01:38.929  1018  5390 I hwservicemanager: Tried to start android.hardware.graphics.mapper@4.0::IMapper/default as a lazy service, but was unable to. Usually this happens when a service is not installed, but if the service is intended to be used as a lazy service, then it may be configured incorrectly.
+08-16 01:01:38.923     1     1 I init    : type=1400 audit(0.0:6013): avc: denied { read } for name="cmdline" dev="proc" ino=154853 scontext=u:r:kernel:s0 tcontext=u:r:init:s0 tclass=file permissive=1
+08-16 01:01:38.923     1     1 I init    : type=1400 audit(0.0:6014): avc: denied { open } for path="/proc/1018/cmdline" dev="proc" ino=154853 scontext=u:r:kernel:s0 tcontext=u:r:init:s0 tclass=file permissive=1
+08-16 01:01:38.923     1     1 I init    : type=1400 audit(0.0:6015): avc: denied { getattr } for path="/proc/1018/cmdline" dev="proc" ino=154853 scontext=u:r:kernel:s0 tcontext=u:r:init:s0 tclass=file permissive=1
+08-16 01:01:38.930  1018  5391 W libc    : Unable to set property "ctl.interface_start" to "android.hardware.graphics.mapper@3.0::IMapper/default": error code: 0x20
+08-16 01:01:38.930  1018  5391 I hwservicemanager: Tried to start android.hardware.graphics.mapper@3.0::IMapper/default as a lazy service, but was unable to. Usually this happens when a service is not installed, but if the service is intended to be used as a lazy service, then it may be configured incorrectly.
+08-16 01:01:38.930  5388  5388 I Binder:5388_1: type=1400 audit(0.0:6016): avc: denied { read write } for name="vaddress" dev="tmpfs" ino=9538 scontext=u:r:adbd:s0 tcontext=u:object_r:device:s0 tclass=chr_file permissive=1
+08-16 01:01:38.930  5388  5388 I Binder:5388_1: type=1400 audit(0.0:6017): avc: denied { open } for path="/dev/vaddress" dev="tmpfs" ino=9538 scontext=u:r:adbd:s0 tcontext=u:object_r:device:s0 tclass=chr_file permissive=1
+08-16 01:01:38.938  5388  5389 D screencap: Features: 0 0 0
+08-16 01:01:38.938  5388  5389 E screencap: vulkan version is 4211029
+08-16 01:01:38.948  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:38.950  5388  5388 D screencap: Features: 0 0 0
+08-16 01:01:38.950  5388  5388 E screencap: vulkan version is 4211029
+08-16 01:01:39.006  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 01:01:39.086  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]

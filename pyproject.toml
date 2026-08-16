@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mumu-autotask"
+version = "0.1.0"
+description = "Protocol analysis and automation for MuMu Android game sessions"
+requires-python = ">=3.11"
+dependencies = ["frida>=17.17.0,<18"]
+
+[project.scripts]
+mumu-autotask = "mumu_autotask.cli:main"
+mumu-autotask-gui = "mumu_autotask.gui:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mumu_autotask = ["frida_agent.js", "frida_agent.bundle.js"]

@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: mumu-autotask
+Version: 0.1.0
+Summary: Protocol analysis and automation for MuMu Android game sessions
+Requires-Python: >=3.11
+Requires-Dist: frida<18,>=17.17.0

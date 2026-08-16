@@ -1,0 +1,13 @@
+State       Recv-Q Send-Q Local Address:Port               Peer Address:Port              
+ESTAB       0      0      10.0.2.15:39376              34.209.132.174:30101               users:(("com.gof.global",pid=3497,fd=154))
+CLOSE-WAIT  597    0       [::ffff:10.0.2.15]:48612                 [::ffff:220.181.111.232]:80                  users:(("pi_android.nemu",pid=1419,fd=60))
+ESTAB       0      0       [::ffff:10.0.2.15]:5555                 [::ffff:10.0.2.2]:52843               users:(("adbd",pid=1118,fd=11))
+ESTAB       0      0       [::ffff:10.0.2.15]:5555                 [::ffff:10.0.2.2]:49328               users:(("adbd",pid=1118,fd=17))
+ESTAB       0      0       [::ffff:10.0.2.15]:46284              [::ffff:34.128.136.177]:443                 users:(("com.gof.global",pid=3497,fd=95))
+SYN-SENT    0      1       [::ffff:10.0.2.15]:60158               [::ffff:172.217.113.4]:443                 users:(("android.vending",pid=3233,fd=69))
+CLOSE-WAIT  25     0       [::ffff:10.0.2.15]:39226               [::ffff:185.151.204.7]:443                 users:(("com.gof.global",pid=3497,fd=56))
+SYN-SENT    0      1       [::ffff:10.0.2.15]:35392               [::ffff:172.217.116.4]:443                 users:(("ding:background",pid=3347,fd=75))
+ESTAB       0      0       [::ffff:10.0.2.15]:5555                 [::ffff:10.0.2.2]:65529               users:(("adbd",pid=1118,fd=19))
+ESTAB       0      0       [::ffff:10.0.2.15]:44940              [::ffff:13.213.232.253]:13321               users:(("com.gof.global",pid=3497,fd=172))
+ESTAB       0      0       [::ffff:10.0.2.15]:48136                 [::ffff:142.251.188.188]:5228                users:((".gms.persistent",pid=1667,fd=102))
+CLOSE-WAIT  32     0       [::ffff:10.0.2.15]:56036                 [::ffff:220.181.111.232]:443                 users:(("pi_android.nemu",pid=1419,fd=61))

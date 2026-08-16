@@ -1,0 +1,279 @@
+--------- beginning of main
+08-16 00:56:32.504  5170  5170 D ProcessState: Binder ioctl to enable oneway spam detection failed: Invalid argument
+08-16 00:56:32.505  1017  1017 E SELinux : avc:  denied  { find } for pid=5170 uid=2000 name=input scontext=u:r:adbd:s0 tcontext=u:object_r:input_service:s0 tclass=service_manager permissive=1
+08-16 00:56:32.541  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:32.607  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:32.674  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:32.741  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:32.807  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:32.875  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:32.941  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:33.008  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:33.074  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:33.140  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:33.208  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:33.274  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:33.341  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:33.406  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:33.474  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:33.540  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:33.608  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:33.674  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:33.741  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:33.809  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:33.876  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:33.940  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:34.007  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:34.075  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:34.141  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:34.208  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:34.274  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:34.341  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:34.410  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:34.475  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:34.540  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:34.607  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:34.676  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:34.740  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:34.808  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:34.874  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:34.941  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:35.008  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:35.075  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:35.141  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:35.208  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:35.274  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:35.340  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:35.408  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:35.473  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:35.540  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:35.601  5175  5175 D ProcessState: Binder ioctl to enable oneway spam detection failed: Invalid argument
+08-16 00:56:35.602  1128  2173 D gralloc_x86: gralloc_alloc: Creating ashmem region of size 3690496
+08-16 00:56:35.600  1128  1128 I surfaceflinger: type=1400 audit(0.0:5485): avc: denied { call } for scontext=u:r:init:s0 tcontext=u:r:adbd:s0 tclass=binder permissive=1
+08-16 00:56:35.604  5175  5176 D hw-ProcessState: Binder ioctl to enable oneway spam detection failed: Invalid argument
+08-16 00:56:35.604  1018  1018 I hwservicemanager: getTransport: Cannot find entry android.hardware.graphics.mapper@4.0::IMapper/default in either framework or device VINTF manifest.
+08-16 00:56:35.604  5175  5176 E HidlServiceManagement: getService: Potential race detected, descriptor: android.hardware.graphics.mapper@4.0::IMapper instance: default
+08-16 00:56:35.604  1018  1018 I hwservicemanager: Since android.hardware.graphics.mapper@4.0::IMapper/default is not registered, trying to start it as a lazy HAL.
+08-16 00:56:35.603  1018  1018 I hwservicemanage: type=1400 audit(0.0:5486): avc: denied { connectto } for path="/dev/socket/property_service" scontext=u:r:init:s0 tcontext=u:r:kernel:s0 tclass=unix_stream_socket permissive=1
+08-16 00:56:35.603  5175  5175 I Binder:5175_1: type=1400 audit(0.0:5487): avc: denied { open } for path="/system/vendor/lib64/hw" dev="sda6" ino=4725 scontext=u:r:adbd:s0 tcontext=u:object_r:unlabeled:s0 tclass=dir permissive=1
+08-16 00:56:35.606  5175  5176 I Gralloc4: mapper 4.x is not supported
+08-16 00:56:35.606  1018  1018 I hwservicemanager: getTransport: Cannot find entry android.hardware.graphics.mapper@3.0::IMapper/default in either framework or device VINTF manifest.
+08-16 00:56:35.606  5175  5176 E HidlServiceManagement: getService: Potential race detected, descriptor: android.hardware.graphics.mapper@3.0::IMapper instance: default
+08-16 00:56:35.606  1018  1018 I hwservicemanager: Since android.hardware.graphics.mapper@3.0::IMapper/default is not registered, trying to start it as a lazy HAL.
+08-16 00:56:35.606  5175  5176 W Gralloc3: mapper 3.x is not supported
+08-16 00:56:35.606  5175  5176 E HidlServiceManagement: getService: Potential race detected, descriptor: android.hardware.graphics.mapper@2.0::IMapper instance: default
+08-16 00:56:35.603     1     1 I init    : type=1400 audit(0.0:5488): avc: denied { read } for name="cmdline" dev="proc" ino=139054 scontext=u:r:kernel:s0 tcontext=u:r:init:s0 tclass=file permissive=1
+08-16 00:56:35.603     1     1 I init    : type=1400 audit(0.0:5489): avc: denied { open } for path="/proc/1018/cmdline" dev="proc" ino=139054 scontext=u:r:kernel:s0 tcontext=u:r:init:s0 tclass=file permissive=1
+08-16 00:56:35.608  1018  5178 W libc    : Unable to set property "ctl.interface_start" to "android.hardware.graphics.mapper@3.0::IMapper/default": error code: 0x20
+08-16 00:56:35.608  1018  5178 I hwservicemanager: Tried to start android.hardware.graphics.mapper@3.0::IMapper/default as a lazy service, but was unable to. Usually this happens when a service is not installed, but if the service is intended to be used as a lazy service, then it may be configured incorrectly.
+08-16 00:56:35.608  1018  5177 W libc    : Unable to set property "ctl.interface_start" to "android.hardware.graphics.mapper@4.0::IMapper/default": error code: 0x20
+08-16 00:56:35.608  1018  5177 I hwservicemanager: Tried to start android.hardware.graphics.mapper@4.0::IMapper/default as a lazy service, but was unable to. Usually this happens when a service is not installed, but if the service is intended to be used as a lazy service, then it may be configured incorrectly.
+08-16 00:56:35.616  5175  5176 D screencap: Features: 0 0 0
+08-16 00:56:35.616  5175  5176 E screencap: vulkan version is 4211029
+08-16 00:56:35.624  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:35.625  5175  5175 D screencap: Features: 0 0 0
+08-16 00:56:35.625  5175  5175 E screencap: vulkan version is 4211029
+08-16 00:56:35.673  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:35.740  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:35.806  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:35.876  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:35.906  5179  5179 D AndroidRuntime: >>>>>> START com.android.internal.os.RuntimeInit uid 2000 <<<<<<
+08-16 00:56:35.909  5179  5179 I AndroidRuntime: Using default boot image
+08-16 00:56:35.909  5179  5179 I AndroidRuntime: Leaving lock profiling enabled
+08-16 00:56:35.912  5179  5179 W app_process: ART APEX data files are untrusted.
+08-16 00:56:35.940  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:35.978  5179  5179 D app_process: Time zone APEX ICU file found: /apex/com.android.tzdata/etc/icu/icu_tzdata.dat
+08-16 00:56:35.978  5179  5179 D app_process: I18n APEX ICU file found: /apex/com.android.i18n/etc/icu/icudt68l.dat
+08-16 00:56:35.989  5179  5179 W app_process: Unexpected CPU variant for X86 using defaults: x86_64
+08-16 00:56:35.989  5179  5179 W System  : ClassLoader referenced unknown path: /system/framework/android.test.runner.jar
+08-16 00:56:36.006  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:36.017  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mumu.config
+08-16 00:56:36.017  5179  5179 E Zygote  : The " /system/etc/mumu-configs/device-prop-configs/arm.config" app property config file not exists!
+08-16 00:56:36.017  5179  5179 W Zygote  : In ".*shootgame.*" have not valid property config, ignore it
+08-16 00:56:36.017  5179  5179 E Zygote  : The " /system/etc/mumu-configs/device-prop-configs/arm.config" app property config file not exists!
+08-16 00:56:36.017  5179  5179 W Zygote  : In ".*hanju.*" have not valid property config, ignore it
+08-16 00:56:36.017  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mumu.config
+08-16 00:56:36.017  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/p50pro.config
+08-16 00:56:36.017  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/p50pro.config
+08-16 00:56:36.017  5179  5179 I Zygote  : getAppDeviceConfig find player priority
+08-16 00:56:36.017  5179  5179 I Zygote  : getAppDeviceConfig find player priority
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/tzyxmznew.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mate10pro.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mate10pro.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mumu.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/xiaomi6.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mate10pro.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mate10pro.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/xiaomi11pro.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mumu.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mumu.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mumu.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mumu.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mumu.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mumu.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mumu.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mumu.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mumu.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/xiaomi11pro.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/xiaomi11pro.config
+08-16 00:56:36.018  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/xiaomi11pro.config
+08-16 00:56:36.019  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/xiaomi11pro.config
+08-16 00:56:36.019  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/xiaomi11pro.config
+08-16 00:56:36.019  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mumu.config
+08-16 00:56:36.019  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mumu.config
+08-16 00:56:36.019  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mumu.config
+08-16 00:56:36.019  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/mumu.config
+08-16 00:56:36.020  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/xiaomi14pro.config
+08-16 00:56:36.020  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/xiaomi14pro.config
+08-16 00:56:36.020  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/xiaomi14pro.config
+08-16 00:56:36.020  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/overseas_sim_info.config
+08-16 00:56:36.020  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/overseas_sim_info.config
+08-16 00:56:36.021  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/xiaomi8_arm.config
+08-16 00:56:36.021  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/x86.config
+08-16 00:56:36.021  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/tzyxmznew.config
+08-16 00:56:36.021  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/pad.config
+08-16 00:56:36.030  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/yyb.config
+08-16 00:56:36.030  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/samsungsms9006.config
+08-16 00:56:36.031  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/yyb.config
+08-16 00:56:36.031  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/xiaomi8_arm.config
+08-16 00:56:36.031  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/coc.config
+08-16 00:56:36.031  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/liapp.config
+08-16 00:56:36.031  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/xiaomi8_arm.config
+08-16 00:56:36.031  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/overseas_sim_info.config
+08-16 00:56:36.031  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/liapp.config
+08-16 00:56:36.031  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/liapp.config
+08-16 00:56:36.031  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/xiaomi8_arm.config
+08-16 00:56:36.031  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/xiaomi8_arm.config
+08-16 00:56:36.031  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/xiaomi8_arm.config
+08-16 00:56:36.031  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.031  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/samsungsms9080.config
+08-16 00:56:36.031  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/xiaomi14pro.config
+08-16 00:56:36.031  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.031  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.031  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/xiaomi8_arm.config
+08-16 00:56:36.031  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/xiaomi8_arm.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/yyb.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/samsung_v2q.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/samsung_v2q.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/samsung_v2q.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/samsung_v2q.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/samsungsms9080.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/liapp.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/samsungsmg9910.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/yunos.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/yunos.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/yunos.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/yyb.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/yunos.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/samsung_s22_ultra.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/samsung_s22_ultra.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/samsung_s22_ultra.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/samsung_s22_ultra.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.032  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/samsung_s22_ultra.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/liapp.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/samsung_s22_ultra.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/yyb.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/overseas_sim_info.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/overseas_sim_info.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/data/system/etc/mumu-configs/device-prop-configs/overseas_sim_info.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.033  5179  5179 I Zygote  : config file alreay parse:/system/etc/mumu-configs/device-prop-configs/arm64.config
+08-16 00:56:36.035  5179  5179 D Zygote  : Apps device config data:{com\.heytap\.htms={ro.build.version.all_codenames=REL, ro.product.manufacturer=Xiaomi, ro.boot.ramdump=disable, ro.vendor.build.date=Sun, ro.build.hardware.version=V1, ro.hardware=qcom, ro.build.version.codename=REL, ro.build.version.release=12.0.0, ro.bootimage.build.fingerprint=Xiaomi/dipper/dipper:12.0.0/OPM1.171019.026/V10.0.11.0.OEACNFH:user/release-keys, ro.build.date.utc=1541867668, ro.bootimage.build.date.utc=1541867668, ro.product.cuptsm=XIAOMI|ESE|02|01, ro.vendor.extension_library=libqti-perfd-client.so, ro.product.cpu.abilist64=arm64-v8a, ro.product.name=dipper, ro.boot.serialno=e20b6590, ro.product.locale=zh-CN, ro.board.platform=sdm845, qcom.bluetooth.soc=cherokee, ro.boot.hardware=qcom, ro.build.user=builder, ro.boot.hwc=CN, ro.bootimage.build.date=Sun, ro.product.cpu.abi=arm64-v8a, ro.build.product=dipper, ro.build.type=user, ro.build.description=dipper-user, ro.vendor.product.manufacturer=Xiaomi, ro.vendor.product.model=MI, ro.product.cpu.abilist32=armeabi-v7a,armeabi, ro.build.version.sdk=31, ro.product.board=sdm845, ro.boot.verifiedbootstate=green, ro.build.version.incremental=V10.0.11.0.QQqun|788202866, ro.build.version.security_patch=2018-10-01, ro.product.cpu.abilist=arm64-v8a,armeabi-v7a,armeabi, ro.boot.secureboot=1, ro.vendor.product.device=dipper, ro.boot.hwlevel=MP, ro.build.date=Sun, ro.build.host=c3-miui-ota-bd123.bj, ro.build.tags=release-keys, ro.boot.usbcontroller=a600000.dwc3, ro.vendor.build.fingerprint=Xiaomi/dipper/dipper:12.0.0/OPM1.171019.026/V10.0.11.0.OEACNFH:user/release-keys, ro.product.brand=Xiaomi, ro.boot.baseband=sdm, ro.boot.veritymode=enforcing, ro.build.software.version=Android12.0.0_10, ro.build.flavor=dipper-user, ro.build.characteristics=nosdcard, ro.vendor.build.date.utc=1541867668, ro.product.model=MI, ro.boot.keymaster=1, ro.vendor.product.name=dipper, ro.product.first_api_level=31, ro.boot.hwversion=3.3.0, ro.product.device=dipper, ro.baseband=sdm, ro.build.fingerprint=Xiaomi/dipper/dipper:12.0.0/OPM1.171019.026/V10.0.11.0.OEACNFH:user/release-keys, ro.vendor.product.brand=Xiaomi, ro.build.version.preview_sdk=0, ro.product.cert=M1803E1A}, com\.wan\.lzgtwan={ro.build.version.all_codenames=REL, ro.product.manufacturer=Xiaomi, ro.boot.ramdump=disable, ro.vendor.build.date=Sun, ro.build.hardware.version=V1, ro.hardware=qcom, ro.build.version.codename=REL, ro.build.version.release=12.0.0, ro.bootimage.build.fingerprint=Xiaomi/dipper/dipper:12.0.0/OPM1.171019.026/V10.0.11.0.OEACNFH:user/release-keys, ro.build.date.utc=1541867668, ro.bootimage.build.date.utc=1541867668, ro.product.cuptsm=XIAOMI|ESE|02|01, ro.vendor.extension_library=libqti-perfd-client.so, ro.product.cpu.abilist64=arm64-v8a, ro.product.name=dipper, ro.boot.serialno=e20b6590, ro.product.locale=zh-CN, ro.board.platform=sdm845, qcom.bluetooth.soc=cherokee, ro.boot.hardware=qcom, ro.build.user=builder, ro.boot.hwc=CN, ro.bootimage.build.date=Sun, ro.product.cpu.abi=arm64-v8a, ro.build.product=dipper, ro.build.type=user, ro.build.description=dipper-user, ro.vendor.product.manufacturer=Xiaomi, ro.vendor.product.model=MI, ro.product.cpu.abilist32=armeabi-v7a,armeabi, ro.build.version.sdk=31, ro.product.board=sdm845, ro.boot.verifiedbootstate=green, ro.build.version.incremental=V10.0.11.0.QQqun|788202866, ro.build.version.security_patch=2018-10-01, ro.product.cpu.abilist=arm64-v8a,armeabi-v7a,armeabi, ro.boot.secureboot=1, ro.vendor.product.device=dipper, ro.boot.hwlevel=MP, ro.build.date=Sun, ro.build.host=c3-miui-ota-bd123.bj, ro.build.tags=release-keys, ro.boot.usbcontroller=a600000.dwc3, ro.vendor.build.fingerprint=Xiaomi/dipper/dipper:12.0.0/OPM1.171019.026/V10.0.11.0.OEACNFH:user/release-keys, ro.product.brand=Xiaomi, ro.boot.baseband=sdm, ro.boot.veritymode=enforcing, ro.build.software.version=Android12.0.0_10, ro.build.flavor=dipper-user, ro.build.characteristics=nosdcard, ro.vendor.build.date.utc=1541867668, ro.product.model=MI, ro.boot.keymaster=1, ro.vendor.product.name=dipper, ro.product.first_api_level=31, ro.boot.hwversion=3.3.0, ro.produc
+08-16 00:56:36.035  5179  5179 D Zygote  : Apps device config player priority data: [.*dts\.freefire.*, .*com\.riotgames\.league\.wildrift.*]
+08-16 00:56:36.035  5179  5179 E Zygote  : The " /pcgame/app-device-prop-overlay.config" property config file not exists!
+08-16 00:56:36.036  5179  5179 D Zygote  : getAppDeviceChannelConfig pattern = .*\.mi
+08-16 00:56:36.036  5179  5179 D Zygote  : getAppDeviceChannelConfig pattern = .*\.samsung
+08-16 00:56:36.036  5179  5179 D Zygote  : getAppDeviceChannelConfig pattern = .*\.huawei
+08-16 00:56:36.037  5179  5179 D Zygote  : Apps device channel config data:{.*\.mi={ro.product.model=M2102K1AC, ro.product.manufacturer=Xiaomi, ro.product.name=mars, ro.product.board=mars, ro.product.brand=Xiaomi, ro.product.device=mars}, .*\.huawei={ro.product.model=BLA-AL00, ro.product.manufacturer=HUAWEI, ro.product.name=BLA-AL00, ro.product.board=BLA-AL00, ro.product.brand=HUAWEI, ro.product.device=BLA-AL00}, .*\.samsung={ro.product.model=SM-G9910, ro.product.manufacturer=samsung, ro.product.name=SM-G9910, ro.product.board=SM-G9910, ro.product.brand=samsung, ro.product.device=SM-G9910}}
+08-16 00:56:36.045  5179  5179 D ProcessState: Binder ioctl to enable oneway spam detection failed: Invalid argument
+08-16 00:56:36.046  5179  5179 D AndroidRuntime: Calling main entry com.android.commands.uiautomator.Launcher
+08-16 00:56:36.049  1017  1017 E SELinux : avc:  denied  { find } for pid=5179 uid=2000 name=window scontext=u:r:adbd:s0 tcontext=u:object_r:window_service:s0 tclass=service_manager permissive=1
+08-16 00:56:36.049  1017  1017 E SELinux : avc:  denied  { find } for pid=5179 uid=2000 name=accessibility scontext=u:r:adbd:s0 tcontext=u:object_r:accessibility_service:s0 tclass=service_manager permissive=1
+--------- beginning of system
+08-16 00:56:36.058  1265  1265 D BatterySaverPolicy: accessibility changed to true, updating policy.
+08-16 00:56:36.074  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:36.142  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:36.208  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:36.277  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:36.341  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:36.408  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:36.474  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:36.543  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:36.609  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:36.675  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:36.740  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:36.772  1265  1361 W BestClock: java.time.DateTimeException: Missing NTP fix
+08-16 00:56:36.770  1098  1098 I Binder:1098_6: type=1400 audit(0.0:5519): avc: denied { create } for scontext=u:r:init:s0 tcontext=u:r:init:s0 tclass=key_socket permissive=1
+08-16 00:56:36.800  1265  1265 I NetworkStats: type=1400 audit(0.0:5520): avc: denied { map_write } for scontext=u:r:system_server:s0 tcontext=u:r:init:s0 tclass=bpf permissive=1
+08-16 00:56:36.800  1116  1116 I iptables-restor: type=1400 audit(0.0:5521): avc: denied { create } for scontext=u:r:init:s0 tcontext=u:r:init:s0 tclass=rawip_socket permissive=1
+08-16 00:56:36.800  1116  1116 I iptables-restor: type=1400 audit(0.0:5522): avc: denied { getopt } for lport=255 scontext=u:r:init:s0 tcontext=u:r:init:s0 tclass=rawip_socket permissive=1
+08-16 00:56:36.804  1265  1361 W BestClock: java.time.DateTimeException: Missing NTP fix
+08-16 00:56:36.803  1098  1098 I Binder:1098_6: type=1400 audit(0.0:5523): avc: denied { create } for name="globalAlert" scontext=u:r:init:s0 tcontext=u:object_r:proc_net:s0 tclass=file permissive=1
+08-16 00:56:36.806  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:36.807  1265  1362 W BestClock: java.time.DateTimeException: Missing NTP fix
+08-16 00:56:36.808  1265  1362 W BestClock: java.time.DateTimeException: Missing NTP fix
+08-16 00:56:36.873  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:36.940  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:37.007  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:37.072  2133  2202 W MediaProvider: isAppCloneUserPair failed. Users: 0 and 0
+08-16 00:56:37.072  2133  2202 W MediaProvider: isAppCloneUserPair for user 0: false
+08-16 00:56:37.073  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:37.076  5179  5179 W AccessibilityNodeInfoDumper: Fetch time: 7ms
+08-16 00:56:37.077  2133  2191 W StorageManager: ignore the failure of setting attributes for /storage/emulated/0/window_after_intel.xml
+08-16 00:56:37.077  2133  2191 W StorageManager: ignore the failure of setting attributes for /storage/emulated/0/window_after_intel.xml
+08-16 00:56:37.080  1265  1265 D BatterySaverPolicy: accessibility changed to false, updating policy.
+08-16 00:56:37.082  5179  5179 D hw-ProcessState: Binder ioctl to enable oneway spam detection failed: Invalid argument
+08-16 00:56:37.082  5179  5179 D AndroidRuntime: Shutting down VM
+08-16 00:56:37.142  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:37.209  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:37.274  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:37.340  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:37.407  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:37.473  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:37.541  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:37.607  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:37.674  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:37.740  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:37.809  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:37.877  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:37.940  1128  1128 E TimeStats: RenderEngineTimes are already at its maximum size[64]
+08-16 00:56:37.960  5198  5198 D ProcessState: Binder ioctl to enable oneway spam detection failed: Invalid argument
+08-16 00:56:37.956  5198  5198 I dumpsys : type=1400 audit(0.0:5535): avc: denied { write } for path="pipe:[141371]" dev="pipefs" ino=141371 scontext=u:r:system_server:s0 tcontext=u:r:adbd:s0 tclass=fifo_file permissive=1
+08-16 00:56:37.982  1265  1279 W System  : A resource failed to call close. 
+08-16 00:56:37.985  5201  5201 D ProcessState: Binder ioctl to enable oneway spam detection failed: Invalid argument
+08-16 00:56:38.000  5204  5204 I logcat  : type=1400 audit(0.0:5536): avc: denied { write } for name="logdr" dev="tmpfs" ino=11047 scontext=u:r:adbd:s0 tcontext=u:object_r:logdr_socket:s0 tclass=sock_file permissive=1

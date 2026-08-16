@@ -1,0 +1,43 @@
+{
+  "adb": {
+    "executable": "D:/Program Files/Netease/MuMu/nx_main/adb.exe",
+    "connect_targets": [
+      "127.0.0.1:16384",
+      "127.0.0.1:16416",
+      "127.0.0.1:16480"
+    ],
+    "command_timeout_seconds": 10
+  },
+  "frida": {
+    "output_capacity": 16384
+  },
+  "devices": [
+    {
+      "serial": "127.0.0.1:16384",
+      "instance_name": "MuMuPlayer-12.0-0",
+      "roles": ["打工人", "打工魂"],
+      "frida_host": "127.0.0.1:27042",
+      "bridge_remote_path": "/data/local/tmp/libmumu_bridge.so",
+      "activity_name": "com.gof.global/com.unity3d.player.MyMainPlayerActivity",
+      "expected_kingdom": 4549
+    },
+    {
+      "serial": "127.0.0.1:16416",
+      "instance_name": "MuMuPlayer-12.0-1",
+      "roles": ["打工的"],
+      "frida_host": "127.0.0.1:27052",
+      "bridge_remote_path": "/data/local/tmp/libmumu_bridge.so",
+      "activity_name": "com.gof.global/com.unity3d.player.MyMainPlayerActivity",
+      "expected_kingdom": 4549
+    },
+    {
+      "serial": "127.0.0.1:16480",
+      "instance_name": "MuMuPlayer-12.0-3",
+      "roles": ["打工客", "打工仔"],
+      "frida_host": "127.0.0.1:27062",
+      "bridge_remote_path": "/data/local/tmp/libmumu_bridge.so",
+      "activity_name": "com.gof.global/com.unity3d.player.MyMainPlayerActivity",
+      "expected_kingdom": 4549
+    }
+  ]
+}

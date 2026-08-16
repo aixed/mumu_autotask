@@ -1,0 +1,3 @@
+[console_scripts]
+mumu-autotask = mumu_autotask.cli:main
+mumu-autotask-gui = mumu_autotask.gui:main

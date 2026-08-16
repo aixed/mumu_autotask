@@ -1,0 +1,316 @@
+Activity Resolver Table:
+  Schemes:
+      ddplatform-20121:
+        fc234c0 com.gof.global/com.unity3d.player.MyMainPlayerActivity filter fbf393e
+          Action: "android.intent.action.VIEW"
+          Category: "android.intent.category.DEFAULT"
+          Category: "android.intent.category.BROWSABLE"
+          Scheme: "ddplatform-20121"
+          Authority: "kid_verification_callback": -1
+        fc234c0 com.gof.global/com.unity3d.player.MyMainPlayerActivity filter 6f5dcec
+          Action: "android.intent.action.VIEW"
+          Category: "android.intent.category.DEFAULT"
+          Category: "android.intent.category.BROWSABLE"
+          Scheme: "ddplatform-20121"
+          Authority: "game.centurygame.com": -1
+        fc234c0 com.gof.global/com.unity3d.player.MyMainPlayerActivity filter a8728b5
+          Action: "android.intent.action.VIEW"
+          Category: "android.intent.category.DEFAULT"
+          Category: "android.intent.category.BROWSABLE"
+          Scheme: "ddplatform-20121"
+          Authority: "game.centurygame.com": -1
+      http:
+        fc234c0 com.gof.global/com.unity3d.player.MyMainPlayerActivity filter af1ab4a
+          Action: "android.intent.action.VIEW"
+          Category: "android.intent.category.DEFAULT"
+          Category: "android.intent.category.BROWSABLE"
+          Scheme: "http"
+          Scheme: "https"
+          Authority: "game.centurygame.com": -1
+          Authority: "game.centurygame.com": -1
+          AutoVerify=true
+      https:
+        fc234c0 com.gof.global/com.unity3d.player.MyMainPlayerActivity filter af1ab4a
+          Action: "android.intent.action.VIEW"
+          Category: "android.intent.category.DEFAULT"
+          Category: "android.intent.category.BROWSABLE"
+          Scheme: "http"
+          Scheme: "https"
+          Authority: "game.centurygame.com": -1
+          Authority: "game.centurygame.com": -1
+          AutoVerify=true
+      fbconnect:
+        ce9b31 com.gof.global/com.facebook.CustomTabActivity filter 4273216
+          Action: "android.intent.action.VIEW"
+          Category: "android.intent.category.DEFAULT"
+          Category: "android.intent.category.BROWSABLE"
+          Scheme: "fbconnect"
+          Authority: "cct.com.gof.global": -1
+
+  Non-Data Actions:
+      com.facebook.application.709376360216583:
+        fc234c0 com.gof.global/com.unity3d.player.MyMainPlayerActivity filter bd0739f
+          Action: "com.facebook.application.709376360216583"
+      android.intent.action.MAIN:
+        fc234c0 com.gof.global/com.unity3d.player.MyMainPlayerActivity filter e4325f9
+          Action: "android.intent.action.MAIN"
+          Category: "android.intent.category.LAUNCHER"
+        52aabb com.gof.global/com.surveymonkey.surveymonkeyandroidsdk.SMFeedbackActivity filter ad9dbd8
+          Action: "android.intent.action.MAIN"
+        8f73797 com.gof.global/com.centurygame.sdk.marketing.survey.SimpleFragmentActivity filter 9fcdd84
+          Action: "android.intent.action.MAIN"
+        440b96d com.gof.global/com.centurygame.sdk.support.helpshift.CGHSWebChatActivity filter f5c59a2
+          Action: "android.intent.action.MAIN"
+
+Receiver Resolver Table:
+  Non-Data Actions:
+      com.facebook.sdk.ACTION_CURRENT_AUTHENTICATION_TOKEN_CHANGED:
+        4c3828f com.gof.global/com.facebook.AuthenticationTokenManager$CurrentAuthenticationTokenChangedBroadcastReceiver filter 2a0591c
+          Action: "com.facebook.sdk.ACTION_CURRENT_AUTHENTICATION_TOKEN_CHANGED"
+      com.facebook.sdk.ACTION_CURRENT_ACCESS_TOKEN_CHANGED:
+        93c7f69 com.gof.global/com.facebook.CurrentAccessTokenExpirationBroadcastReceiver filter 1ca6dee
+          Action: "com.facebook.sdk.ACTION_CURRENT_ACCESS_TOKEN_CHANGED"
+      com.google.android.c2dm.intent.RECEIVE:
+        2edb633 com.gof.global/com.google.firebase.iid.FirebaseInstanceIdReceiver filter b2c4df0
+          Action: "com.google.android.c2dm.intent.RECEIVE"
+
+Service Resolver Table:
+  Non-Data Actions:
+      com.google.firebase.MESSAGING_EVENT:
+        114a925 com.gof.global/com.centurygame.sdk.caffeine.fcm.DDFirebaseMessagingService filter 8f37afa
+          Action: "com.google.firebase.MESSAGING_EVENT"
+        67fb8ab com.gof.global/com.google.firebase.messaging.FirebaseMessagingService filter de7eb08
+          Action: "com.google.firebase.MESSAGING_EVENT"
+          mPriority=-500, mOrder=0, mHasStaticPartialTypes=false, mHasDynamicPartialTypes=false
+
+Domain verification status:
+  com.gof.global:
+    ID: 76021bae-3685-4b5b-b0fc-5c1ee10c386f
+    Signatures: [26:88:D7:B2:7B:15:88:CD:5E:96:79:E1:89:2F:48:C4:DB:AA:1D:FC:DC:D8:BC:35:17:E0:68:96:3E:E6:CC:45]
+    Domain verification state:
+      game.centurygame.com: verified
+    User all:
+      Verification link handling allowed: true
+      Selection state:
+        Disabled:
+          game.centurygame.com
+
+Permissions:
+  Permission [com.gof.global.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION] (d1240a5):
+    sourcePackage=com.gof.global
+    uid=10046 gids=[] type=0 prot=signature
+    perm=PermissionInfo{523f86f com.gof.global.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION}
+
+Registered ContentProviders:
+  com.gof.global/com.google.android.gms.games.provider.PlayGamesInitProvider:
+    Provider{adcc97c com.gof.global/com.google.android.gms.games.provider.PlayGamesInitProvider}
+  com.gof.global/androidx.startup.InitializationProvider:
+    Provider{74dc205 com.gof.global/androidx.startup.InitializationProvider}
+  com.gof.global/com.facebook.FacebookContentProvider:
+    Provider{217525a com.gof.global/com.facebook.FacebookContentProvider}
+  com.gof.global/com.adjust.sdk.SystemLifecycleContentProvider:
+    Provider{aa1ac8b com.gof.global/com.adjust.sdk.SystemLifecycleContentProvider}
+  com.gof.global/com.centurygame.sdk.CGFileProvider:
+    Provider{7eb0168 com.gof.global/com.centurygame.sdk.CGFileProvider}
+  com.gof.global/com.google.firebase.provider.FirebaseInitProvider:
+    Provider{7ed7981 com.gof.global/com.google.firebase.provider.FirebaseInitProvider}
+  com.gof.global/com.facebook.internal.FacebookInitProvider:
+    Provider{5e83a26 com.gof.global/com.facebook.internal.FacebookInitProvider}
+
+ContentProvider Authorities:
+  [com.gof.global.adjust-lifecycle-provider]:
+    Provider{aa1ac8b com.gof.global/com.adjust.sdk.SystemLifecycleContentProvider}
+      applicationInfo=ApplicationInfo{515fc7a com.gof.global}
+  [com.gof.global.firebaseinitprovider]:
+    Provider{7ed7981 com.gof.global/com.google.firebase.provider.FirebaseInitProvider}
+      applicationInfo=ApplicationInfo{da5dc2b com.gof.global}
+  [com.gof.global.androidx-startup]:
+    Provider{74dc205 com.gof.global/androidx.startup.InitializationProvider}
+      applicationInfo=ApplicationInfo{cf60888 com.gof.global}
+  [com.gof.global.FacebookInitProvider]:
+    Provider{5e83a26 com.gof.global/com.facebook.internal.FacebookInitProvider}
+      applicationInfo=ApplicationInfo{c8b4221 com.gof.global}
+  [com.gof.global.playgamesinitprovider]:
+    Provider{adcc97c com.gof.global/com.google.android.gms.games.provider.PlayGamesInitProvider}
+      applicationInfo=ApplicationInfo{bf76646 com.gof.global}
+  [com.gof.global.fileProvider]:
+    Provider{7eb0168 com.gof.global/com.centurygame.sdk.CGFileProvider}
+      applicationInfo=ApplicationInfo{9a41007 com.gof.global}
+  [com.facebook.app.FacebookContentProvider709376360216583]:
+    Provider{217525a com.gof.global/com.facebook.FacebookContentProvider}
+      applicationInfo=ApplicationInfo{4272534 com.gof.global}
+
+Key Set Manager:
+  [com.gof.global]
+      Signing KeySets: 13
+
+Packages:
+  Package [com.gof.global] (78267fe):
+    userId=10046
+    pkg=Package{aa9db5f com.gof.global}
+    codePath=/data/app/~~7L8v6cAQu3A-0hF5fRYZ9w==/com.gof.global-YBqRbAlDMuK9JgdKewpr8g==
+    resourcePath=/data/app/~~7L8v6cAQu3A-0hF5fRYZ9w==/com.gof.global-YBqRbAlDMuK9JgdKewpr8g==
+    legacyNativeLibraryDir=/data/app/~~7L8v6cAQu3A-0hF5fRYZ9w==/com.gof.global-YBqRbAlDMuK9JgdKewpr8g==/lib
+    extractNativeLibs=true
+    primaryCpuAbi=arm64-v8a
+    secondaryCpuAbi=null
+    cpuAbiOverride=null
+    versionCode=295 minSdk=24 targetSdk=35
+    minExtensionVersions=[]
+    versionName=1.32.21
+    usesNonSdkApi=false
+    splits=[base, config.arm64_v8a, game_asset]
+    apkSigningVersion=3
+    applicationInfo=PackageImpl{aa9db5f com.gof.global}
+    flags=[ HAS_CODE ALLOW_CLEAR_USER_DATA ]
+    privateFlags=[ PRIVATE_FLAG_ACTIVITIES_RESIZE_MODE_UNRESIZEABLE ALLOW_AUDIO_PLAYBACK_CAPTURE PRIVATE_FLAG_REQUEST_LEGACY_EXTERNAL_STORAGE HAS_DOMAIN_URLS PARTIALLY_DIRECT_BOOT_AWARE PRIVATE_FLAG_ALLOW_NATIVE_HEAP_POINTER_TAGGING ]
+    forceQueryable=false
+    queriesIntents=[Intent { act=com.android.vending.billing.InAppBillingService.BIND }, Intent { act=com.google.android.apps.play.billingtestcompanion.BillingOverrideService.BIND }, Intent { act=android.intent.action.MAIN }]
+    dataDir=/data/user/0/com.gof.global
+    supportsScreens=[small, medium, large, xlarge, resizeable, anyDensity]
+    usesOptionalLibraries:
+      org.apache.http.legacy
+      android.ext.adservices
+    usesLibraryFiles:
+      /system/framework/org.apache.http.legacy.jar
+    timeStamp=2026-08-06 14:44:42
+    firstInstallTime=2026-08-06 14:44:43
+    lastUpdateTime=2026-08-06 14:44:43
+    installerPackageName=com.android.vending
+    signatures=PackageSignatures{5a389ac version:3, signatures:[f04bc6b], past signatures:[]}
+    installPermissionsFixed=true
+    pkgFlags=[ HAS_CODE ALLOW_CLEAR_USER_DATA ]
+    declared permissions:
+      com.gof.global.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION: prot=signature, INSTALLED
+    requested permissions:
+      android.permission.QUERY_ALL_PACKAGES
+      android.permission.INTERNET
+      android.permission.VIBRATE
+      android.permission.ACCESS_NETWORK_STATE
+      android.permission.MODIFY_AUDIO_SETTINGS
+      android.permission.BLUETOOTH
+      android.permission.WRITE_EXTERNAL_STORAGE
+      android.permission.ACCESS_WIFI_STATE
+      android.permission.SCHEDULE_EXACT_ALARM
+      android.permission.CAMERA
+      android.permission.READ_EXTERNAL_STORAGE
+      com.android.vending.BILLING
+      android.permission.CHANGE_NETWORK_STATE
+      com.google.android.c2dm.permission.RECEIVE
+      android.permission.WAKE_LOCK
+      com.google.android.gms.permission.AD_ID
+      android.permission.POST_NOTIFICATIONS
+      com.google.android.finsky.permission.BIND_GET_INSTALL_REFERRER_SERVICE
+      android.permission.ACCESS_ADSERVICES_ATTRIBUTION
+      android.permission.ACCESS_ADSERVICES_AD_ID
+      com.gof.global.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION
+      com.asus.permission.READ_SDID_PROVIDER
+      com.asus.msa.SupplementaryDID.ACCESS
+      freemme.permission.msa
+      freemme.permission.msa.SECURITY_ACCESS
+    install permissions:
+      com.google.android.finsky.permission.BIND_GET_INSTALL_REFERRER_SERVICE: granted=true
+      com.google.android.c2dm.permission.RECEIVE: granted=true
+      android.permission.MODIFY_AUDIO_SETTINGS: granted=true
+      android.permission.CHANGE_NETWORK_STATE: granted=true
+      android.permission.BLUETOOTH: granted=true
+      android.permission.INTERNET: granted=true
+      com.android.vending.BILLING: granted=true
+      android.permission.ACCESS_NETWORK_STATE: granted=true
+      android.permission.SCHEDULE_EXACT_ALARM: granted=true
+      com.gof.global.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION: granted=true
+      android.permission.VIBRATE: granted=true
+      android.permission.ACCESS_WIFI_STATE: granted=true
+      android.permission.QUERY_ALL_PACKAGES: granted=true
+      com.google.android.gms.permission.AD_ID: granted=true
+      android.permission.WAKE_LOCK: granted=true
+    User 0: ceDataInode=4456988 installed=true hidden=false suspended=false distractionFlags=0 stopped=false notLaunched=false enabled=0 instant=false virtual=false
+      overlay paths:
+        /data/resource-cache/com.android.systemui-neutral-B9hg.frro
+        /data/resource-cache/com.android.systemui-accent-TLIl.frro
+      gids=[3002, 3003]
+      runtime permissions:
+        android.permission.READ_EXTERNAL_STORAGE: granted=false, flags=[ USER_SENSITIVE_WHEN_GRANTED|USER_SENSITIVE_WHEN_DENIED|RESTRICTION_INSTALLER_EXEMPT]
+        android.permission.CAMERA: granted=false, flags=[ USER_SENSITIVE_WHEN_GRANTED|USER_SENSITIVE_WHEN_DENIED]
+        android.permission.WRITE_EXTERNAL_STORAGE: granted=false, flags=[ USER_SENSITIVE_WHEN_GRANTED|USER_SENSITIVE_WHEN_DENIED|RESTRICTION_INSTALLER_EXEMPT]
+
+Queries:
+  system apps queryable: false
+  queries via package name:
+    com.gof.global:
+      [com.google.android.gms,com.google.android.syncadapters.contacts,com.google.android.gsf]
+      com.android.vending
+      com.facebook.katana
+  queries via intent:
+  queryable via interaction:
+    User 0:
+      [com.netease.mumu.cloner,com.android.keychain,com.mumu.store,com.sohu.inputmethod.sogou.chuizi,android,com.netease.nemu_vapi_android.nemu,com.android.location.fused,com.android.settings,com.android.providers.settings,com.nemu.googleinstaller,com.mumu.shared.sdk]:
+        com.gof.global
+      [com.google.android.gms,com.google.android.syncadapters.contacts,com.google.android.gsf]:
+        com.gof.global
+      com.android.vending:
+        com.gof.global
+      com.gof.global:
+        [com.netease.mumu.cloner,com.android.keychain,com.mumu.store,com.sohu.inputmethod.sogou.chuizi,android,com.netease.nemu_vapi_android.nemu,com.android.location.fused,com.android.settings,com.android.providers.settings,com.nemu.googleinstaller,com.mumu.shared.sdk]
+      com.facebook.katana:
+        com.gof.global
+  queryable via uses-library:
+
+Package Changes:
+  Sequence number=19
+  User 0:
+    seq=18, package=com.google.android.gms
+
+
+Dexopt state:
+  [com.gof.global]
+    path: /data/app/~~7L8v6cAQu3A-0hF5fRYZ9w==/com.gof.global-YBqRbAlDMuK9JgdKewpr8g==/base.apk
+      x86_64: [status=speed-profile] [reason=install-dm]
+      known secondary dex files:
+        /data/user/0/com.gof.global/cache/app_resources_lib.jar
+          class loader context: PCL[];PCL[/data/app/~~7L8v6cAQu3A-0hF5fRYZ9w==/com.gof.global-YBqRbAlDMuK9JgdKewpr8g==/base.apk:/data/user/0/com.gof.global/.cache/classes.dex]{PCL[/system/framework/org.apache.http.legacy.jar]}
+
+
+Compiler stats:
+  [com.gof.global]
+    (No recorded stats)
+Snapshot statistics
+   Unrecorded-hits: 757  Cork-level: 0
+   Summary stats               TotBlds     TotUsed     TotCork     BigBlds    ShortLvd     TotTime     MaxTime
+          0:55         now           0           0           0           0           0           0           0
+          1:55        0:55           0           0           0           0           0           0           0
+          2:55        1:55           0           0           0           0           0           0           0
+          3:55        2:55           1         429           0           0           0           0           0
+          4:55        3:55           2         972           0           0           1           0           0
+          5:55        4:55           0           0           0           0           0           0           0
+          6:55        5:55           0           0           0           0           0           0           0
+          7:55        6:55           0           0           0           0           0           0           0
+          8:55        7:55           0           0           0           0           0           0           0
+          9:55        8:55           0           0           0           0           0           0           0
+         23:55         now          99       42975           0           0          22          39           8
+
+   Build times                  <= 1ms      <= 2ms      <= 5ms     <= 10ms     <= 20ms     <= 50ms    <= 100ms     > 100ms
+          0:55         now           0           0           0           0           0           0           0           0
+          1:55        0:55           0           0           0           0           0           0           0           0
+          2:55        1:55           0           0           0           0           0           0           0           0
+          3:55        2:55           1           0           0           0           0           0           0           0
+          4:55        3:55           2           0           0           0           0           0           0           0
+          5:55        4:55           0           0           0           0           0           0           0           0
+          6:55        5:55           0           0           0           0           0           0           0           0
+          7:55        6:55           0           0           0           0           0           0           0           0
+          8:55        7:55           0           0           0           0           0           0           0           0
+          9:55        8:55           0           0           0           0           0           0           0           0
+         23:55         now          95           1           2           1           0           0           0           0
+
+   Use counters                   <= 1        <= 2        <= 5       <= 10       <= 20       <= 50      <= 100       > 100
+          0:55         now           0           0           0           0           0           0           0           0
+          1:55        0:55           0           0           0           0           0           0           0           0
+          2:55        1:55           0           0           0           0           0           0           0           0
+          3:55        2:55           0           0           0           0           0           0           0           1
+          4:55        3:55           0           1           0           0           0           0           0           1
+          5:55        4:55           0           0           0           0           0           0           0           0
+          6:55        5:55           0           0           0           0           0           0           0           0
+          7:55        6:55           0           0           0           0           0           0           0           0
+          8:55        7:55           0           0           0           0           0           0           0           0
+          9:55        8:55           0           0           0           0           0           0           0           0
+         23:55         now           4          11           6           5           6           8           6          52

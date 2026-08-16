@@ -1,0 +1,8 @@
+
+    userId=10046
+    codePath=/data/app/~~7L8v6cAQu3A-0hF5fRYZ9w==/com.gof.global-YBqRbAlDMuK9JgdKewpr8g==
+    versionCode=295 minSdk=24 targetSdk=35
+    versionName=1.32.21
+    firstInstallTime=2026-08-06 14:44:43
+    lastUpdateTime=2026-08-06 14:44:43
+
