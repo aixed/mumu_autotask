@@ -697,6 +697,78 @@ class HuntWaveBatchTests(unittest.TestCase):
             [("wait", (100, 101))],
         )
 
+    def test_gui_stops_batch_when_dispatch_error_is_confirmed_failed(self) -> None:
+        manager = object.__new__(DeviceManagerWindow)
+        targets = build_hunt_queue(
+            [
+                intel_item(100, "purple", expires_at=1000),
+                intel_item(101, "purple", expires_at=1001),
+            ],
+            ("purple",),
+        )
+        manager.window = SimpleNamespace(winfo_exists=lambda: 1)
+        manager.profile = SimpleNamespace(serial="device-1", roles=("打工人",))
+        batch = HuntWaveBatch(targets, 2)
+        manager.hunt_batch = batch
+        manager.hunt_role = "打工人"
+        manager.current_items = [
+            intel_item(100, "purple", expires_at=1000),
+            intel_item(101, "purple", expires_at=1001),
+        ]
+        events: list[tuple[object, ...]] = []
+        manager.identity_text = SimpleNamespace(set=lambda value: events.append(("identity", value)))
+        manager.action_text = SimpleNamespace(
+            set=lambda value: events.append(("status", value))
+        )
+        manager._render_items = lambda: events.append(("render",))
+        manager._log = lambda message: events.append(("log", message))
+        manager._log_batch_outcome = lambda outcome: events.append(("outcome", outcome))
+        manager._set_busy = lambda busy, message: events.append(
+            ("busy", busy, message)
+        )
+        manager._wait_current_wave = lambda: events.append(
+            ("wait", manager.hunt_batch.wait_target_ids)
+        )
+
+        class CapturingDispatcher:
+            def __init__(self) -> None:
+                self.submissions: list[tuple[object, object]] = []
+
+            def submit(self, action: object, callback: object) -> None:
+                self.submissions.append((action, callback))
+
+        dispatcher = CapturingDispatcher()
+        manager.dispatcher = dispatcher
+        manager.backend = SimpleNamespace(
+            march=lambda *args, **kwargs: {},
+            inspect_intel=lambda serial: {
+                "serial": serial,
+                "kingdom": 4549,
+                "role": "打工人",
+                "pid": 7,
+                "items": [
+                    intel_item(100, "purple", expires_at=1000),
+                    intel_item(101, "purple", expires_at=1001),
+                ],
+            },
+        )
+
+        manager._dispatch_next_hunt({100, 101})
+        first_callback = dispatcher.submissions[0][1]
+        first_callback(None, RuntimeError("direct failure"))  # type: ignore[operator]
+        refresh_action, refresh_callback = dispatcher.submissions[1]
+        refresh_callback(refresh_action(), None)  # type: ignore[operator]
+
+        self.assertEqual(len(dispatcher.submissions), 2)
+        self.assertIsNone(manager.hunt_batch)
+        self.assertTrue(batch.all_waves_done)
+        self.assertEqual(
+            [(outcome.target.runtime_id, outcome.status) for outcome in batch.outcomes],
+            [(100, "failed"), (101, "skipped")],
+        )
+        self.assertFalse(any(event[0] == "wait" for event in events))
+        self.assertTrue(any(event[0] == "busy" and event[1] is False for event in events))
+
     def test_finish_hunt_batch_uses_status_and_log_without_dialog(self) -> None:
         manager = object.__new__(DeviceManagerWindow)
         manager.hunt_batch = HuntWaveBatch(

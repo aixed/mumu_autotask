@@ -1964,6 +1964,18 @@ class DeviceManagerWindow:
                 f"刷新确认目标 {runtime_id} 已实际发起；"
                 "继续纳入当前波等待，不提前启动下一波。"
             )
+        if any(outcome.status == "failed" for outcome in outcomes):
+            detail = "本波存在确认失败的出征目标，批次已停止"
+            self._log(detail)
+            try:
+                stopped = batch.abort_unresolved_dispatch(detail)
+            except HuntBatchError as exc:
+                self._log(f"出征失败停止异常：{exc}")
+            else:
+                for outcome in stopped:
+                    self._log_batch_outcome(outcome)
+            self._finish_hunt_batch()
+            return
         if batch.wave_phase == "dispatching":
             self._start_next_hunt_dispatch()
             return

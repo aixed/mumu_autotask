@@ -20,6 +20,7 @@ from .business import (
     SceneStatus,
     build_claim_intel_lua,
     build_close_expedition_lua,
+    build_direct_commit_march_lua,
     build_install_march_capture_hook_lua,
     build_inspect_formation_lua,
     build_inspect_intel_lua,
@@ -33,6 +34,7 @@ from .business import (
     normalize_quality,
     normalize_target_ids,
     parse_claim_intel_output,
+    parse_commit_output,
     parse_intel_output,
     parse_intel_status_output,
     parse_open_output,
@@ -1035,6 +1037,7 @@ def _execute_march(
     accepted = False
     average_tapped = False
     go_tapped = False
+    dispatch_mode = "dry-run"
     average_tap_coordinates: tuple[int, int] | None = None
     go_tap_coordinates: tuple[int, int] | None = None
     status_after = "not-sent"
@@ -1075,79 +1078,100 @@ def _execute_march(
             active_roles = (snapshot.role,)
 
             if not dry_run:
-                if inspect_result.thread_name != "UnityMain":
-                    raise BusinessError(
-                        "safe UI march execution is disabled on the FridaDirect "
-                        "bridge thread; refusing to open the expedition view from "
-                        "Lua because live testing showed it can make the game exit"
-                    )
                 verify_code = build_verify_march_lua(active_roles, target)
-                open_code = build_open_march_lua(active_roles, target)
-                ready_code = build_march_ready_lua(active_roles, target)
-                stage_hashes.update(
-                    {
-                        "open": script_sha256(open_code),
-                        "ready": script_sha256(ready_code),
-                        "verify": script_sha256(verify_code),
-                    }
-                )
-                open_result = _execute_lua_when_idle(
-                    adb,
-                    profile,
-                    client,
-                    process,
-                    scanner,
-                    state,
-                    open_code,
-                    output_capacity=output_capacity,
-                    operation="opening expedition view",
-                )
-                parse_open_output(open_result.output, active_roles, target)
-                opened = True
-
-                ready_deadline = time.monotonic() + ready_timeout_seconds
-                while True:
-                    ready_result = _execute_lua_when_idle(
+                if inspect_result.thread_name == "UnityMain":
+                    dispatch_mode = "ui"
+                    open_code = build_open_march_lua(active_roles, target)
+                    ready_code = build_march_ready_lua(active_roles, target)
+                    stage_hashes.update(
+                        {
+                            "open": script_sha256(open_code),
+                            "ready": script_sha256(ready_code),
+                            "verify": script_sha256(verify_code),
+                        }
+                    )
+                    open_result = _execute_lua_when_idle(
                         adb,
                         profile,
                         client,
                         process,
                         scanner,
                         state,
-                        ready_code,
+                        open_code,
                         output_capacity=output_capacity,
-                        operation="expedition readiness check",
+                        operation="opening expedition view",
                     )
-                    if parse_ready_output(ready_result.output, active_roles, target):
-                        break
-                    if time.monotonic() >= ready_deadline:
-                        raise BusinessError(
-                            "expedition view did not finish initializing before timeout"
-                        )
-                    time.sleep(0.2)
+                    parse_open_output(open_result.output, active_roles, target)
+                    opened = True
 
-                average_tap_coordinates = _expedition_average_tap_coordinates(
-                    adb,
-                    profile,
-                )
-                adb.input_tap(profile.serial, *average_tap_coordinates)
-                average_tapped = True
-                _require_same_foreground_process(
-                    adb,
-                    profile,
-                    process,
-                    "average formation UI tap",
-                )
-                time.sleep(0.35)
-                go_tap_coordinates = _expedition_go_tap_coordinates(adb, profile)
-                adb.input_tap(profile.serial, *go_tap_coordinates)
-                go_tapped = True
-                _require_same_foreground_process(
-                    adb,
-                    profile,
-                    process,
-                    "expedition go UI tap",
-                )
+                    ready_deadline = time.monotonic() + ready_timeout_seconds
+                    while True:
+                        ready_result = _execute_lua_when_idle(
+                            adb,
+                            profile,
+                            client,
+                            process,
+                            scanner,
+                            state,
+                            ready_code,
+                            output_capacity=output_capacity,
+                            operation="expedition readiness check",
+                        )
+                        if parse_ready_output(ready_result.output, active_roles, target):
+                            break
+                        if time.monotonic() >= ready_deadline:
+                            raise BusinessError(
+                                "expedition view did not finish initializing before timeout"
+                            )
+                        time.sleep(0.2)
+
+                    average_tap_coordinates = _expedition_average_tap_coordinates(
+                        adb,
+                        profile,
+                    )
+                    adb.input_tap(profile.serial, *average_tap_coordinates)
+                    average_tapped = True
+                    _require_same_foreground_process(
+                        adb,
+                        profile,
+                        process,
+                        "average formation UI tap",
+                    )
+                    time.sleep(0.35)
+                    go_tap_coordinates = _expedition_go_tap_coordinates(adb, profile)
+                    adb.input_tap(profile.serial, *go_tap_coordinates)
+                    go_tapped = True
+                    _require_same_foreground_process(
+                        adb,
+                        profile,
+                        process,
+                        "expedition go UI tap",
+                    )
+                else:
+                    dispatch_mode = "direct"
+                    direct_commit_code = build_direct_commit_march_lua(
+                        active_roles,
+                        target,
+                    )
+                    stage_hashes.update(
+                        {
+                            "direct_commit": script_sha256(direct_commit_code),
+                            "verify": script_sha256(verify_code),
+                        }
+                    )
+                    commit_result = _execute_lua_when_idle(
+                        adb,
+                        profile,
+                        client,
+                        process,
+                        scanner,
+                        state,
+                        direct_commit_code,
+                        output_capacity=output_capacity,
+                        operation="direct march request",
+                    )
+                    parse_commit_output(commit_result.output, active_roles, target)
+                    last_result = commit_result
 
                 verify_deadline = time.monotonic() + verify_timeout_seconds
                 while True:
@@ -1213,6 +1237,7 @@ def _execute_march(
         {
             "dry_run": dry_run,
             "march_executed": not dry_run,
+            "dispatch_mode": dispatch_mode,
             "request_dispatched": accepted,
             "expedition_opened": opened,
             "average_tapped": average_tapped,

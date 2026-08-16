@@ -1231,42 +1231,72 @@ class CliTests(unittest.TestCase):
         self.assertEqual(events.count("lua-execute"), 4)
         self.assertEqual(result["verification_polls"], 1)
 
-    def test_march_execute_blocks_frida_direct_before_ui_mutation(self) -> None:
+    def test_march_execute_uses_direct_commit_on_frida_direct(self) -> None:
         events: list[str] = []
         role = "打工的"
         role_hex = role.encode("utf-8").hex()
-        item = (
-            "ITEM\t70\t1700\t1\t700\t701\t1900000000"
-            "\tpurple\t4\t808\t8\t10"
-        )
-        output = "\n".join(
-            (
-                "MUMU_AUTOTASK\t1\tINTEL",
-                f"ROLE\t{role_hex}",
-                "KINGDOM\t4549",
-                item,
-                "END\t1",
-            )
+        outputs = (
+            "\n".join(
+                (
+                    "MUMU_AUTOTASK\t1\tINTEL",
+                    f"ROLE\t{role_hex}",
+                    "KINGDOM\t4549",
+                    "ITEM\t70\t1700\t1\t700\t701\t1900000000"
+                    "\tpurple\t4\t808\t8\t10",
+                    "END\t1",
+                )
+            ),
+            "\n".join(
+                (
+                    "MUMU_AUTOTASK\t1\tCOMMIT",
+                    f"ROLE\t{role_hex}",
+                    "KINGDOM\t4549",
+                    "TARGET\t70",
+                    "AVERAGE\t1",
+                    "GO\t1",
+                    "END\t1",
+                )
+            ),
+            "\n".join(
+                (
+                    "MUMU_AUTOTASK\t1\tVERIFY",
+                    f"ROLE\t{role_hex}",
+                    "KINGDOM\t4549",
+                    "TARGET\t70",
+                    "ACCEPTED\t1\tSTATUS\t2",
+                    "MARCH\t0\tEVENT\t0",
+                    "PROOF\tQUEST_STATUS",
+                    "END\t1",
+                )
+            ),
         )
         settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
         with (
             patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
             patch(
                 "mumu_autotask.cli._client",
                 return_value=FakeClient(
                     events,
-                    output=output,
+                    outputs=outputs,
                     thread_name="FridaDirect",
                 ),
             ),
+            redirect_stdout(output),
         ):
-            with self.assertRaisesRegex(BusinessError, "FridaDirect"):
+            self.assertEqual(
                 execute(
                     business_args("march", dry_run=False, quality="purple"),
                     settings,
-                )
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["request_dispatched"])
+        self.assertEqual(result["dispatch_mode"], "direct")
+        self.assertEqual(result["quest_status_after"], "2")
         self.assertFalse(any(event.startswith("input-tap:") for event in events))
-        self.assertEqual(events.count("lua-execute"), 1)
+        self.assertEqual(events.count("lua-execute"), 3)
 
     def test_march_execute_surfaces_open_protocol_errors_without_ui_taps(self) -> None:
         events: list[str] = []
