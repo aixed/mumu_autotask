@@ -2,12 +2,14 @@
 
 这是一个针对当前三台 MuMu Android 实例的 Python 自动化项目。业务动作不是
 HTTP POST：游戏使用带登录态的 Sproto + safeComm 自定义 TCP 协议。项目通过
-Frida 在已登录的游戏进程内读取原生 Lua 状态，并只打开精确目标的游戏出征页；
-“平均配置”和“出征”改走真实 UI 点击，复用游戏自己的连接、鉴权和按钮检查。
+Frida 在已登录的游戏进程内读取原生 Lua 状态，用于确认角色、服务器、场景和情报
+目标。真实验证表明，在 FridaDirect 线程中直接打开出征页或直接发出征包都有概率
+使游戏退出，因此正式流程已禁用这些写入式 Lua 出征动作。
 
 Lua 主状态由 ADB 只读扫描 `/proc/<pid>/maps` 与 `/proc/<pid>/mem` 定位。正式流程
 不会发送 HOME、不会后台化游戏，也不会安装 Lua inline hook 或直接调用
-`RequestMarchStartOff` 发出征包。
+`RequestMarchStartOff` 发出征包。所有 Lua 执行前都会等待主 Lua 状态空闲，并对
+Frida 的瞬态 `breakpoint/access violation` 做短重试；重复失败时停止，不继续操作。
 
 ## 安全边界
 
@@ -19,9 +21,9 @@ Lua 主状态由 ADB 只读扫描 `/proc/<pid>/maps` 与 `/proc/<pid>/mem` 定�
   失败后的只读核对回执都必须是同一角色，流程中切换角色会立即停止。
 - 目标绑定运行 ID、任务 ID、品质、坐标、过期时间、怪物 ID、等级和体力消耗；
   任一字段变化都会停止。
-- 真正出征不直接调用底层行军请求；程序在打开精确目标出征页并确认 READY 后，
-  通过 ADB 点击游戏界面的“平均配置”和“出征”按钮，不绕过游戏自身的队列、
-  体力、编队和特殊战争检查。
+- 当前可安全执行的是：返回野外、只读读取情报、等待情报完成、一键领取。真实出征
+  的 FridaDirect 写入路径已被硬保护拦截；下一步需要补齐纯 UI marker 定位后再恢复
+  “平均配置 -> 出征”。
 
 | ADB serial | MuMu 实例 | 允许角色 | 本机 Frida 地址 | 实例内端口 |
 | --- | --- | --- | --- | --- |
@@ -93,7 +95,8 @@ python -m mumu_autotask --config config.json status --all
    等到 `WorldScene` 加载完成后再读取可用骷髅目标。
 4. 复选绿色、蓝色、紫色和黄色中的一个或多个品质。
 5. 用“同时出征”滑块选择每波 `1-3` 队。
-6. 点击“情报-自动狩猎野兽”，不再弹出二次确认，程序立即按当前设备、品质和并发数开始执行。
+6. 点击“情报-自动狩猎野兽”不会再弹出二次确认；在纯 UI 出征路径补齐前，程序会在
+   FridaDirect 环境下阻止真实出征，避免再次触发游戏退出。
 
 管理窗口会显示当前可用目标和运行记录。真实出征执行期间会禁用其他操作和窗口
 关闭，避免同一个 Frida 会话中途切换角色或终止。角色切换仍在游戏的
@@ -157,7 +160,7 @@ python -m mumu_autotask --config config.json march `
 列表选择精确目标；它不会执行 OPEN/COMMIT。支持 `green/绿色`、`blue/蓝色`、
 `purple/紫色`、`yellow/黄色`，其中 `orange/橙色` 是 `yellow` 的别名。
 
-真实执行“平均配置 -> 出征”：
+真实执行“平均配置 -> 出征”（当前 FridaDirect 环境会被安全阻止）：
 
 ```powershell
 python -m mumu_autotask --config config.json march `
@@ -169,7 +172,9 @@ python -m mumu_autotask --config config.json march `
 且该目标的品质必须与 `--quality` 一致。目标已消失或品质不匹配都会在打开出征页前
 失败。
 
-CLI 在一个 Frida 会话中依次完成 INTEL、OPEN、READY、ADB 点击平均配置/出征、VERIFY。VERIFY
+当前 CLI 会先完成只读 INTEL；如果桥接线程是 FridaDirect，会在打开出征页前停止。
+旧的 OPEN/READY/ADB 点击平均配置/出征/VERIFY 路径仅保留在代码保护之后，不会在
+当前实机环境自动使用。VERIFY
 优先寻找 COMMIT 前快照中不存在、且与目标坐标、怪物 ID、目标类型、行军类型和
 服务器完全匹配的 self-march。服务器的 `world_march.transaction_slg` 回包只定义
 `monster_id`，不保证回显请求中的 `event_id` 或怪物等级；存在 `event_id` 时仍要求

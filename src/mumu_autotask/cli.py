@@ -647,6 +647,11 @@ def _wait_idle_lua_state(
             time.sleep(poll_interval_seconds)
 
 
+def _transient_bridge_fault(error: Exception) -> bool:
+    text = str(error)
+    return "breakpoint triggered" in text or "access violation accessing" in text
+
+
 def _execute_lua_when_idle(
     adb: AdbClient,
     profile: DeviceProfile,
@@ -678,7 +683,7 @@ def _execute_lua_when_idle(
                 output_capacity=output_capacity,
             )
         except FridaDriverError as exc:
-            if "breakpoint triggered" not in str(exc) or time.monotonic() >= deadline:
+            if not _transient_bridge_fault(exc) or time.monotonic() >= deadline:
                 raise
             time.sleep(poll_interval_seconds)
 
@@ -881,6 +886,12 @@ def _execute_march(
             active_roles = (snapshot.role,)
 
             if not dry_run:
+                if inspect_result.thread_name != "UnityMain":
+                    raise BusinessError(
+                        "safe UI march execution is disabled on the FridaDirect "
+                        "bridge thread; refusing to open the expedition view from "
+                        "Lua because live testing showed it can make the game exit"
+                    )
                 verify_code = build_verify_march_lua(active_roles, target)
                 open_code = build_open_march_lua(active_roles, target)
                 ready_code = build_march_ready_lua(active_roles, target)
