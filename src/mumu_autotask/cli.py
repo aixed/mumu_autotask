@@ -507,7 +507,13 @@ def _execute_lua(
     LuaStateCandidate,
 ]:
     scanner = _scanner(adb, profile)
-    state = scanner.find_unique_idle_main(process.pid)
+    state = _wait_unique_idle_lua_state(
+        adb,
+        profile,
+        scanner,
+        process,
+        "Lua state initialization",
+    )
     with client:
         initialization = dict(client.initialize_bridge(profile.bridge_remote_path))
         before = _wait_idle_lua_state(scanner, process, state)
@@ -647,9 +653,33 @@ def _wait_idle_lua_state(
             time.sleep(poll_interval_seconds)
 
 
+def _wait_unique_idle_lua_state(
+    adb: AdbClient,
+    profile: DeviceProfile,
+    scanner: AdbLuaStateScanner,
+    process: ProcessInfo,
+    operation: str,
+    *,
+    timeout_seconds: float = 10.0,
+    poll_interval_seconds: float = 0.5,
+) -> LuaStateCandidate:
+    deadline = time.monotonic() + timeout_seconds
+    first_attempt = True
+    while True:
+        if not first_attempt:
+            _require_same_foreground_process(adb, profile, process, operation)
+        first_attempt = False
+        try:
+            return scanner.find_unique_idle_main(process.pid)
+        except LuaStateScanError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(poll_interval_seconds)
+
+
 def _transient_bridge_fault(error: Exception) -> bool:
     text = str(error)
-    return "breakpoint triggered" in text or "access violation accessing" in text
+    return "breakpoint triggered" in text
 
 
 def _execute_lua_when_idle(
@@ -704,7 +734,15 @@ def _execute_ensure_world(
     code = build_scene_status_lua(locked_initial_roles)
     stage_hashes = {"scene": script_sha256(code)}
     scanner = _scanner(adb, profile)
-    state = scanner.find_unique_idle_main(process.pid)
+    state = _wait_unique_idle_lua_state(
+        adb,
+        profile,
+        scanner,
+        process,
+        "scene status initialization",
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
     final_status: SceneStatus | None = None
     initial_status: SceneStatus | None = None
     tapped = False
@@ -861,7 +899,13 @@ def _execute_march(
     }
     last_result: LuaExecutionResult
     scanner = _scanner(adb, profile)
-    state = scanner.find_unique_idle_main(process.pid)
+    state = _wait_unique_idle_lua_state(
+        adb,
+        profile,
+        scanner,
+        process,
+        "march workflow initialization",
+    )
     with client:
         initialization = dict(client.initialize_bridge(profile.bridge_remote_path))
         before = scanner.verify_idle_main(process.pid, state.address)
@@ -1085,7 +1129,15 @@ def _execute_capture_march(
         "uninstall": script_sha256(uninstall_code),
     }
     scanner = _scanner(adb, profile)
-    state = scanner.find_unique_idle_main(process.pid)
+    state = _wait_unique_idle_lua_state(
+        adb,
+        profile,
+        scanner,
+        process,
+        "capture-march initialization",
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
     deadline = time.monotonic() + timeout_seconds
     poll_count = 0
     record_count = 0
@@ -1220,7 +1272,15 @@ def _execute_wait_intel(
     initial_code = build_intel_status_lua(locked_initial_roles, normalized_ids)
     stage_hashes = {"initial": script_sha256(initial_code)}
     scanner = _scanner(adb, profile)
-    state = scanner.find_unique_idle_main(process.pid)
+    state = _wait_unique_idle_lua_state(
+        adb,
+        profile,
+        scanner,
+        process,
+        "wait-intel initialization",
+        timeout_seconds=min(timeout_seconds, 10.0),
+        poll_interval_seconds=min(poll_interval_seconds, 0.5),
+    )
     deadline = time.monotonic() + timeout_seconds
     poll_count = 0
     locked_role: str | None = None
@@ -1326,7 +1386,15 @@ def _execute_claim_intel(
     initial_code = build_intel_status_lua(locked_initial_roles, normalized_ids)
     stage_hashes = {"initial": script_sha256(initial_code)}
     scanner = _scanner(adb, profile)
-    state = scanner.find_unique_idle_main(process.pid)
+    state = _wait_unique_idle_lua_state(
+        adb,
+        profile,
+        scanner,
+        process,
+        "claim-intel initialization",
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
     request_dispatched = False
     idempotent = False
     claim_invoked = False

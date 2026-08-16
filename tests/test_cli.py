@@ -24,6 +24,7 @@ from mumu_autotask.frida_driver import (
     LuaExecutionResult,
 )
 from mumu_autotask.kingdom import KingdomGuardError
+from mumu_autotask.lua_state import LuaStateScanError
 from mumu_autotask.lua_safety import LuaSafetyError
 
 
@@ -184,6 +185,19 @@ class FakeScanner:
 
     def verify_idle_main(self, pid: int, address: int):
         self.events.append("state-verify")
+        return self.candidate
+
+
+class BusyThenIdleScanner(FakeScanner):
+    def __init__(self, events: list[str], busy_count: int) -> None:
+        super().__init__(events)
+        self.busy_count = busy_count
+
+    def find_unique_idle_main(self, pid: int):
+        self.events.append("state-scan")
+        if self.busy_count > 0:
+            self.busy_count -= 1
+            raise LuaStateScanError("main Lua state is busy")
         return self.candidate
 
 
@@ -493,6 +507,32 @@ class CliTests(unittest.TestCase):
                 self.assertNotIn("frida-inspect", events)
                 self.assertNotIn("frida-attach", events)
 
+    def test_access_violation_stops_without_retrying_lua(self) -> None:
+        events: list[str] = []
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(
+                    events,
+                    outputs=(
+                        FridaDriverError(
+                            "cannot execute Lua code: access violation accessing 0x0"
+                        ),
+                        "Lua 5.1",
+                    ),
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(FridaDriverError, "access violation"):
+                execute(
+                    exec_args("return tostring(_VERSION)", dry_run=False),
+                    settings,
+                )
+        self.assertEqual(events.count("lua-execute"), 1)
+        self.assertEqual(events.count("frida-detach"), 1)
+
     def test_background_service_pid_stops_before_frida(self) -> None:
         events: list[str] = []
         settings = Settings(devices=(DeviceProfile("device-1"),))
@@ -730,6 +770,39 @@ class CliTests(unittest.TestCase):
         self.assertFalse(result["tap_invoked"])
         self.assertEqual(result["scene_after"]["class"], "WorldScene")
         self.assertNotIn("input-tap:652,1213", events)
+
+    def test_ensure_world_waits_for_busy_lua_state_without_tapping(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._scanner",
+                side_effect=lambda adb, profile: BusyThenIdleScanner(
+                    adb.events,
+                    busy_count=2,
+                ),
+            ),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(
+                    events,
+                    output=scene_protocol(role),
+                ),
+            ),
+            patch("mumu_autotask.cli.time.sleep") as sleep,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(execute(business_args("ensure-world"), settings), 0)
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["world_ready"])
+        self.assertFalse(result["tap_invoked"])
+        self.assertEqual(events.count("state-scan"), 3)
+        self.assertNotIn("input-tap:652,1213", events)
+        sleep.assert_any_call(0.05)
+        self.assertEqual(sleep.call_count, 2)
 
     def test_ensure_world_execute_taps_city_and_waits_until_world_ready(self) -> None:
         events: list[str] = []

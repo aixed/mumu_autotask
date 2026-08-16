@@ -9,7 +9,7 @@ Frida 在已登录的游戏进程内读取原生 Lua 状态，用于确认角色
 Lua 主状态由 ADB 只读扫描 `/proc/<pid>/maps` 与 `/proc/<pid>/mem` 定位。正式流程
 不会发送 HOME、不会后台化游戏，也不会安装 Lua inline hook 或直接调用
 `RequestMarchStartOff` 发出征包。所有 Lua 执行前都会等待主 Lua 状态空闲，并对
-Frida 的瞬态 `breakpoint/access violation` 做短重试；重复失败时停止，不继续操作。
+Frida 的瞬态 `breakpoint triggered` 做短重试；`access violation` 会被视为危险信号并立即停止，不继续重试。
 
 ## 安全边界
 
