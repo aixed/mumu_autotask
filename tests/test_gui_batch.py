@@ -9,6 +9,7 @@ from mumu_autotask.gui import (
     HuntBatchError,
     HuntBatchQueue,
     HuntWaveBatch,
+    build_task_queue,
     build_hunt_queue,
     build_hunt_waves,
     terminal_target_ids_from_status_payload,
@@ -24,13 +25,17 @@ def intel_item(
     quality: str,
     *,
     expires_at: int,
+    category: str = "monster",
 ) -> dict[str, object]:
-    return {
+    item: dict[str, object] = {
         "runtime_id": runtime_id,
         "quality": quality,
         "expires_at": expires_at,
         "level": 13,
     }
+    if category != "monster":
+        item["category"] = category
+    return item
 
 
 class HuntBatchQueueTests(unittest.TestCase):
@@ -83,6 +88,35 @@ class HuntBatchQueueTests(unittest.TestCase):
                 ("yellow", 41),
                 ("yellow", 42),
             ],
+        )
+
+    def test_monster_queue_ignores_battle_categories_with_matching_quality(self) -> None:
+        queue = build_hunt_queue(
+            [
+                intel_item(10, "purple", expires_at=100, category="hero"),
+                intel_item(11, "purple", expires_at=101, category="rescue"),
+                intel_item(12, "purple", expires_at=102),
+            ],
+            ("purple",),
+        )
+
+        self.assertEqual([target.runtime_id for target in queue], [12])
+
+    def test_mixed_task_queue_keeps_selected_categories_and_qualities(self) -> None:
+        queue = build_task_queue(
+            [
+                intel_item(10, "green", expires_at=100),
+                intel_item(11, "purple", expires_at=101),
+                intel_item(20, "blue", expires_at=90, category="hero"),
+                intel_item(21, "yellow", expires_at=80, category="rescue"),
+            ],
+            ("monster", "hero", "rescue"),
+            ("purple",),
+        )
+
+        self.assertEqual(
+            [(target.category, target.runtime_id) for target in queue],
+            [("monster", 11), ("hero", 20), ("rescue", 21)],
         )
 
     def test_error_reconciled_as_processed_continues_with_same_quality_target(
@@ -178,6 +212,27 @@ class HuntWaveBatchTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 with self.assertRaisesRegex(HuntBatchError, "1-4"):
                     build_hunt_waves(targets, invalid)  # type: ignore[arg-type]
+
+    def test_battle_tasks_are_attached_to_first_wave_without_team_cap(self) -> None:
+        targets = build_task_queue(
+            [
+                intel_item(100 + index, "purple", expires_at=1000 + index)
+                for index in range(5)
+            ]
+            + [
+                intel_item(200, "blue", expires_at=900, category="hero"),
+                intel_item(201, "yellow", expires_at=901, category="rescue"),
+            ],
+            ("monster", "hero", "rescue"),
+            ("purple",),
+        )
+
+        waves = build_hunt_waves(targets, 4)
+
+        self.assertEqual(
+            [[target.runtime_id for target in wave] for wave in waves],
+            [[100, 101, 102, 103, 200, 201], [104]],
+        )
 
     def test_each_wave_prepares_all_dispatches_then_waits_before_next(self) -> None:
         batch = HuntWaveBatch(self.targets(3), 2)
@@ -476,6 +531,7 @@ class HuntWaveBatchTests(unittest.TestCase):
             for index in range(4)
         ]
         manager.concurrency_var = SimpleNamespace(get=lambda: 3)
+        manager._selected_categories = lambda: ("monster",)
         manager._selected_qualities = lambda: ("purple",)
         manager._available_runtime_ids = lambda: {100, 101, 102, 103}
         events: list[tuple[object, ...]] = []
@@ -513,7 +569,7 @@ class HuntWaveBatchTests(unittest.TestCase):
         self.assertEqual(starts, ["started"])
         self.assertEqual(result, "break")
 
-    def test_gui_serializes_wave_dispatches_then_waits_for_entire_wave(self) -> None:
+    def test_gui_submits_wave_dispatches_concurrently_then_waits(self) -> None:
         manager = object.__new__(DeviceManagerWindow)
         targets = build_hunt_queue(
             [
@@ -582,9 +638,9 @@ class HuntWaveBatchTests(unittest.TestCase):
 
         manager._dispatch_next_hunt({100, 101, 102})
 
-        self.assertEqual(len(dispatcher.submissions), 1)
-        self.assertEqual(manager.hunt_batch.dispatch_active_ids, (100,))
-        self.assertEqual(manager.hunt_batch.dispatch_queued_ids, (101, 102))
+        self.assertEqual(len(dispatcher.submissions), 3)
+        self.assertEqual(manager.hunt_batch.dispatch_active_ids, (100, 101, 102))
+        self.assertEqual(manager.hunt_batch.dispatch_queued_ids, ())
         self.assertFalse(any(event[0] == "wait" for event in events))
 
         for index, runtime_id in enumerate((100, 101, 102)):
@@ -593,10 +649,9 @@ class HuntWaveBatchTests(unittest.TestCase):
             self.assertEqual(march_calls[-1], runtime_id)
             callback(result, None)  # type: ignore[operator]
             if index < 2:
-                self.assertEqual(len(dispatcher.submissions), index + 2)
                 self.assertEqual(
                     manager.hunt_batch.dispatch_active_ids,
-                    (runtime_id + 1,),
+                    tuple(range(runtime_id + 1, 103)),
                 )
                 self.assertNotIn(("wait", (100, 101, 102)), events)
 
@@ -621,7 +676,7 @@ class HuntWaveBatchTests(unittest.TestCase):
             [("wait", (100, 101, 102))],
         )
 
-    def test_gui_reconciles_dispatch_error_before_next_serial_dispatch(self) -> None:
+    def test_gui_reconciles_dispatch_error_after_wave_callbacks_return(self) -> None:
         manager = object.__new__(DeviceManagerWindow)
         targets = build_hunt_queue(
             [
@@ -671,18 +726,15 @@ class HuntWaveBatchTests(unittest.TestCase):
         )
 
         manager._dispatch_next_hunt({100, 101})
-        self.assertEqual(len(dispatcher.submissions), 1)
+        self.assertEqual(len(dispatcher.submissions), 2)
 
         first_callback = dispatcher.submissions[0][1]
         first_callback(None, RuntimeError("ambiguous"))  # type: ignore[operator]
         self.assertEqual(len(dispatcher.submissions), 2)
-        refresh_action, refresh_callback = dispatcher.submissions[1]
-        refresh_callback(refresh_action(), None)  # type: ignore[operator]
-
-        self.assertEqual(len(dispatcher.submissions), 3)
         self.assertEqual(manager.hunt_batch.dispatch_active_ids, (101,))
         self.assertFalse(any(event[0] == "wait" for event in events))
-        second_action, second_callback = dispatcher.submissions[2]
+
+        second_callback = dispatcher.submissions[1][1]
         second_callback(
             {
                 "serial": "device-1",
@@ -694,6 +746,9 @@ class HuntWaveBatchTests(unittest.TestCase):
             },
             None,
         )  # type: ignore[operator]
+        self.assertEqual(len(dispatcher.submissions), 3)
+        refresh_action, refresh_callback = dispatcher.submissions[2]
+        refresh_callback(refresh_action(), None)  # type: ignore[operator]
 
         self.assertEqual(manager.hunt_batch.reconciled_dispatch_ids, (100,))
         self.assertEqual(manager.hunt_batch.wait_target_ids, (100, 101))
@@ -769,19 +824,32 @@ class HuntWaveBatchTests(unittest.TestCase):
         )
 
         manager._dispatch_next_hunt({100, 101})
+        self.assertEqual(len(dispatcher.submissions), 2)
         first_callback = dispatcher.submissions[0][1]
         first_callback(None, RuntimeError("direct failure"))  # type: ignore[operator]
-        refresh_action, refresh_callback = dispatcher.submissions[1]
+        second_callback = dispatcher.submissions[1][1]
+        second_callback(
+            {
+                "serial": "device-1",
+                "kingdom": 4549,
+                "role": "打工人",
+                "request_dispatched": True,
+                "target": {"runtime_id": 101},
+                "quest_status_after": 1,
+            },
+            None,
+        )  # type: ignore[operator]
+        refresh_action, refresh_callback = dispatcher.submissions[2]
         refresh_callback(refresh_action(), None)  # type: ignore[operator]
-        final_action, final_callback = dispatcher.submissions[2]
+        final_action, final_callback = dispatcher.submissions[3]
         final_callback(final_action(), None)  # type: ignore[operator]
 
-        self.assertEqual(len(dispatcher.submissions), 3)
+        self.assertEqual(len(dispatcher.submissions), 4)
         self.assertIsNone(manager.hunt_batch)
         self.assertTrue(batch.all_waves_done)
         self.assertEqual(
             [(outcome.target.runtime_id, outcome.status) for outcome in batch.outcomes],
-            [(100, "failed"), (101, "skipped")],
+            [(100, "failed"), (101, "failed")],
         )
         self.assertFalse(any(event[0] == "wait" for event in events))
         self.assertTrue(any(event[0] == "busy" and event[1] is False for event in events))

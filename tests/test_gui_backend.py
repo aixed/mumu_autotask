@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from mumu_autotask.gui import QUALITY_META, build_parser
+from mumu_autotask.gui import CATEGORY_META, QUALITY_META, build_parser
 from mumu_autotask.gui_backend import (
     CliRunner,
     CommandResult,
@@ -43,6 +43,14 @@ class GuiBackendTests(unittest.TestCase):
                 "127.0.0.1:16416",
                 ("green", "yellow"),
             )
+            preferences.set_selected_categories(
+                "127.0.0.1:16384",
+                ("monster", "hero"),
+            )
+            preferences.set_selected_categories(
+                "127.0.0.1:16416",
+                ("rescue",),
+            )
 
             reloaded = GuiPreferences(path)
 
@@ -55,8 +63,20 @@ class GuiBackendTests(unittest.TestCase):
                 ("green", "yellow"),
             )
             self.assertEqual(
+                reloaded.get_selected_categories("127.0.0.1:16384"),
+                ("monster", "hero"),
+            )
+            self.assertEqual(
+                reloaded.get_selected_categories("127.0.0.1:16416"),
+                ("rescue",),
+            )
+            self.assertEqual(
                 reloaded.get_selected_qualities("127.0.0.1:16480"),
                 ("purple",),
+            )
+            self.assertEqual(
+                reloaded.get_selected_categories("127.0.0.1:16480"),
+                tuple(CATEGORY_META),
             )
 
     def test_updating_one_device_does_not_modify_another_device(self) -> None:

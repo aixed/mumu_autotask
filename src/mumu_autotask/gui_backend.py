@@ -25,6 +25,7 @@ GUI_QUALITY_ORDER = ("green", "blue", "purple", "yellow")
 GUI_CATEGORY_ORDER = ("monster", "hero", "rescue")
 DEFAULT_GUI_QUALITIES = ("purple",)
 DEFAULT_GUI_CATEGORY = "monster"
+DEFAULT_GUI_CATEGORIES = GUI_CATEGORY_ORDER
 MIN_HUNT_CONCURRENCY = 1
 MAX_HUNT_CONCURRENCY = 4
 DEFAULT_HUNT_CONCURRENCY = 3
@@ -60,22 +61,40 @@ class GuiPreferences:
             )
 
     def get_category(self, serial: str) -> str:
+        categories = self.get_selected_categories(serial)
+        return categories[0] if categories else DEFAULT_GUI_CATEGORY
+
+    def get_selected_categories(self, serial: str) -> tuple[str, ...]:
         serial = self._validate_serial(serial)
         with self._lock:
             data = self._read()
             section = data["devices"].get(serial)
             if section is None:
-                return DEFAULT_GUI_CATEGORY
-            return str(section["category"])
+                return DEFAULT_GUI_CATEGORIES
+            categories = section["categories"]
+            return tuple(
+                category
+                for category in GUI_CATEGORY_ORDER
+                if categories[category]
+            )
 
     def set_category(self, serial: str, category: str) -> None:
+        self.set_selected_categories(serial, (category,))
+
+    def set_selected_categories(
+        self,
+        serial: str,
+        categories: Sequence[str],
+    ) -> None:
         serial = self._validate_serial(serial)
-        category = self._validate_category(category)
+        selected = self._validate_categories(categories)
         with self._lock:
             data = self._read()
             devices = dict(data["devices"])
             section = dict(devices.get(serial, self._default_device_section()))
-            section["category"] = category
+            section["categories"] = {
+                category: category in selected for category in GUI_CATEGORY_ORDER
+            }
             devices[serial] = section
             updated = {"version": 1, "devices": devices}
             self._write(updated)
@@ -129,7 +148,10 @@ class GuiPreferences:
     @staticmethod
     def _default_device_section() -> dict[str, Any]:
         return {
-            "category": DEFAULT_GUI_CATEGORY,
+            "categories": {
+                category: category in DEFAULT_GUI_CATEGORIES
+                for category in GUI_CATEGORY_ORDER
+            },
             "qualities": {
                 quality: quality in DEFAULT_GUI_QUALITIES
                 for quality in GUI_QUALITY_ORDER
@@ -163,6 +185,15 @@ class GuiPreferences:
         if normalized not in GUI_CATEGORY_ORDER:
             raise GuiBackendError(f"GUI 情报类别无效：{category!r}")
         return normalized
+
+    @staticmethod
+    def _validate_categories(categories: Sequence[str]) -> set[str]:
+        if isinstance(categories, (str, bytes)):
+            raise GuiBackendError("GUI 情报类别偏好必须是列表")
+        selected = set()
+        for category in categories:
+            selected.add(GuiPreferences._validate_category(category))
+        return selected
 
     @staticmethod
     def _validate_concurrency(value: int) -> int:
@@ -206,9 +237,36 @@ class GuiPreferences:
             serial = cls._validate_serial(serial)
             if not isinstance(section, dict):
                 raise GuiBackendError(f"{serial} 的 GUI 偏好配置段无效")
-            category = cls._validate_category(
-                section.get("category", DEFAULT_GUI_CATEGORY)
-            )
+            raw_categories = section.get("categories")
+            if raw_categories is None:
+                if "category" in section:
+                    selected_categories = {
+                        cls._validate_category(section["category"])
+                    }
+                else:
+                    selected_categories = set(DEFAULT_GUI_CATEGORIES)
+                categories = {
+                    category: category in selected_categories
+                    for category in GUI_CATEGORY_ORDER
+                }
+            else:
+                if not isinstance(raw_categories, dict):
+                    raise GuiBackendError(f"{serial} 的 categories 配置段无效")
+                unknown_categories = sorted(
+                    set(raw_categories).difference(GUI_CATEGORY_ORDER)
+                )
+                if unknown_categories:
+                    raise GuiBackendError(
+                        f"{serial} 包含未知情报类别：{unknown_categories}"
+                    )
+                categories = {}
+                for category in GUI_CATEGORY_ORDER:
+                    selected = raw_categories.get(category, False)
+                    if not isinstance(selected, bool):
+                        raise GuiBackendError(
+                            f"{serial}.{category} 的 GUI 类别偏好必须是布尔值"
+                        )
+                    categories[category] = selected
             qualities = section.get("qualities")
             if not isinstance(qualities, dict):
                 raise GuiBackendError(f"{serial} 的 qualities 配置段无效")
@@ -227,7 +285,7 @@ class GuiPreferences:
                 section.get("concurrency", DEFAULT_HUNT_CONCURRENCY)
             )
             validated[serial] = {
-                "category": category,
+                "categories": categories,
                 "qualities": normalized,
                 "concurrency": concurrency,
             }
@@ -489,8 +547,18 @@ class GuiBackend:
     def get_category(self, serial: str) -> str:
         return self.preferences.get_category(serial)
 
+    def get_selected_categories(self, serial: str) -> tuple[str, ...]:
+        return self.preferences.get_selected_categories(serial)
+
     def set_category(self, serial: str, category: str) -> None:
         self.preferences.set_category(serial, category)
+
+    def set_selected_categories(
+        self,
+        serial: str,
+        categories: Sequence[str],
+    ) -> None:
+        self.preferences.set_selected_categories(serial, categories)
 
     def set_selected_qualities(
         self,
@@ -767,6 +835,7 @@ def _validate_expected_role(role: str) -> str:
 __all__ = [
     "CliRunner",
     "CommandResult",
+    "DEFAULT_GUI_CATEGORIES",
     "DEFAULT_GUI_CATEGORY",
     "DEFAULT_GUI_QUALITIES",
     "DEFAULT_HUNT_CONCURRENCY",

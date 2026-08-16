@@ -16,7 +16,7 @@ from tkinter import messagebox, ttk
 
 from .config import ALLOWED_KINGDOM, ConfigError, DeviceProfile, Settings, load_settings
 from .gui_backend import (
-    DEFAULT_GUI_CATEGORY,
+    DEFAULT_GUI_CATEGORIES,
     DEFAULT_HUNT_CONCURRENCY,
     MAX_HUNT_CONCURRENCY,
     MIN_HUNT_CONCURRENCY,
@@ -103,7 +103,7 @@ def build_hunt_queue(
     items: Sequence[Mapping[str, Any]],
     selected_qualities: Sequence[str],
 ) -> tuple[HuntBatchTarget, ...]:
-    """Expand selected qualities into the exact sequential target queue."""
+    """Expand selected monster qualities into the exact target queue."""
 
     if isinstance(selected_qualities, (str, bytes)):
         raise HuntBatchError("所选品质必须是列表")
@@ -117,7 +117,8 @@ def build_hunt_queue(
     targets = [
         HuntBatchTarget.from_item(item)
         for item in items
-        if item.get("quality") in selected
+        if item.get("category", "monster") == "monster"
+        and item.get("quality") in selected
     ]
     targets.sort(
         key=lambda target: (
@@ -127,7 +128,7 @@ def build_hunt_queue(
         )
     )
     if not targets:
-        raise HuntBatchError("所选品质当前没有可用情报")
+        raise HuntBatchError("所选品质当前没有可用野兽情报")
     runtime_ids = [target.runtime_id for target in targets]
     if len(runtime_ids) != len(set(runtime_ids)):
         raise HuntBatchError("情报列表包含重复的目标 ID")
@@ -162,11 +163,70 @@ def build_category_queue(
     return tuple(targets)
 
 
+def build_task_queue(
+    items: Sequence[Mapping[str, Any]],
+    selected_categories: Sequence[str],
+    selected_qualities: Sequence[str],
+) -> tuple[HuntBatchTarget, ...]:
+    """Build the exact mixed intelligence queue selected in the GUI."""
+
+    if isinstance(selected_categories, (str, bytes)):
+        raise HuntBatchError("所选类别必须是列表")
+    categories = set(selected_categories)
+    invalid_categories = sorted(categories.difference(CATEGORY_META))
+    if invalid_categories:
+        raise HuntBatchError(f"包含不支持的情报类别：{invalid_categories}")
+    if not categories:
+        raise HuntBatchError("请至少选择一种情报类别")
+
+    targets: list[HuntBatchTarget] = []
+    if "monster" in categories:
+        if not selected_qualities:
+            if categories == {"monster"}:
+                raise HuntBatchError("请至少选择一种骷髅品质")
+        else:
+            try:
+                targets.extend(build_hunt_queue(items, selected_qualities))
+            except HuntBatchError as exc:
+                if categories == {"monster"} or "当前没有可用野兽情报" not in str(exc):
+                    raise
+
+    for category in CATEGORY_META:
+        if category == "monster" or category not in categories:
+            continue
+        targets.extend(
+            sorted(
+                (
+                    HuntBatchTarget.from_item(item)
+                    for item in items
+                    if item.get("category") == category
+                ),
+                key=lambda target: (
+                    target.expires_at,
+                    target.runtime_id,
+                ),
+            )
+        )
+
+    if not targets:
+        raise HuntBatchError("所选类别当前没有可用情报")
+    runtime_ids = [target.runtime_id for target in targets]
+    if len(runtime_ids) != len(set(runtime_ids)):
+        raise HuntBatchError("情报列表包含重复的目标 ID")
+    return tuple(targets)
+
+
 def build_hunt_waves(
     targets: Sequence[HuntBatchTarget],
     concurrency: int,
 ) -> tuple[tuple[HuntBatchTarget, ...], ...]:
-    """Freeze an exact target queue into bounded dispatch waves."""
+    """Freeze an exact target queue into dispatch waves.
+
+    Monster hunts consume march teams and are capped by ``concurrency``. Hero
+    journey and survivor rescue tasks do not consume those teams, so every
+    selected battle-style task is attached to the first wave and submitted at
+    once.
+    """
 
     if (
         isinstance(concurrency, bool)
@@ -177,10 +237,22 @@ def build_hunt_waves(
             f"并发出征数必须是 {MIN_HUNT_CONCURRENCY}-{MAX_HUNT_CONCURRENCY} 的整数"
         )
     frozen = tuple(targets)
-    return tuple(
-        frozen[index : index + concurrency]
-        for index in range(0, len(frozen), concurrency)
+    monster_targets = tuple(
+        target for target in frozen if target.category == "monster"
     )
+    battle_targets = tuple(
+        target for target in frozen if target.category != "monster"
+    )
+    monster_waves = [
+        monster_targets[index : index + concurrency]
+        for index in range(0, len(monster_targets), concurrency)
+    ]
+    if battle_targets:
+        if monster_waves:
+            monster_waves[0] = monster_waves[0] + battle_targets
+        else:
+            monster_waves.append(battle_targets)
+    return tuple(monster_waves)
 
 
 class HuntWaveBatch:
@@ -300,8 +372,6 @@ class HuntWaveBatch:
 
     def begin_next_dispatch(self) -> HuntBatchTarget | None:
         self._require_phase("dispatching")
-        if self.dispatch_active_ids:
-            raise HuntBatchError("当前已有出征命令尚未返回")
         target = next(
             (
                 candidate
@@ -1427,17 +1497,28 @@ class DeviceManagerWindow:
                 selected_qualities = {"purple"}
         else:
             selected_qualities = {"purple"}
-        load_category = getattr(self.backend, "get_category", None)
-        if callable(load_category):
+        load_categories = getattr(self.backend, "get_selected_categories", None)
+        if callable(load_categories):
             try:
-                selected_category = str(load_category(self.profile.serial))
-                if selected_category not in CATEGORY_META:
+                selected_categories = set(load_categories(self.profile.serial))
+                if selected_categories.difference(CATEGORY_META):
                     raise ValueError("情报类别无效")
             except Exception as exc:
                 preference_errors.append(f"类别：{exc}")
-                selected_category = DEFAULT_GUI_CATEGORY
+                selected_categories = set(DEFAULT_GUI_CATEGORIES)
         else:
-            selected_category = DEFAULT_GUI_CATEGORY
+            load_category = getattr(self.backend, "get_category", None)
+            if callable(load_category):
+                try:
+                    selected_category = str(load_category(self.profile.serial))
+                    if selected_category not in CATEGORY_META:
+                        raise ValueError("情报类别无效")
+                    selected_categories = {selected_category}
+                except Exception as exc:
+                    preference_errors.append(f"类别：{exc}")
+                    selected_categories = set(DEFAULT_GUI_CATEGORIES)
+            else:
+                selected_categories = set(DEFAULT_GUI_CATEGORIES)
         load_concurrency = getattr(self.backend, "get_concurrency", None)
         if callable(load_concurrency):
             try:
@@ -1454,11 +1535,14 @@ class DeviceManagerWindow:
         self.identity_text = tk.StringVar(value="正在读取当前角色和情报...")
         self.action_text = tk.StringVar(value="等待情报检查")
         self.quality_labels: dict[str, ttk.Label] = {}
-        self.category_var = tk.StringVar(
-            master=self.window,
-            value=selected_category,
-        )
-        self.category_radios: dict[str, ttk.Radiobutton] = {}
+        self.category_vars = {
+            category: tk.BooleanVar(
+                master=self.window,
+                value=category in selected_categories,
+            )
+            for category in CATEGORY_META
+        }
+        self.category_checks: dict[str, ttk.Checkbutton] = {}
         self.quality_vars = {
             quality: tk.BooleanVar(
                 master=self.window,
@@ -1544,15 +1628,14 @@ class DeviceManagerWindow:
         )
         ttk.Label(category_frame, text="类别").grid(row=0, column=0, sticky="w")
         for column, (category, label) in enumerate(CATEGORY_META.items(), start=1):
-            radio = ttk.Radiobutton(
+            check = ttk.Checkbutton(
                 category_frame,
                 text=label,
-                value=category,
-                variable=self.category_var,
+                variable=self.category_vars[category],
                 command=self._category_changed,
             )
-            radio.grid(row=0, column=column, sticky="w", padx=(14, 0))
-            self.category_radios[category] = radio
+            check.grid(row=0, column=column, sticky="w", padx=(14, 0))
+            self.category_checks[category] = check
 
         ttk.Separator(quality_frame).grid(
             row=1,
@@ -1713,47 +1796,63 @@ class DeviceManagerWindow:
         self.busy = busy
         self.action_text.set(message)
         self.refresh_intel_button.configure(state="disabled" if busy else "normal")
-        for radio in self.category_radios.values():
-            radio.configure(state="disabled" if busy else "normal")
+        for check in self.category_checks.values():
+            check.configure(state="disabled" if busy else "normal")
         for check in self.quality_checks.values():
             check.configure(state="disabled" if busy else "normal")
         self.concurrency_scale.configure(state="disabled" if busy else "normal")
         self._update_hunt_button()
 
     def _update_hunt_button(self) -> None:
-        category = self._selected_category()
+        categories = self._selected_categories()
         selected = self._selected_qualities()
-        if category == "monster":
-            count = sum(
+        monster_count = (
+            sum(
                 item.get("category", "monster") == "monster"
                 and item.get("quality") in selected
                 for item in self.current_items
             )
-        else:
-            count = sum(item.get("category") == category for item in self.current_items)
+            if "monster" in categories and selected
+            else 0
+        )
+        category_counts = {
+            category: sum(item.get("category") == category for item in self.current_items)
+            for category in categories
+            if category != "monster"
+        }
+        count = monster_count + sum(category_counts.values())
         enabled = not self.busy and count > 0
         self.hunt_button.configure(state="normal" if enabled else "disabled")
-        self.hunt_button.configure(text=f"情报-自动处理{CATEGORY_META.get(category, '任务')}")
+        self.hunt_button.configure(text="情报-自动处理所选类别")
         if not self.busy:
-            if category == "monster":
+            if not categories:
+                self.action_text.set("请选择至少一种情报类别")
+                return
+            parts: list[str] = []
+            if "monster" in categories:
                 labels = "、".join(QUALITY_META[quality][0] for quality in selected)
-                if count:
-                    self.action_text.set(f"已选择{labels}，将处理 {count} 个野兽目标")
-                elif selected:
-                    self.action_text.set(f"所选品质（{labels}）当前没有可用野兽情报")
+                if selected:
+                    parts.append(f"狩猎野兽 {monster_count} 个（{labels}）")
                 else:
-                    self.action_text.set("请选择至少一种骷髅品质")
+                    parts.append("狩猎野兽未选择骷髅品质")
+            for category in categories:
+                if category != "monster":
+                    parts.append(
+                        f"{CATEGORY_META[category]} {category_counts.get(category, 0)} 个"
+                    )
+            if count:
+                self.action_text.set(
+                    f"已选择：{'、'.join(parts)}；将处理 {count} 个目标"
+                )
             else:
-                label = CATEGORY_META[category]
-                if count:
-                    self.action_text.set(f"已选择{label}，将处理 {count} 个目标")
-                else:
-                    self.action_text.set(f"当前没有可用的{label}情报")
+                self.action_text.set(f"所选类别当前没有可用情报：{'、'.join(parts)}")
 
-    def _selected_category(self) -> str:
-        var = getattr(self, "category_var", None)
-        category = var.get() if var is not None else DEFAULT_GUI_CATEGORY
-        return category if category in CATEGORY_META else DEFAULT_GUI_CATEGORY
+    def _selected_categories(self) -> tuple[str, ...]:
+        return tuple(
+            category
+            for category in CATEGORY_META
+            if self.category_vars[category].get()
+        )
 
     def _selected_qualities(self) -> tuple[str, ...]:
         return tuple(
@@ -1780,10 +1879,11 @@ class DeviceManagerWindow:
         self._update_hunt_button()
 
     def _category_changed(self) -> None:
-        save_category = getattr(self.backend, "set_category", None)
-        if callable(save_category):
+        categories = self._selected_categories()
+        save_categories = getattr(self.backend, "set_selected_categories", None)
+        if callable(save_categories):
             try:
-                save_category(self.profile.serial, self._selected_category())
+                save_categories(self.profile.serial, categories)
             except Exception as exc:
                 self._log(f"类别偏好保存失败：{exc}")
                 messagebox.showerror(
@@ -1791,6 +1891,18 @@ class DeviceManagerWindow:
                     f"本次类别选择未能保存：\n{exc}",
                     parent=self.window,
                 )
+        else:
+            save_category = getattr(self.backend, "set_category", None)
+            if callable(save_category) and categories:
+                try:
+                    save_category(self.profile.serial, categories[0])
+                except Exception as exc:
+                    self._log(f"类别偏好保存失败：{exc}")
+                    messagebox.showerror(
+                        "类别偏好保存失败",
+                        f"本次类别选择未能保存：\n{exc}",
+                        parent=self.window,
+                    )
         self._update_hunt_button()
 
     def _concurrency_changed(self, value: str) -> None:
@@ -1908,7 +2020,7 @@ class DeviceManagerWindow:
     def start_hunt(self) -> None:
         if self.busy:
             return
-        category = self._selected_category()
+        categories = self._selected_categories()
         selected_qualities = self._selected_qualities()
         concurrency = int(self.concurrency_var.get())
         if self.current_role not in self.profile.roles:
@@ -1919,36 +2031,52 @@ class DeviceManagerWindow:
             )
             return
         try:
-            if category == "monster":
-                targets = build_hunt_queue(self.current_items, selected_qualities)
-            else:
-                targets = build_category_queue(self.current_items, category)
+            targets = build_task_queue(
+                self.current_items,
+                categories,
+                selected_qualities,
+            )
             waves = build_hunt_waves(targets, concurrency)
         except HuntBatchError as exc:
             self._update_hunt_button()
             messagebox.showwarning("无法开始批次", str(exc), parent=self.window)
             return
         role_text = self.current_role
-        if category == "monster":
-            quality_counts = {
-                quality: sum(target.quality == quality for target in targets)
-                for quality in selected_qualities
-            }
-            target_text = "、".join(
-                f"{QUALITY_META[quality][0]} {quality_counts[quality]} 个"
-                for quality in selected_qualities
-                if quality_counts[quality]
-            )
-        else:
-            target_text = f"{CATEGORY_META[category]} {len(targets)} 个"
+        target_text = self._format_target_counts(targets, selected_qualities)
         self.hunt_batch = HuntWaveBatch(targets, concurrency)
         self.hunt_role = role_text
         self._set_busy(True, f"正在处理 {len(targets)} 个目标，请勿切换角色或关闭窗口...")
         self._log(
             f"批量自动处理开始：{target_text}，共 {len(targets)} 个目标；"
-            f"并发上限已冻结为 {concurrency} 队，共 {len(waves)} 波。"
+            f"野兽并发上限已冻结为 {concurrency} 队，共 {len(waves)} 波；"
+            "英雄之旅/营救幸存者不占用该上限。"
         )
         self._dispatch_next_hunt(self._available_runtime_ids())
+
+    @staticmethod
+    def _format_target_counts(
+        targets: Sequence[HuntBatchTarget],
+        selected_qualities: Sequence[str],
+    ) -> str:
+        parts: list[str] = []
+        monster_targets = [target for target in targets if target.category == "monster"]
+        if monster_targets:
+            quality_counts = {
+                quality: sum(target.quality == quality for target in monster_targets)
+                for quality in selected_qualities
+            }
+            parts.extend(
+                f"{QUALITY_META[quality][0]}野兽 {quality_counts[quality]} 个"
+                for quality in selected_qualities
+                if quality_counts[quality]
+            )
+        for category in CATEGORY_META:
+            if category == "monster":
+                continue
+            count = sum(target.category == category for target in targets)
+            if count:
+                parts.append(f"{CATEGORY_META[category]} {count} 个")
+        return "、".join(parts) if parts else "0 个目标"
 
     def _dispatch_next_hunt(
         self,
@@ -1977,12 +2105,12 @@ class DeviceManagerWindow:
             return
         self.action_text.set(
             f"第 {batch.wave_number}/{len(batch.waves)} 波，"
-            f"正在连续发起 {len(targets)} 个狩猎任务..."
+            f"正在同时提交 {len(targets)} 个情报任务..."
         )
         self._log(
             f"第 {batch.wave_number}/{len(batch.waves)} 波，"
-            f"连续提交精确目标 {[target.runtime_id for target in targets]}；"
-            f"依次执行{self._dispatch_flow_text(targets[0])}，全部发起后再等待本波完成。"
+            f"同时提交精确目标 {[target.runtime_id for target in targets]}；"
+            f"{self._wave_flow_text(targets)}，全部发起后再等待本波完成。"
         )
         self._start_next_hunt_dispatch()
 
@@ -1992,44 +2120,64 @@ class DeviceManagerWindow:
             return "平均配置 -> 出征 -> 结果验证"
         return "战斗开始 -> 战斗结束 -> 结果验证"
 
+    @classmethod
+    def _wave_flow_text(cls, targets: Sequence[HuntBatchTarget]) -> str:
+        monster_count = sum(target.category == "monster" for target in targets)
+        battle_count = len(targets) - monster_count
+        if monster_count and battle_count:
+            return (
+                f"{monster_count} 个野兽执行平均配置 -> 出征 -> 结果验证；"
+                f"{battle_count} 个英雄/营救任务直接执行战斗开始 -> 战斗结束 -> 结果验证"
+            )
+        return cls._dispatch_flow_text(targets[0])
+
     def _start_next_hunt_dispatch(self) -> None:
         batch = self.hunt_batch
         if batch is None or not self.exists or batch.wave_phase != "dispatching":
             return
-        try:
-            target = batch.begin_next_dispatch()
-        except HuntBatchError as exc:
-            self._log(f"波内提交状态错误：{exc}")
-            self._march_reconcile_failed(str(exc))
-            return
-        if target is None:
+        submitted = 0
+        while True:
+            try:
+                target = batch.begin_next_dispatch()
+            except HuntBatchError as exc:
+                self._log(f"波内提交状态错误：{exc}")
+                self._march_reconcile_failed(str(exc))
+                return
+            if target is None:
+                break
+            submitted += 1
+            ordinal = next(
+                index
+                for index, queued in enumerate(batch.targets, start=1)
+                if queued.runtime_id == target.runtime_id
+            )
+            wave_ordinal = next(
+                index
+                for index, queued in enumerate(batch.current_wave, start=1)
+                if queued.runtime_id == target.runtime_id
+            )
+            self.action_text.set(
+                f"第 {batch.wave_number}/{len(batch.waves)} 波，"
+                f"正在提交 {wave_ordinal}/{len(batch.current_wave)}：{target.label}"
+            )
+            self._log(
+                f"并发发起 {ordinal}/{len(batch.targets)}：{target.label}。"
+            )
+            self.dispatcher.submit(
+                lambda target=target: self._guarded_task_target(target),
+                lambda value, error, batch=batch, target=target: self._hunt_finished(
+                    batch,
+                    target,
+                    value,
+                    error,
+                ),
+            )
+        if submitted == 0:
             self._resolve_wave_dispatches()
             return
-        ordinal = next(
-            index
-            for index, queued in enumerate(batch.targets, start=1)
-            if queued.runtime_id == target.runtime_id
-        )
-        wave_ordinal = next(
-            index
-            for index, queued in enumerate(batch.current_wave, start=1)
-            if queued.runtime_id == target.runtime_id
-        )
         self.action_text.set(
             f"第 {batch.wave_number}/{len(batch.waves)} 波，"
-            f"正在提交 {wave_ordinal}/{len(batch.current_wave)}：{target.label}"
-        )
-        self._log(
-            f"连续发起 {ordinal}/{len(batch.targets)}：{target.label}。"
-        )
-        self.dispatcher.submit(
-            lambda target=target: self._guarded_task_target(target),
-            lambda value, error, batch=batch, target=target: self._hunt_finished(
-                batch,
-                target,
-                value,
-                error,
-            ),
+            f"已提交 {submitted} 个任务，等待出征回执..."
         )
 
     def _guarded_task_target(self, target: HuntBatchTarget) -> Mapping[str, Any]:
@@ -2070,7 +2218,7 @@ class DeviceManagerWindow:
             batch.mark_attempt_error(target.runtime_id, str(error))
             self._log(
                 f"{target.label} 命令返回错误：{error}；"
-                "暂停本波后续提交并刷新核对。"
+                "等待本波其余回执后统一刷新核对。"
             )
             self._resolve_wave_dispatches()
             return
@@ -2079,7 +2227,7 @@ class DeviceManagerWindow:
         expected_role = self.hunt_role
         if expected_role is None:
             batch.mark_attempt_error(target.runtime_id, "批次开始角色未冻结")
-            self._log("批次开始角色未冻结；暂停本波后续提交并刷新核对。")
+            self._log("批次开始角色未冻结；等待本波其余回执后统一刷新核对。")
             self._resolve_wave_dispatches()
             return
         try:
@@ -2094,7 +2242,7 @@ class DeviceManagerWindow:
             batch.mark_attempt_error(target.runtime_id, detail)
             self._log(
                 f"{target.label} 回执验证失败：{detail}；"
-                "暂停本波后续提交并刷新核对。"
+                "等待本波其余回执后统一刷新核对。"
             )
             self._resolve_wave_dispatches()
             return
@@ -2636,6 +2784,7 @@ __all__ = [
     "CATEGORY_META",
     "QUALITY_META",
     "TaskDispatcher",
+    "build_task_queue",
     "build_hunt_queue",
     "build_category_queue",
     "build_hunt_waves",
