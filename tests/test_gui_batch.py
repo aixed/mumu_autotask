@@ -11,6 +11,7 @@ from mumu_autotask.gui import (
     HuntWaveBatch,
     build_hunt_queue,
     build_hunt_waves,
+    terminal_target_ids_from_status_payload,
     validate_claim_intel_receipt,
     validate_march_intel_receipt,
     validate_wait_intel_receipt,
@@ -751,6 +752,16 @@ class HuntWaveBatchTests(unittest.TestCase):
                     intel_item(101, "purple", expires_at=1001),
                 ],
             },
+            intel_status=lambda *args, **kwargs: {
+                "serial": "device-1",
+                "kingdom": 4549,
+                "role": "打工人",
+                "target_ids": [100, 101],
+                "statuses_after": [
+                    {"runtime_id": 100, "state": "PENDING"},
+                    {"runtime_id": 101, "state": "PENDING"},
+                ],
+            },
         )
 
         manager._dispatch_next_hunt({100, 101})
@@ -758,8 +769,10 @@ class HuntWaveBatchTests(unittest.TestCase):
         first_callback(None, RuntimeError("direct failure"))  # type: ignore[operator]
         refresh_action, refresh_callback = dispatcher.submissions[1]
         refresh_callback(refresh_action(), None)  # type: ignore[operator]
+        final_action, final_callback = dispatcher.submissions[2]
+        final_callback(final_action(), None)  # type: ignore[operator]
 
-        self.assertEqual(len(dispatcher.submissions), 2)
+        self.assertEqual(len(dispatcher.submissions), 3)
         self.assertIsNone(manager.hunt_batch)
         self.assertTrue(batch.all_waves_done)
         self.assertEqual(
@@ -768,6 +781,91 @@ class HuntWaveBatchTests(unittest.TestCase):
         )
         self.assertFalse(any(event[0] == "wait" for event in events))
         self.assertTrue(any(event[0] == "busy" and event[1] is False for event in events))
+
+    def test_final_reconcile_converts_terminal_failures_and_claims(self) -> None:
+        manager = object.__new__(DeviceManagerWindow)
+        targets = build_hunt_queue(
+            [
+                intel_item(100, "purple", expires_at=1000),
+                intel_item(101, "purple", expires_at=1001),
+            ],
+            ("purple",),
+        )
+        batch = HuntWaveBatch(targets, 2)
+        manager.hunt_batch = batch
+        manager.hunt_role = "打工人"
+        manager.profile = SimpleNamespace(serial="device-1")
+        manager.window = SimpleNamespace(winfo_exists=lambda: 1)
+        events: list[tuple[object, ...]] = []
+        manager.action_text = SimpleNamespace(
+            set=lambda value: events.append(("status", value))
+        )
+        manager._log = lambda message: events.append(("log", message))
+        manager._log_batch_outcome = lambda outcome: events.append(("outcome", outcome))
+        manager._set_busy = lambda busy, message: events.append(("busy", busy, message))
+        manager._claim_hunt_rewards = lambda: events.append(("claim",))
+
+        batch.prepare_current_wave()
+        self.begin_dispatch(batch, 100)
+        batch.mark_attempt_error(100, "出征回执没有证明")
+        batch.begin_dispatch_reconciliation()
+        batch.reconcile_dispatch_errors({100, 101})
+        batch.abort_unresolved_dispatch("停止")
+
+        class CapturingDispatcher:
+            def __init__(self) -> None:
+                self.submissions: list[tuple[object, object]] = []
+
+            def submit(self, action: object, callback: object) -> None:
+                self.submissions.append((action, callback))
+
+        dispatcher = CapturingDispatcher()
+        manager.dispatcher = dispatcher
+        manager.backend = SimpleNamespace(
+            intel_status=lambda serial, target_ids, *, expected_role: {
+                "serial": serial,
+                "kingdom": 4549,
+                "role": expected_role,
+                "target_ids": list(target_ids),
+                "statuses_after": [
+                    {"runtime_id": 100, "state": "COMPLETED"},
+                    {"runtime_id": 101, "state": "MISSING"},
+                ],
+            }
+        )
+
+        manager._finish_hunt_batch()
+        self.assertEqual(len(dispatcher.submissions), 1)
+        action, callback = dispatcher.submissions[0]
+        callback(action(), None)  # type: ignore[operator]
+
+        self.assertEqual(
+            [(outcome.target.runtime_id, outcome.status) for outcome in batch.outcomes],
+            [(100, "reconciled"), (101, "reconciled")],
+        )
+        self.assertIn(("claim",), events)
+
+    def test_terminal_status_payload_reports_completed_and_missing_ids(self) -> None:
+        payload = {
+            "serial": "device-1",
+            "kingdom": 4549,
+            "role": "打工人",
+            "target_ids": [100, 101, 102],
+            "statuses_after": [
+                {"runtime_id": 100, "state": "COMPLETED"},
+                {"runtime_id": 101, "state": "MISSING"},
+                {"runtime_id": 102, "state": "PENDING"},
+            ],
+        }
+        self.assertEqual(
+            terminal_target_ids_from_status_payload(
+                payload,
+                "device-1",
+                (100, 101, 102),
+                expected_role="打工人",
+            ),
+            {100, 101},
+        )
 
     def test_finish_hunt_batch_uses_status_and_log_without_dialog(self) -> None:
         manager = object.__new__(DeviceManagerWindow)

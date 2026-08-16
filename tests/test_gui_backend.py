@@ -317,12 +317,14 @@ class GuiBackendTests(unittest.TestCase):
         runner = FakeRunner(
             [
                 '{"serial":"device-1","completed_target_ids":[436,437]}\n',
+                '{"serial":"device-1","statuses_after":[]}\n',
                 '{"serial":"device-1","claimed_target_ids":[436,437]}\n',
             ]
         )
         backend = GuiBackend(runner)  # type: ignore[arg-type]
 
         backend.wait_intel("device-1", (436, 437), expected_role="打工人")
+        backend.intel_status("device-1", (436, 437), expected_role="打工人")
         backend.claim_intel("device-1", (436, 437), expected_role="打工人")
 
         self.assertEqual(
@@ -342,6 +344,20 @@ class GuiBackendTests(unittest.TestCase):
                         "--execute",
                     ),
                     1860,
+                ),
+                (
+                    (
+                        "claim-intel",
+                        "--serial",
+                        "device-1",
+                        "--target-id",
+                        "436",
+                        "--target-id",
+                        "437",
+                        "--expected-role",
+                        "打工人",
+                    ),
+                    120,
                 ),
                 (
                     (

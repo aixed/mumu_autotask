@@ -6,7 +6,7 @@ import queue
 import sys
 import threading
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -168,6 +168,7 @@ class HuntWaveBatch:
         self.claim_attempted = False
         self.claim_verified = False
         self.claim_error: str | None = None
+        self.final_reconcile_attempted = False
 
     @property
     def current_wave(self) -> tuple[HuntBatchTarget, ...]:
@@ -513,6 +514,47 @@ class HuntWaveBatch:
             and counts["failed"] == 0
             and counts["skipped"] == 0
         )
+
+    @property
+    def needs_final_reconcile(self) -> bool:
+        counts = self.counts
+        return (
+            self.all_waves_done
+            and not self.claim_attempted
+            and not self.final_reconcile_attempted
+            and (counts["failed"] > 0 or counts["skipped"] > 0)
+        )
+
+    def begin_final_reconcile(self) -> tuple[int, ...]:
+        if not self.needs_final_reconcile:
+            raise HuntBatchError("当前批次不需要最终复核")
+        self.final_reconcile_attempted = True
+        return tuple(target.runtime_id for target in self.targets)
+
+    def reconcile_terminal_outcomes(
+        self,
+        terminal_runtime_ids: set[int],
+        detail: str,
+    ) -> tuple[HuntBatchOutcome, ...]:
+        updates: list[HuntBatchOutcome] = []
+        rewritten: list[HuntBatchOutcome] = []
+        for outcome in self.outcomes:
+            if (
+                outcome.status in {"failed", "skipped"}
+                and outcome.target.runtime_id in terminal_runtime_ids
+            ):
+                updated = replace(
+                    outcome,
+                    status="reconciled",
+                    detail=f"{outcome.detail}；{detail}",
+                )
+                self._state[outcome.target.runtime_id] = "reconciled"
+                updates.append(updated)
+                rewritten.append(updated)
+            else:
+                rewritten.append(outcome)
+        self.outcomes = rewritten
+        return tuple(updates)
 
     def begin_claim(self) -> tuple[int, ...]:
         if self.claim_attempted:
@@ -887,6 +929,41 @@ def validate_wait_intel_receipt(
                 raise HuntBatchError(f"领取后目标 {runtime_id} 仍未消失")
             raise HuntBatchError(f"目标 {runtime_id} 尚未完成")
     return expected
+
+
+def terminal_target_ids_from_status_payload(
+    payload: Mapping[str, Any],
+    serial: str,
+    target_ids: Sequence[int],
+    *,
+    expected_role: str | None = None,
+) -> set[int]:
+    expected = tuple(target_ids)
+    if payload.get("serial") != serial:
+        raise HuntBatchError("状态回执的设备不匹配")
+    if payload.get("kingdom") != ALLOWED_KINGDOM:
+        raise HuntBatchError("状态回执的区域不是 4549")
+    if expected_role is not None and payload.get("role") != expected_role:
+        raise HuntBatchError("状态回执的角色与批次开始角色不匹配")
+    if payload.get("target_ids") != list(expected):
+        raise HuntBatchError("状态回执的目标 ID 与批次不一致")
+    statuses = payload.get("statuses_after", payload.get("statuses"))
+    if not isinstance(statuses, list) or len(statuses) != len(expected):
+        raise HuntBatchError("状态回执缺少精确目标状态")
+    terminal: set[int] = set()
+    for index, (runtime_id, status) in enumerate(
+        zip(expected, statuses, strict=True)
+    ):
+        if not isinstance(status, Mapping):
+            raise HuntBatchError(f"状态回执状态 {index} 无效")
+        if status.get("runtime_id") != runtime_id:
+            raise HuntBatchError("状态回执状态顺序与目标 ID 不一致")
+        state = status.get("state")
+        if state in {"COMPLETED", "MISSING"}:
+            terminal.add(runtime_id)
+        elif state != "PENDING":
+            raise HuntBatchError(f"目标 {runtime_id} 状态无效：{state!r}")
+    return terminal
 
 
 def validate_claim_intel_receipt(
@@ -2257,12 +2334,74 @@ class DeviceManagerWindow:
         batch = self.hunt_batch
         if batch is None:
             return
+        if batch.needs_final_reconcile:
+            self._request_final_hunt_reconcile(batch)
+            return
         summary = batch.summary()
         self.hunt_batch = None
         self.hunt_role = None
         self._set_busy(False, summary)
         self.action_text.set(summary)
         self._log(summary)
+
+    def _request_final_hunt_reconcile(self, expected_batch: HuntWaveBatch) -> None:
+        try:
+            target_ids = expected_batch.begin_final_reconcile()
+        except HuntBatchError as exc:
+            self._log(f"最终状态复核无法启动：{exc}")
+            return
+        self.action_text.set("正在最终复核失败项是否已完成...")
+        self._log(
+            "批次存在未解决失败；正在按精确目标 ID 做最终状态复核。"
+        )
+        self.dispatcher.submit(
+            lambda target_ids=target_ids: self.backend.intel_status(
+                self.profile.serial,
+                target_ids,
+                expected_role=self.hunt_role,
+            ),
+            lambda value, error, batch=expected_batch, target_ids=target_ids: (
+                self._final_hunt_reconciled(batch, target_ids, value, error)
+            ),
+        )
+
+    def _final_hunt_reconciled(
+        self,
+        expected_batch: HuntWaveBatch,
+        target_ids: Sequence[int],
+        value: Any | None,
+        error: Exception | None,
+    ) -> None:
+        batch = self.hunt_batch
+        if not self.exists or batch is not expected_batch:
+            return
+        if error is not None:
+            self._log(f"最终状态复核失败：{error}")
+            self._finish_hunt_batch()
+            return
+        payload = value if isinstance(value, Mapping) else {}
+        try:
+            terminal_ids = terminal_target_ids_from_status_payload(
+                payload,
+                self.profile.serial,
+                target_ids,
+                expected_role=self.hunt_role,
+            )
+            updates = batch.reconcile_terminal_outcomes(
+                terminal_ids,
+                "最终精确状态复核显示目标已完成或已消失",
+            )
+        except HuntBatchError as exc:
+            self._log(f"最终状态复核回执无效：{exc}")
+            self._finish_hunt_batch()
+            return
+        for outcome in updates:
+            self._log_batch_outcome(outcome)
+        if batch.can_claim:
+            self._log("最终状态复核已消除失败项；继续执行一键领取。")
+            self._claim_hunt_rewards()
+            return
+        self._finish_hunt_batch()
 
     def close(self) -> None:
         if self.busy:
@@ -2338,6 +2477,7 @@ __all__ = [
     "build_hunt_waves",
     "build_parser",
     "main",
+    "terminal_target_ids_from_status_payload",
     "validate_claim_intel_receipt",
     "validate_wait_intel_receipt",
 ]

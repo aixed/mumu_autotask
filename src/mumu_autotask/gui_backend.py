@@ -565,6 +565,25 @@ class GuiBackend:
             raise GuiBackendError("情报等待命令返回了意外的数据条数")
         return payloads[0]
 
+    def intel_status(
+        self,
+        serial: str,
+        target_ids: Sequence[int],
+        *,
+        expected_role: str | None = None,
+    ) -> Mapping[str, Any]:
+        ids = _validate_target_ids(target_ids)
+        arguments = ["claim-intel", "--serial", serial]
+        for target_id in ids:
+            arguments.extend(("--target-id", str(target_id)))
+        if expected_role is not None:
+            arguments.extend(("--expected-role", _validate_expected_role(expected_role)))
+        result = self.runner.run(arguments, timeout=120)
+        payloads = parse_json_lines(result.stdout)
+        if len(payloads) != 1:
+            raise GuiBackendError("情报状态命令返回了意外的数据条数")
+        return payloads[0]
+
     def claim_intel(
         self,
         serial: str,
