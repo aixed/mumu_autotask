@@ -969,6 +969,78 @@ class HuntWaveBatchTests(unittest.TestCase):
         self.assertIsNone(manager.hunt_role)
         self.assertEqual([event[0] for event in events], ["busy", "status", "log"])
 
+    def test_close_while_refreshing_cancels_device_command_without_dialog(self) -> None:
+        manager = object.__new__(DeviceManagerWindow)
+        events: list[tuple[object, ...]] = []
+        manager.busy = True
+        manager._closing = False
+        manager.hunt_batch = None
+        manager.hunt_role = None
+        manager.profile = SimpleNamespace(serial="device-1")
+        manager.launcher = SimpleNamespace(
+            manager_closed=lambda serial: events.append(("closed", serial))
+        )
+        manager.window = SimpleNamespace(
+            destroy=lambda: events.append(("destroy",))
+        )
+        manager.backend = SimpleNamespace(
+            runner=SimpleNamespace(
+                cancel_serial=lambda serial: events.append(("cancel", serial)),
+                cancel_all=lambda: events.append(("cancel-all",)),
+            )
+        )
+
+        class DialogTrap:
+            def __getattr__(self, name: str) -> object:
+                raise AssertionError(f"refresh close must not open messagebox.{name}")
+
+        with patch("mumu_autotask.gui.messagebox", DialogTrap()):
+            manager.close()
+
+        self.assertEqual(
+            events,
+            [("cancel", "device-1"), ("closed", "device-1"), ("destroy",)],
+        )
+        self.assertFalse(manager.busy)
+        self.assertTrue(manager._closing)
+
+    def test_close_while_hunting_requires_confirmation_then_cancels_device(self) -> None:
+        manager = object.__new__(DeviceManagerWindow)
+        events: list[tuple[object, ...]] = []
+        manager.busy = True
+        manager._closing = False
+        manager.hunt_batch = object()
+        manager.hunt_role = "打工人"
+        manager.profile = SimpleNamespace(serial="device-1")
+        manager.launcher = SimpleNamespace(
+            manager_closed=lambda serial: events.append(("closed", serial))
+        )
+        manager.window = SimpleNamespace(
+            destroy=lambda: events.append(("destroy",))
+        )
+        manager.backend = SimpleNamespace(
+            runner=SimpleNamespace(
+                cancel_serial=lambda serial: events.append(("cancel", serial)),
+                cancel_all=lambda: events.append(("cancel-all",)),
+            )
+        )
+
+        with patch("mumu_autotask.gui.messagebox.askyesno", return_value=False):
+            manager.close()
+        self.assertEqual(events, [])
+        self.assertTrue(manager.busy)
+        self.assertFalse(manager._closing)
+
+        with patch("mumu_autotask.gui.messagebox.askyesno", return_value=True):
+            manager.close()
+
+        self.assertEqual(
+            events,
+            [("cancel", "device-1"), ("closed", "device-1"), ("destroy",)],
+        )
+        self.assertIsNone(manager.hunt_batch)
+        self.assertIsNone(manager.hunt_role)
+
     def test_claim_receipt_requires_one_proof_and_all_ids_missing(self) -> None:
         payload = {
             "serial": "device-1",

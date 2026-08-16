@@ -465,7 +465,7 @@ class CliRunner:
     ) -> None:
         self.config_path = Path(config_path).resolve()
         self.python_executable = console_python_executable(python_executable)
-        self._processes: set[subprocess.Popen[str]] = set()
+        self._processes: dict[subprocess.Popen[str], tuple[str, ...]] = {}
         self._lock = threading.Lock()
 
     def command(self, *arguments: str) -> tuple[str, ...]:
@@ -499,7 +499,7 @@ class CliRunner:
         except OSError as exc:
             raise GuiBackendError(f"无法启动 Python 命令：{exc}") from exc
         with self._lock:
-            self._processes.add(process)
+            self._processes[process] = command
         try:
             try:
                 stdout, stderr = process.communicate(timeout=timeout)
@@ -509,7 +509,7 @@ class CliRunner:
                 raise GuiBackendError(f"命令等待超过 {int(timeout)} 秒") from exc
         finally:
             with self._lock:
-                self._processes.discard(process)
+                self._processes.pop(process, None)
         result = CommandResult(command, process.returncode, stdout, stderr)
         if result.returncode != 0:
             diagnostic = _command_error_context(result.stderr, result.stdout)
@@ -525,6 +525,24 @@ class CliRunner:
         for process in processes:
             if process.poll() is None:
                 process.kill()
+
+    def cancel_serial(self, serial: str) -> None:
+        with self._lock:
+            processes = tuple(
+                process
+                for process, command in self._processes.items()
+                if self._command_targets_serial(command, serial)
+            )
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+
+    @staticmethod
+    def _command_targets_serial(command: Sequence[str], serial: str) -> bool:
+        for index, value in enumerate(command[:-1]):
+            if value == "--serial" and command[index + 1] == serial:
+                return True
+        return False
 
 
 class GuiBackend:

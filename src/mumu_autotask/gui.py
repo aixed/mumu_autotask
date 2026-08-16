@@ -1452,12 +1452,13 @@ class LauncherApp:
 
     def _close(self) -> None:
         if self.dispatcher.active_count:
-            messagebox.showwarning(
+            should_close = messagebox.askyesno(
                 "任务正在执行",
-                "请等待当前连接、情报或出征操作完成后再关闭窗口。",
+                "当前仍有后台任务未完成。是否取消后台命令并关闭程序？",
                 parent=self.root,
             )
-            return
+            if not should_close:
+                return
         self.dispatcher.close()
         self.backend.runner.cancel_all()
         self.root.destroy()
@@ -1476,6 +1477,7 @@ class DeviceManagerWindow:
         self.dispatcher = launcher.dispatcher
         self.status = dict(initial_status)
         self.busy = False
+        self._closing = False
         self.current_items: list[dict[str, Any]] = []
         self.current_role: str | None = None
         self.hunt_role: str | None = None
@@ -2714,13 +2716,26 @@ class DeviceManagerWindow:
         self._finish_hunt_batch()
 
     def close(self) -> None:
-        if self.busy:
-            messagebox.showwarning(
+        if self._closing:
+            return
+        if self.busy and self.hunt_batch is not None:
+            should_close = messagebox.askyesno(
                 "任务正在执行",
-                "请等待当前情报或出征操作完成后再关闭管理窗口。",
+                "当前正在处理出征或领取流程。是否取消该设备后台命令并关闭管理窗口？",
                 parent=self.window,
             )
-            return
+            if not should_close:
+                return
+        self._closing = True
+        if self.busy:
+            cancel_serial = getattr(self.backend.runner, "cancel_serial", None)
+            if callable(cancel_serial):
+                cancel_serial(self.profile.serial)
+            else:
+                self.backend.runner.cancel_all()
+        self.busy = False
+        self.hunt_batch = None
+        self.hunt_role = None
         self.launcher.manager_closed(self.profile.serial)
         self.window.destroy()
 

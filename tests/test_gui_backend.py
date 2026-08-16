@@ -137,6 +137,28 @@ class GuiBackendTests(unittest.TestCase):
         self.assertEqual(command[-2:], ("status", "--all"))
         self.assertTrue(Path(command[4]).is_absolute())
 
+    def test_runner_serial_cancellation_matches_only_explicit_serial_argument(self) -> None:
+        runner = CliRunner("config.json", python_executable="python.exe")
+
+        self.assertTrue(
+            runner._command_targets_serial(  # type: ignore[attr-defined]
+                ("python.exe", "-m", "mumu_autotask", "status", "--serial", "device-1"),
+                "device-1",
+            )
+        )
+        self.assertFalse(
+            runner._command_targets_serial(  # type: ignore[attr-defined]
+                ("python.exe", "-m", "mumu_autotask", "devices", "--connect"),
+                "device-1",
+            )
+        )
+        self.assertFalse(
+            runner._command_targets_serial(  # type: ignore[attr-defined]
+                ("python.exe", "-m", "mumu_autotask", "status", "--serial", "device-2"),
+                "device-1",
+            )
+        )
+
     def test_runner_preserves_bounded_frida_error_context_without_stdout(self) -> None:
         class FailedProcess:
             returncode = 2
