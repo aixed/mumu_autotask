@@ -188,10 +188,6 @@ def validate_role_whitelist(roles: Sequence[str]) -> tuple[str, ...]:
             raise BusinessError(f"device role {role!r} is duplicated")
         seen.add(role)
         result.append(role)
-    if not result:
-        raise BusinessError(
-            "the selected device has no configured role whitelist"
-        )
     if len(result) > 16:
         raise BusinessError("a device role whitelist cannot exceed 16 entries")
     return tuple(result)
@@ -250,7 +246,6 @@ def _lua_role_table(roles: Sequence[str]) -> str:
 
 
 _LUA_COMMON = r'''
-local EXPECTED_KINGDOM = 4549
 local ALLOWED_ROLES = { __ROLE_TABLE__ }
 local QUALITY_NAMES = { [2] = "green", [3] = "blue", [4] = "purple", [5] = "yellow" }
 
@@ -293,7 +288,7 @@ local function checked_identity()
         fail("PlayerCtrl is unavailable")
     end
     local role_hex = hex(call(GCtrl.PlayerCtrl, "GetPlayerName", "player name"))
-    if ALLOWED_ROLES[role_hex] ~= true then
+    if next(ALLOWED_ROLES) ~= nil and ALLOWED_ROLES[role_hex] ~= true then
         fail("active role is not in this device whitelist")
     end
     local kid = integer(
@@ -306,8 +301,8 @@ local function checked_identity()
         "player server",
         false
     )
-    if kid ~= EXPECTED_KINGDOM or server_id ~= EXPECTED_KINGDOM then
-        fail("active player kingdom/server is not 4549")
+    if kid ~= server_id then
+        fail("active player kingdom/server disagree")
     end
     return role_hex, server_id
 end
@@ -697,7 +692,6 @@ def build_inspect_intel_lua(roles: Sequence[str]) -> str:
 
 
 _LUA_BATTLE_COMMON = r'''
-local EXPECTED_KINGDOM = 4549
 local ALLOWED_ROLES = { __ROLE_TABLE__ }
 local QUALITY_NAMES = { [2] = "green", [3] = "blue", [4] = "purple", [5] = "yellow" }
 local CATEGORY_NAMES = { [2] = "rescue", [3] = "hero" }
@@ -741,13 +735,13 @@ local function checked_identity()
         fail("PlayerCtrl is unavailable")
     end
     local role_hex = hex(call(GCtrl.PlayerCtrl, "GetPlayerName", "player name"))
-    if ALLOWED_ROLES[role_hex] ~= true then
+    if next(ALLOWED_ROLES) ~= nil and ALLOWED_ROLES[role_hex] ~= true then
         fail("active role is not in this device whitelist")
     end
     local kid = integer(call(GCtrl.PlayerCtrl, "GetPlayerKid", "player kingdom"), "player kingdom", false)
     local server_id = integer(call(GCtrl.PlayerCtrl, "GetPlayerServerId", "player server"), "player server", false)
-    if kid ~= EXPECTED_KINGDOM or server_id ~= EXPECTED_KINGDOM then
-        fail("active player kingdom/server is not 4549")
+    if kid ~= server_id then
+        fail("active player kingdom/server disagree")
     end
     return role_hex, server_id
 end
@@ -2230,7 +2224,6 @@ return table.concat(lines, "\n")
 
 
 _MARCH_CAPTURE_COMMON = r'''
-local EXPECTED_KINGDOM = 4549
 local ALLOWED_ROLES = { __ROLE_TABLE__ }
 
 local function fail(message)
@@ -2261,14 +2254,13 @@ local function checked_identity()
         fail("player name lookup failed")
     end
     local role_hex = hex(name)
-    if ALLOWED_ROLES[role_hex] ~= true then
+    if next(ALLOWED_ROLES) ~= nil and ALLOWED_ROLES[role_hex] ~= true then
         fail("active role is not in this device whitelist")
     end
     local ok_kid, kid = pcall(player.GetPlayerKid, player)
     local ok_server, server_id = pcall(player.GetPlayerServerId, player)
-    if not ok_kid or not ok_server or kid ~= EXPECTED_KINGDOM
-        or server_id ~= EXPECTED_KINGDOM then
-        fail("active player kingdom/server is not 4549")
+    if not ok_kid or not ok_server or kid ~= server_id then
+        fail("active player kingdom/server disagree")
     end
     return role_hex, server_id
 end
@@ -2390,8 +2382,6 @@ def select_march_target(
     runtime_id: int | None = None,
 ) -> IntelItem:
     requested = normalize_quality(quality)
-    if snapshot.kingdom != ALLOWED_KINGDOM:
-        raise BusinessError("cannot select a march target outside kingdom 4549")
     if runtime_id is not None:
         if isinstance(runtime_id, bool) or not isinstance(runtime_id, int) or runtime_id <= 0:
             raise BusinessError("march target runtime id must be a positive integer")
@@ -2427,8 +2417,6 @@ def select_battle_target(
     runtime_id: int | None = None,
 ) -> BattleIntelItem:
     requested = normalize_battle_category(category)
-    if snapshot.kingdom != ALLOWED_KINGDOM:
-        raise BusinessError("cannot select a battle target outside kingdom 4549")
     if runtime_id is not None:
         if isinstance(runtime_id, bool) or not isinstance(runtime_id, int) or runtime_id <= 0:
             raise BusinessError("battle target runtime id must be a positive integer")
@@ -2475,9 +2463,15 @@ def _parse_role(value: str, allowed_roles: Sequence[str]) -> str:
     except (ValueError, UnicodeDecodeError) as exc:
         raise BusinessError("ROLE is not valid UTF-8 hex") from exc
     roles = validate_role_whitelist(allowed_roles)
-    if role not in roles:
+    if roles and role not in roles:
         raise BusinessError("reported role is not in the device whitelist")
     return role
+
+
+def _parse_kingdom_line(fields: list[str], location: str) -> int:
+    if len(fields) != 2 or fields[0] != "KINGDOM":
+        raise BusinessError(f"{location} output is missing KINGDOM")
+    return _parse_integer(fields[1], f"{location} KINGDOM", allow_zero=False)
 
 
 def _parse_item(fields: list[str], location: str) -> IntelItem:
@@ -2565,11 +2559,7 @@ def parse_intel_output(
     if len(lines) < 4 or len(lines[1]) != 2 or lines[1][0] != "ROLE":
         raise BusinessError("INTEL output is missing ROLE")
     role = _parse_role(lines[1][1], allowed_roles)
-    if len(lines[2]) != 2 or lines[2][0] != "KINGDOM":
-        raise BusinessError("INTEL output is missing KINGDOM")
-    kingdom = _parse_integer(lines[2][1], "KINGDOM", allow_zero=False)
-    if kingdom != ALLOWED_KINGDOM:
-        raise BusinessError("INTEL output kingdom is not 4549")
+    kingdom = _parse_kingdom_line(lines[2], "INTEL")
     if len(lines[-1]) != 2 or lines[-1][0] != "END":
         raise BusinessError("INTEL output is missing END")
     count = _parse_integer(lines[-1][1], "END count", allow_zero=True)
@@ -2604,11 +2594,7 @@ def parse_battle_intel_output(
     if len(lines) < 4 or len(lines[1]) != 2 or lines[1][0] != "ROLE":
         raise BusinessError("BATTLE_INTEL output is missing ROLE")
     role = _parse_role(lines[1][1], allowed_roles)
-    if len(lines[2]) != 2 or lines[2][0] != "KINGDOM":
-        raise BusinessError("BATTLE_INTEL output is missing KINGDOM")
-    kingdom = _parse_integer(lines[2][1], "KINGDOM", allow_zero=False)
-    if kingdom != ALLOWED_KINGDOM:
-        raise BusinessError("BATTLE_INTEL output kingdom is not 4549")
+    kingdom = _parse_kingdom_line(lines[2], "BATTLE_INTEL")
     if len(lines[-1]) != 2 or lines[-1][0] != "END":
         raise BusinessError("BATTLE_INTEL output is missing END")
     count = _parse_integer(lines[-1][1], "END count", allow_zero=True)
@@ -2647,8 +2633,7 @@ def parse_intel_status_output(
     if len(lines[1]) != 2 or lines[1][0] != "ROLE":
         raise BusinessError("INTEL_STATUS output is missing ROLE")
     role = _parse_role(lines[1][1], allowed_roles)
-    if lines[2] != ["KINGDOM", str(ALLOWED_KINGDOM)]:
-        raise BusinessError("INTEL_STATUS output kingdom is not 4549")
+    kingdom = _parse_kingdom_line(lines[2], "INTEL_STATUS")
 
     targets: list[IntelTargetStatus] = []
     for index, (runtime_id, fields) in enumerate(
@@ -2684,7 +2669,7 @@ def parse_intel_status_output(
         raise BusinessError("INTEL_STATUS output has an invalid terminator")
     return IntelStatusSnapshot(
         role=role,
-        kingdom=ALLOWED_KINGDOM,
+        kingdom=kingdom,
         targets=tuple(targets),
     )
 
@@ -2701,8 +2686,7 @@ def parse_claim_intel_output(
     if len(lines[1]) != 2 or lines[1][0] != "ROLE":
         raise BusinessError("CLAIM_INTEL output is missing ROLE")
     role = _parse_role(lines[1][1], allowed_roles)
-    if lines[2] != ["KINGDOM", str(ALLOWED_KINGDOM)]:
-        raise BusinessError("CLAIM_INTEL output kingdom is not 4549")
+    kingdom = _parse_kingdom_line(lines[2], "CLAIM_INTEL")
     expected_target_line = [
         "TARGETS",
         str(len(expected_ids)),
@@ -2722,7 +2706,7 @@ def parse_claim_intel_output(
         raise BusinessError("CLAIM_INTEL output has an invalid terminator")
     return ClaimReceipt(
         role=role,
-        kingdom=ALLOWED_KINGDOM,
+        kingdom=kingdom,
         target_ids=expected_ids,
         request_dispatched=sent,
         idempotent=idempotent,
@@ -2755,8 +2739,7 @@ def parse_scene_status_output(
     if len(lines[1]) != 2 or lines[1][0] != "ROLE":
         raise BusinessError("SCENE output is missing ROLE")
     role = _parse_role(lines[1][1], allowed_roles)
-    if lines[2] != ["KINGDOM", str(ALLOWED_KINGDOM)]:
-        raise BusinessError("SCENE output kingdom is not 4549")
+    kingdom = _parse_kingdom_line(lines[2], "SCENE")
     scene_line = lines[3]
     if (
         len(scene_line) != 4
@@ -2792,7 +2775,7 @@ def parse_scene_status_output(
         raise BusinessError("SCENE output has an invalid terminator")
     return SceneStatus(
         role=role,
-        kingdom=ALLOWED_KINGDOM,
+        kingdom=kingdom,
         scene_type=scene_type,
         map_type=map_type,
         class_name=scene_line[3],
@@ -2815,8 +2798,7 @@ def _parse_target_stage(
     if len(lines[1]) != 2 or lines[1][0] != "ROLE":
         raise BusinessError(f"{kind} output is missing ROLE")
     _parse_role(lines[1][1], allowed_roles)
-    if lines[2] != ["KINGDOM", str(ALLOWED_KINGDOM)]:
-        raise BusinessError(f"{kind} output kingdom is not 4549")
+    _parse_kingdom_line(lines[2], kind)
     if lines[3] != ["TARGET", str(target.runtime_id)]:
         raise BusinessError(f"{kind} output target does not match the request")
     if lines[-1] != ["END", "1"]:
@@ -2870,8 +2852,7 @@ def parse_battle_commit_output(
     if len(lines[1]) != 2 or lines[1][0] != "ROLE":
         raise BusinessError("BATTLE_COMMIT output is missing ROLE")
     _parse_role(lines[1][1], allowed_roles)
-    if lines[2] != ["KINGDOM", str(ALLOWED_KINGDOM)]:
-        raise BusinessError("BATTLE_COMMIT output kingdom is not 4549")
+    _parse_kingdom_line(lines[2], "BATTLE_COMMIT")
     if lines[3] != ["TARGET", str(target.runtime_id)]:
         raise BusinessError("BATTLE_COMMIT output target does not match the request")
     if lines[4] != ["START", "1"]:
@@ -2916,8 +2897,7 @@ def parse_rescue_commit_output(
     if len(lines[1]) != 2 or lines[1][0] != "ROLE":
         raise BusinessError("RESCUE_COMMIT output is missing ROLE")
     _parse_role(lines[1][1], allowed_roles)
-    if lines[2] != ["KINGDOM", str(ALLOWED_KINGDOM)]:
-        raise BusinessError("RESCUE_COMMIT output kingdom is not 4549")
+    _parse_kingdom_line(lines[2], "RESCUE_COMMIT")
     if lines[3] != ["TARGET", str(target.runtime_id)]:
         raise BusinessError("RESCUE_COMMIT output target does not match the request")
     if lines[4] != ["WORLD_MARCH", "1"]:
@@ -2941,8 +2921,7 @@ def parse_battle_verify_output(
     if len(lines[1]) != 2 or lines[1][0] != "ROLE":
         raise BusinessError("BATTLE_VERIFY output is missing ROLE")
     _parse_role(lines[1][1], allowed_roles)
-    if lines[2] != ["KINGDOM", str(ALLOWED_KINGDOM)]:
-        raise BusinessError("BATTLE_VERIFY output kingdom is not 4549")
+    _parse_kingdom_line(lines[2], "BATTLE_VERIFY")
     if lines[3] != ["TARGET", str(target.runtime_id)]:
         raise BusinessError("BATTLE_VERIFY output target does not match the request")
     if (
@@ -3040,8 +3019,7 @@ def parse_march_output(
     if len(lines[1]) != 2 or lines[1][0] != "ROLE":
         raise BusinessError("MARCH output is missing ROLE")
     role = _parse_role(lines[1][1], allowed_roles)
-    if lines[2] != ["KINGDOM", str(ALLOWED_KINGDOM)]:
-        raise BusinessError("MARCH output kingdom is not 4549")
+    kingdom = _parse_kingdom_line(lines[2], "MARCH")
     if lines[3] != ["QUALITY", quality, str(QUALITY_IDS[quality])]:
         raise BusinessError("MARCH output quality does not match the request")
     target_fields = list(lines[4])
@@ -3059,7 +3037,7 @@ def parse_march_output(
         raise BusinessError("MARCH output has an invalid terminator")
     return MarchReceipt(
         role=role,
-        kingdom=ALLOWED_KINGDOM,
+        kingdom=kingdom,
         quality=quality,
         quality_id=QUALITY_IDS[quality],
         target=target,

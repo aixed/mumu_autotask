@@ -162,9 +162,8 @@ class BusinessTests(unittest.TestCase):
         with self.assertRaisesRegex(BusinessError, "quality must be one of"):
             normalize_quality("red")
 
-    def test_role_whitelist_rejects_empty_duplicate_and_control_text(self) -> None:
-        with self.assertRaisesRegex(BusinessError, "no configured role"):
-            validate_role_whitelist(())
+    def test_role_whitelist_allows_empty_and_rejects_duplicate_or_control_text(self) -> None:
+        self.assertEqual(validate_role_whitelist(()), ())
         with self.assertRaisesRegex(BusinessError, "duplicated"):
             validate_role_whitelist((ROLE, ROLE))
         with self.assertRaisesRegex(BusinessError, "control"):
@@ -181,7 +180,7 @@ class BusinessTests(unittest.TestCase):
         code = build_inspect_intel_lua((ROLE,))
         self.assertNotIn(ROLE, code)
         self.assertIn(ROLE_HEX, code)
-        self.assertIn("EXPECTED_KINGDOM = 4549", code)
+        self.assertNotIn("EXPECTED_KINGDOM", code)
         self.assertIn("GetPlayerKid", code)
         self.assertIn("GetPlayerServerId", code)
         self.assertIn("GetQuestType", code)
@@ -415,7 +414,6 @@ class BusinessTests(unittest.TestCase):
         cases = (
             output.replace("TARGET\t72", "TARGET\t99", 1),
             output.replace("MISSING\tmissing", "MISSING\t2", 1),
-            output.replace("KINGDOM\t4549", "KINGDOM\t4583", 1),
         )
         for invalid in cases:
             with self.subTest(invalid=invalid):
@@ -491,9 +489,9 @@ class BusinessTests(unittest.TestCase):
             "AVERAGE\t1\nEND", "AVERAGE\t1\nGO\t1\nEND"
         )
         parse_commit_output(commit, (ROLE,), target)
-        with self.assertRaisesRegex(BusinessError, "kingdom"):
+        with self.assertRaisesRegex(BusinessError, "role"):
             parse_open_output(
-                stage("OPEN", "OPENED\t1").replace("4549", "4583"),
+                stage("OPEN", "OPENED\t1").replace(ROLE_HEX, "626164"),
                 (ROLE,),
                 target,
             )
@@ -576,13 +574,16 @@ class BusinessTests(unittest.TestCase):
     def test_parse_intel_output_rejects_identity_and_count_tampering(self) -> None:
         cases = (
             intel_output(PURPLE_ITEM, role_hex="626164"),
-            intel_output(PURPLE_ITEM, kingdom="4550"),
             intel_output(PURPLE_ITEM).replace("END\t1", "END\t0"),
         )
         for output in cases:
             with self.subTest(output=output):
                 with self.assertRaises(BusinessError):
                     parse_intel_output(output, (ROLE,))
+        self.assertEqual(
+            parse_intel_output(intel_output(PURPLE_ITEM, kingdom="4550"), (ROLE,)).kingdom,
+            4550,
+        )
 
     def test_parse_intel_output_rejects_duplicates_and_noncanonical_order(self) -> None:
         with self.assertRaisesRegex(BusinessError, "duplicate runtime ids"):

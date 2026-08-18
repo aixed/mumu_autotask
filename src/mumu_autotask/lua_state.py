@@ -56,9 +56,11 @@ class LuaStateCandidate:
 _MAP_PATTERN = re.compile(
     r"^([0-9a-f]+)-([0-9a-f]+)\s+(\S+)\s+\S+\s+\S+\s+\S+\s*(.*)$"
 )
-_FAST_ARENA_SIZES = frozenset(
-    {0x20000, 0x40000, 0x60000, 0x80000, 0xA0000}
-)
+_FAST_ARENA_SIZE_PRIORITY = (0x160000, 0xA0000, 0x80000, 0x60000, 0x40000, 0x20000)
+_FAST_ARENA_SIZES = frozenset(_FAST_ARENA_SIZE_PRIORITY)
+_FAST_ARENA_SIZE_RANK = {
+    size: index for index, size in enumerate(_FAST_ARENA_SIZE_PRIORITY)
+}
 _MAX_FALLBACK_MAPPING_SIZE = 256 << 20
 _DEFAULT_SCAN_ATTEMPTS = 3
 _DEFAULT_RETRY_DELAY_SECONDS = 0.1
@@ -219,10 +221,19 @@ class AdbLuaStateScanner:
         pid: int,
         mappings: Sequence[MemoryMapping],
         selected: Sequence[MemoryMapping],
+        *,
+        stop_after_main_size_group: bool = False,
     ) -> tuple[list[LuaStateCandidate], list[str]]:
         found: dict[int, LuaStateCandidate] = {}
         failures: list[str] = []
+        main_size_group: int | None = None
         for mapping in selected:
+            if (
+                stop_after_main_size_group
+                and main_size_group is not None
+                and mapping.size != main_size_group
+            ):
+                break
             try:
                 data = self._read_mapping(pid, mapping)
             except (AdbError, LuaStateScanError) as exc:
@@ -240,6 +251,12 @@ class AdbLuaStateScanner:
                 )
                 if candidate is not None:
                     found[candidate.address] = candidate
+                    if (
+                        stop_after_main_size_group
+                        and candidate.is_main
+                        and main_size_group is None
+                    ):
+                        main_size_group = mapping.size
                 cursor = marker + 1
         return list(found.values()), failures
 
@@ -302,7 +319,13 @@ class AdbLuaStateScanner:
             for mapping in eligible
             if mapping.size in _FAST_ARENA_SIZES
         ]
-        candidates, failures = self._scan_mappings(pid, mappings, fast)
+        fast.sort(key=lambda mapping: (_FAST_ARENA_SIZE_RANK[mapping.size], mapping.start))
+        candidates, failures = self._scan_mappings(
+            pid,
+            mappings,
+            fast,
+            stop_after_main_size_group=True,
+        )
         if not any(candidate.is_main for candidate in candidates):
             fallback = [mapping for mapping in eligible if mapping not in fast]
             fallback_candidates, fallback_failures = self._scan_mappings(
@@ -374,6 +397,12 @@ class AdbLuaStateScanner:
             f"Lua state 0x{address:x} revalidation",
             lambda: self._verify_main_once(pid, address, require_idle=True),
         )
+
+    def verify_main_once(self, pid: int, address: int) -> LuaStateCandidate:
+        return self._verify_main_once(pid, address, require_idle=False)
+
+    def verify_idle_main_once(self, pid: int, address: int) -> LuaStateCandidate:
+        return self._verify_main_once(pid, address, require_idle=True)
 
 
 __all__ = [

@@ -76,9 +76,9 @@ class FakeAdb:
         self.exec_calls: list[tuple[str, ...]] = []
 
     @staticmethod
-    def arena_map(start: int = ARENA_START) -> str:
+    def arena_map(start: int = ARENA_START, size: int = ARENA_SIZE) -> str:
         return (
-            f"{start:x}-{start + ARENA_SIZE:x} "
+            f"{start:x}-{start + size:x} "
             "rw-p 00000000 00:00 0\n"
         )
 
@@ -129,6 +129,32 @@ class LuaStateTests(unittest.TestCase):
         self.assertEqual(candidate.cframe, 0)
         self.assertIn(f"skip={ARENA_START}", adb.exec_calls[0])
         self.assertIn(f"count={ARENA_SIZE}", adb.exec_calls[0])
+
+    def test_observed_mumu_large_lua_arena_is_scanned_before_fallback(self) -> None:
+        arena_size = 0x160000
+        data = bytearray(arena_size)
+        state = place_state(
+            data,
+            0x380,
+            glref_offset=0x8000,
+            stack_offset=0x4000,
+            env_offset=0x9000,
+        )
+        fallback_start = 0x30000000
+        small_fast_start = 0x20000000
+        maps = (
+            FakeAdb.arena_map(small_fast_start, ARENA_SIZE)
+            + FakeAdb.arena_map(ARENA_START, arena_size)
+            + FakeAdb.arena_map(fallback_start, 0x100000)
+        )
+        adb = FakeAdb([bytes(data)], maps_outputs=[maps])
+
+        candidate = scanner(adb).find_unique_idle_main(PID)
+
+        self.assertEqual(candidate.address, state)
+        self.assertEqual(len(adb.exec_calls), 1)
+        self.assertIn(f"skip={ARENA_START}", adb.exec_calls[0])
+        self.assertIn(f"count={arena_size}", adb.exec_calls[0])
 
     def test_duplicate_main_states_are_rejected(self) -> None:
         data = bytearray(ARENA_SIZE)
@@ -254,6 +280,13 @@ class LuaStateTests(unittest.TestCase):
         candidate = scanner(adb).verify_idle_main(PID, state)
         self.assertEqual(candidate.address, state)
         self.assertEqual(len(adb.exec_calls), 2)
+
+    def test_single_revalidation_does_not_retry_a_failed_large_read(self) -> None:
+        memory, state = main_arena()
+        adb = FakeAdb([memory[:43], memory])
+        with self.assertRaisesRegex(LuaStateScanError, "short read"):
+            scanner(adb).verify_idle_main_once(PID, state)
+        self.assertEqual(len(adb.exec_calls), 1)
 
     def test_short_reads_fail_closed_after_bounded_attempts(self) -> None:
         memory, _ = main_arena()

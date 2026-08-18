@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -267,16 +268,19 @@ class GuiBackendTests(unittest.TestCase):
             [
                 '{"serial":"device-1","kingdom":4549}\n',
                 '{"serial":"device-1","items":[]}\n',
+                '{"serial":"device-1","items":[],"categories":{"monster":0,"hero":0,"rescue":0}}\n',
             ]
         )
         backend = GuiBackend(runner)  # type: ignore[arg-type]
         self.assertEqual(backend.status("device-1")["kingdom"], 4549)
         self.assertEqual(backend.inspect_intel("device-1")["items"], [])
+        self.assertEqual(backend.inspect_tasks("device-1")["categories"]["rescue"], 0)
         self.assertEqual(
             runner.calls,
             [
                 (("status", "--serial", "device-1", "--prepare-frida"), 60),
                 (("inspect-intel", "--serial", "device-1", "--execute"), 90),
+                (("inspect-tasks", "--serial", "device-1", "--execute"), 90),
             ],
         )
 
@@ -369,25 +373,33 @@ class GuiBackendTests(unittest.TestCase):
             expected_role="打工人",
         )
 
+        arguments, timeout = runner.calls[0]
+        self.assertEqual(timeout, 300)
         self.assertEqual(
-            runner.calls[0],
+            arguments[:4],
             (
-                (
-                    "batch-intel",
-                    "--serial",
-                    "device-1",
-                    "--target",
-                    "monster:420:yellow",
-                    "--target",
-                    "hero:501",
-                    "--target",
-                    "rescue:601",
-                    "--expected-role",
-                    "打工人",
-                    "--execute",
-                ),
-                300,
+                "batch-intel",
+                "--serial",
+                "device-1",
+                "--target-json",
             ),
+        )
+        self.assertEqual(
+            arguments[-3:],
+            ("--expected-role", "打工人", "--execute"),
+        )
+        payloads = [
+            json.loads(arguments[index + 1])
+            for index, value in enumerate(arguments)
+            if value == "--target-json"
+        ]
+        self.assertEqual(
+            payloads,
+            [
+                {"category": "monster", "runtime_id": 420, "quality": "yellow"},
+                {"category": "hero", "runtime_id": 501, "quality": "blue"},
+                {"category": "rescue", "runtime_id": 601, "quality": "green"},
+            ],
         )
 
     def test_backend_wait_and_claim_keep_every_exact_target_id(self) -> None:

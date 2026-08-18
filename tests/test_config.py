@@ -74,19 +74,19 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(profile.frida_local_port, 27052)
         self.assertEqual(profile.frida_remote_port, 38417)
 
-    def test_other_kingdom_is_rejected_during_config_load(self) -> None:
-        with self.assertRaisesRegex(ConfigError, "must be 4549"):
-            Settings.from_dict(
-                {
-                    "devices": [
-                        {
-                            "serial": "device-1",
-                            "frida_host": "127.0.0.1:27042",
-                            "expected_kingdom": 4583,
-                        }
-                    ]
-                }
-            )
+    def test_other_kingdom_can_be_configured(self) -> None:
+        settings = Settings.from_dict(
+            {
+                "devices": [
+                    {
+                        "serial": "device-1",
+                        "frida_host": "127.0.0.1:27042",
+                        "expected_kingdom": 4583,
+                    }
+                ]
+            }
+        )
+        self.assertEqual(settings.devices[0].expected_kingdom, 4583)
 
     def test_invalid_frida_host_is_rejected(self) -> None:
         with self.assertRaisesRegex(ConfigError, "HOST:PORT"):
@@ -94,25 +94,29 @@ class ConfigTests(unittest.TestCase):
                 {"devices": [{"serial": "device-1", "frida_host": "localhost"}]}
             )
 
-    def test_frida_hosts_and_roles_are_unique_across_devices(self) -> None:
-        cases = (
-            (
-                [
-                    {
-                        "serial": "device-1",
-                        "frida_host": "127.0.0.1:27042",
-                        "roles": ["role-a"],
-                    },
-                    {
-                        "serial": "device-2",
-                        "frida_host": "127.0.0.1:27042",
-                        "roles": ["role-b"],
-                    },
-                ],
-                "Frida hosts",
-            ),
-            (
-                [
+    def test_frida_hosts_are_unique_across_devices(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "Frida hosts"):
+            Settings.from_dict(
+                {
+                    "devices": [
+                        {
+                            "serial": "device-1",
+                            "frida_host": "127.0.0.1:27042",
+                            "roles": ["role-a"],
+                        },
+                        {
+                            "serial": "device-2",
+                            "frida_host": "127.0.0.1:27042",
+                            "roles": ["role-b"],
+                        },
+                    ]
+                }
+            )
+
+    def test_roles_can_repeat_across_devices(self) -> None:
+        settings = Settings.from_dict(
+            {
+                "devices": [
                     {
                         "serial": "device-1",
                         "frida_host": "127.0.0.1:27042",
@@ -123,14 +127,10 @@ class ConfigTests(unittest.TestCase):
                         "frida_host": "127.0.0.1:27052",
                         "roles": ["role-a"],
                     },
-                ],
-                "roles",
-            ),
+                ]
+            }
         )
-        for devices, message in cases:
-            with self.subTest(message=message):
-                with self.assertRaisesRegex(ConfigError, message):
-                    Settings.from_dict({"devices": devices})
+        self.assertEqual(settings.devices[1].roles, ("role-a",))
 
     def test_bridge_output_capacity_cannot_exceed_native_buffer(self) -> None:
         with self.assertRaisesRegex(ConfigError, "between 2 and 16384"):

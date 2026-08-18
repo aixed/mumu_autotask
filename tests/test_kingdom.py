@@ -76,11 +76,11 @@ class KingdomTests(unittest.TestCase):
             ],
         )
 
-    def test_guard_blocks_wrong_active_kingdom(self) -> None:
-        with self.assertRaisesRegex(KingdomGuardError, "active kingdom is 4583"):
-            KingdomGuard(FakeAdb(prefs(4583), sdk_prefs(4583))).require(
-                DeviceProfile("device-1")
-            )
+    def test_guard_allows_nondefault_active_kingdom_when_sources_agree(self) -> None:
+        status = KingdomGuard(FakeAdb(prefs(4583), sdk_prefs(4583))).require(
+            DeviceProfile("device-1")
+        )
+        self.assertEqual(status.kingdom, 4583)
 
     def test_guard_blocks_disagreement_between_sources(self) -> None:
         with self.assertRaisesRegex(KingdomGuardError, "sources disagree"):

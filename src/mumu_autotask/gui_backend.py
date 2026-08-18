@@ -620,34 +620,14 @@ class GuiBackend:
         return payloads[0]
 
     def inspect_tasks(self, serial: str) -> Mapping[str, Any]:
-        monster = dict(self.inspect_intel(serial))
-        hero = dict(self._inspect_battle_intel(serial, "hero"))
-        rescue = dict(self._inspect_battle_intel(serial, "rescue"))
-        for payload in (hero, rescue):
-            if (
-                payload.get("serial") != monster.get("serial")
-                or payload.get("kingdom") != monster.get("kingdom")
-                or payload.get("role") != monster.get("role")
-            ):
-                raise GuiBackendError("多类别情报检查期间设备、区域或角色发生变化")
-        items: list[dict[str, Any]] = []
-        for item in monster.get("items", []):
-            if isinstance(item, Mapping):
-                copied = dict(item)
-                copied.setdefault("category", "monster")
-                items.append(copied)
-        for payload in (hero, rescue):
-            for item in payload.get("items", []):
-                if isinstance(item, Mapping):
-                    items.append(dict(item))
-        monster["items"] = items
-        monster["item_count"] = len(items)
-        monster["categories"] = {
-            "monster": len(monster.get("items", [])) - len(hero.get("items", [])) - len(rescue.get("items", [])),
-            "hero": len(hero.get("items", [])),
-            "rescue": len(rescue.get("items", [])),
-        }
-        return monster
+        result = self.runner.run(
+            ("inspect-tasks", "--serial", serial, "--execute"),
+            timeout=90,
+        )
+        payloads = parse_json_lines(result.stdout)
+        if len(payloads) != 1:
+            raise GuiBackendError("多类别情报检查命令返回了意外的数据条数")
+        return payloads[0]
 
     def _inspect_battle_intel(self, serial: str, category: str) -> Mapping[str, Any]:
         result = self.runner.run(
@@ -783,18 +763,35 @@ class GuiBackend:
             ):
                 raise GuiBackendError("批量情报目标缺少有效类别或目标 ID")
             normalized_category = category.strip().lower()
+            payload = dict(target)
+            payload["category"] = normalized_category
+            payload["runtime_id"] = runtime_id
             if normalized_category == "monster":
                 quality = target.get("quality")
                 if not isinstance(quality, str):
                     raise GuiBackendError("野兽批量目标缺少品质")
+                payload["quality"] = quality.strip().lower()
                 arguments.extend(
                     (
-                        "--target",
-                        f"monster:{runtime_id}:{quality.strip().lower()}",
+                        "--target-json",
+                        json.dumps(
+                            payload,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
                     )
                 )
             elif normalized_category in {"hero", "rescue"}:
-                arguments.extend(("--target", f"{normalized_category}:{runtime_id}"))
+                arguments.extend(
+                    (
+                        "--target-json",
+                        json.dumps(
+                            payload,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                    )
+                )
             else:
                 raise GuiBackendError(f"不支持的批量情报类别：{category!r}")
         if expected_role is not None:

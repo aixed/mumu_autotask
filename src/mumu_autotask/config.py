@@ -201,11 +201,10 @@ class DeviceProfile:
         if (
             isinstance(expected_kingdom, bool)
             or not isinstance(expected_kingdom, int)
-            or expected_kingdom != ALLOWED_KINGDOM
+            or expected_kingdom <= 0
         ):
             raise ConfigError(
-                f"{location}.expected_kingdom must be {ALLOWED_KINGDOM}; "
-                "other kingdoms are blocked"
+                f"{location}.expected_kingdom must be a positive integer"
             )
         package_name = _string(
             raw.get("package_name", DEFAULT_PACKAGE), f"{location}.package_name"
@@ -266,7 +265,7 @@ class DeviceProfile:
             frida_host=frida_host,
             frida_remote_port=frida_remote_port,
             bridge_remote_path=bridge_remote_path,
-            expected_kingdom=ALLOWED_KINGDOM,
+            expected_kingdom=expected_kingdom,
             package_name=package_name,
             process_name=_string(
                 raw.get("process_name", DEFAULT_PROCESS_NAME),
@@ -407,10 +406,6 @@ class Settings:
         frida_hosts = [device.frida_host for device in devices]
         if len(frida_hosts) != len(set(frida_hosts)):
             raise ConfigError("device Frida hosts must be unique")
-        configured_roles = [role for device in devices for role in device.roles]
-        if len(configured_roles) != len(set(configured_roles)):
-            raise ConfigError("device roles must be unique across device profiles")
-
         endpoints_raw = _mapping(raw.get("endpoints", {}), "endpoints")
         endpoints = {
             _string(name, "endpoint name"): EndpointSpec.from_dict(spec, name)

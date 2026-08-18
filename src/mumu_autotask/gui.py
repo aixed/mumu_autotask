@@ -14,7 +14,7 @@ from typing import Any, Callable, Mapping, Sequence
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from .config import ALLOWED_KINGDOM, ConfigError, DeviceProfile, Settings, load_settings
+from .config import ConfigError, DeviceProfile, Settings, load_settings
 from .gui_backend import (
     DEFAULT_GUI_CATEGORIES,
     DEFAULT_HUNT_CONCURRENCY,
@@ -24,6 +24,7 @@ from .gui_backend import (
     GuiBackend,
     GuiBackendError,
 )
+from .mumu_manager import MumuManagerError, discover_running_mumu_profiles
 
 
 LOGGER = logging.getLogger(__name__)
@@ -958,17 +959,41 @@ def _profile_name(profile: DeviceProfile) -> str:
 
 
 def _is_online_status(payload: Mapping[str, Any]) -> bool:
+    kingdom = _positive_kingdom(payload.get("kingdom"))
+    playerprefs = _positive_kingdom(payload.get("playerprefs_kingdom"))
+    sdk_server = _positive_kingdom(payload.get("sdk_server_id"))
     return (
         payload.get("adb") == "device"
-        and payload.get("kingdom") == ALLOWED_KINGDOM
-        and payload.get("playerprefs_kingdom") == ALLOWED_KINGDOM
-        and payload.get("sdk_server_id") == ALLOWED_KINGDOM
+        and kingdom is not None
+        and kingdom == playerprefs
+        and kingdom == sdk_server
         and payload.get("frida_ready") is True
         and payload.get("bridge_initialized") is True
         and isinstance(payload.get("pid"), int)
         and payload.get("process") == "Whiteout Survival"
         and payload.get("game_activity_foreground") is True
     )
+
+
+def _positive_kingdom(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _validate_payload_kingdom(
+    payload: Mapping[str, Any],
+    label: str,
+    expected_kingdom: int | None,
+) -> int:
+    kingdom = _positive_kingdom(payload.get("kingdom"))
+    if kingdom is None:
+        raise HuntBatchError(f"{label}回执缺少有效区域")
+    if expected_kingdom is not None and kingdom != expected_kingdom:
+        raise HuntBatchError(
+            f"{label}回执区域 {kingdom} 与批次开始区域 {expected_kingdom} 不匹配"
+        )
+    return kingdom
 
 
 def _format_expiry(value: Any) -> str:
@@ -986,11 +1011,11 @@ def validate_march_intel_receipt(
     target_id: int,
     *,
     expected_role: str,
+    expected_kingdom: int | None = None,
 ) -> int:
     if payload.get("serial") != serial:
         raise HuntBatchError("出征回执的设备不匹配")
-    if payload.get("kingdom") != ALLOWED_KINGDOM:
-        raise HuntBatchError("出征回执的区域不是 4549")
+    _validate_payload_kingdom(payload, "出征", expected_kingdom)
     if payload.get("role") != expected_role:
         raise HuntBatchError("出征回执的角色与批次开始角色不匹配")
     if payload.get("request_dispatched") is not True:
@@ -1013,12 +1038,12 @@ def validate_wait_intel_receipt(
     *,
     require_missing: bool = False,
     expected_role: str | None = None,
+    expected_kingdom: int | None = None,
 ) -> tuple[int, ...]:
     expected = tuple(target_ids)
     if payload.get("serial") != serial:
         raise HuntBatchError("等待回执的设备不匹配")
-    if payload.get("kingdom") != ALLOWED_KINGDOM:
-        raise HuntBatchError("等待回执的区域不是 4549")
+    _validate_payload_kingdom(payload, "等待", expected_kingdom)
     if expected_role is not None and payload.get("role") != expected_role:
         raise HuntBatchError("等待回执的角色与批次开始角色不匹配")
     if payload.get("target_ids") != list(expected):
@@ -1050,12 +1075,12 @@ def terminal_target_ids_from_status_payload(
     target_ids: Sequence[int],
     *,
     expected_role: str | None = None,
+    expected_kingdom: int | None = None,
 ) -> set[int]:
     expected = tuple(target_ids)
     if payload.get("serial") != serial:
         raise HuntBatchError("状态回执的设备不匹配")
-    if payload.get("kingdom") != ALLOWED_KINGDOM:
-        raise HuntBatchError("状态回执的区域不是 4549")
+    _validate_payload_kingdom(payload, "状态", expected_kingdom)
     if expected_role is not None and payload.get("role") != expected_role:
         raise HuntBatchError("状态回执的角色与批次开始角色不匹配")
     if payload.get("target_ids") != list(expected):
@@ -1085,12 +1110,12 @@ def validate_claim_intel_receipt(
     target_ids: Sequence[int],
     *,
     expected_role: str | None = None,
+    expected_kingdom: int | None = None,
 ) -> tuple[int, ...]:
     expected = tuple(target_ids)
     if payload.get("serial") != serial:
         raise HuntBatchError("领取回执的设备不匹配")
-    if payload.get("kingdom") != ALLOWED_KINGDOM:
-        raise HuntBatchError("领取回执的区域不是 4549")
+    _validate_payload_kingdom(payload, "领取", expected_kingdom)
     if expected_role is not None and payload.get("role") != expected_role:
         raise HuntBatchError("领取回执的角色与批次开始角色不匹配")
     if payload.get("target_ids") != list(expected):
@@ -1210,7 +1235,7 @@ class LauncherApp:
         self.refresh_button.grid(row=0, column=1, sticky="e")
         ttk.Label(
             title_bar,
-            text="仅显示配置中固定为 4549 的三台实例",
+            text="自动发现当前运行中的 MuMu 多开实例",
             style="Subtle.TLabel",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
@@ -1220,7 +1245,7 @@ class LauncherApp:
         table_frame.grid(row=2, column=0, sticky="nsew")
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
-        columns = ("state", "instance", "serial", "roles", "kingdom", "process", "frida")
+        columns = ("state", "instance", "serial", "kingdom", "process", "frida")
         self.tree = ttk.Treeview(
             table_frame,
             columns=columns,
@@ -1232,19 +1257,17 @@ class LauncherApp:
             "state": "状态",
             "instance": "模拟器实例",
             "serial": "ADB 设备",
-            "roles": "允许角色",
             "kingdom": "区域",
             "process": "游戏进程",
             "frida": "Frida",
         }
         widths = {
             "state": 82,
-            "instance": 150,
-            "serial": 152,
-            "roles": 172,
+            "instance": 210,
+            "serial": 170,
             "kingdom": 70,
-            "process": 145,
-            "frida": 142,
+            "process": 170,
+            "frida": 150,
         }
         for column in columns:
             self.tree.heading(column, text=headings[column])
@@ -1253,7 +1276,7 @@ class LauncherApp:
                 width=widths[column],
                 minwidth=60,
                 anchor="center" if column in {"state", "kingdom"} else "w",
-                stretch=column in {"roles", "process"},
+                stretch=column in {"instance", "process"},
             )
         self.tree.tag_configure("online", foreground="#166534")
         self.tree.tag_configure("checking", foreground="#59636E")
@@ -1287,6 +1310,9 @@ class LauncherApp:
         )
 
     def _populate_profiles(self) -> None:
+        for row_id in self.tree.get_children():
+            self.tree.delete(row_id)
+        self.row_serials.clear()
         for index, profile in enumerate(self.settings.devices):
             row_id = f"device-{index}"
             self.row_serials[row_id] = profile.serial
@@ -1298,8 +1324,7 @@ class LauncherApp:
                     "未检查",
                     _profile_name(profile),
                     profile.serial,
-                    " / ".join(profile.roles),
-                    profile.expected_kingdom,
+                    "-",
                     "-",
                     profile.frida_host,
                 ),
@@ -1318,25 +1343,26 @@ class LauncherApp:
         if self.busy:
             return
         self._set_busy(True)
-        self.summary_text.set("正在连接 ADB、准备 Frida，并检查三台实例的 4549 和游戏进程...")
+        self.summary_text.set("正在通过 MuMuManager 发现运行实例、连接 ADB、准备 Frida...")
         for row_id in self.row_serials:
             values = list(self.tree.item(row_id, "values"))
             values[0] = "检查中"
             self.tree.item(row_id, values=values, tags=("checking",))
 
-        def action() -> tuple[dict[str, Mapping[str, Any]], dict[str, str]]:
+        def action() -> tuple[tuple[DeviceProfile, ...], dict[str, Mapping[str, Any]], dict[str, str]]:
             statuses: dict[str, Mapping[str, Any]] = {}
             errors: dict[str, str] = {}
             try:
-                self.backend.connect_devices()
+                profiles = discover_running_mumu_profiles(self.settings, connect_adb=True)
             except Exception as exc:
-                errors["连接阶段"] = str(exc)
-            for profile in self.settings.devices:
+                profiles = tuple(self.settings.devices)
+                errors["发现阶段"] = str(exc)
+            for profile in profiles:
                 try:
                     statuses[profile.serial] = self.backend.status(profile.serial)
                 except Exception as exc:
                     errors[profile.serial] = str(exc)
-            return statuses, errors
+            return profiles, statuses, errors
 
         self.dispatcher.submit(action, self._devices_refreshed)
 
@@ -1353,8 +1379,11 @@ class LauncherApp:
 
         payload_by_serial: dict[str, Mapping[str, Any]] = {}
         errors_by_serial: dict[str, str] = {}
-        if isinstance(value, tuple) and len(value) == 2:
-            raw_payloads, raw_errors = value
+        profiles: tuple[DeviceProfile, ...] = self.settings.devices
+        if isinstance(value, tuple) and len(value) == 3:
+            raw_profiles, raw_payloads, raw_errors = value
+            if isinstance(raw_profiles, tuple):
+                profiles = raw_profiles
             if isinstance(raw_payloads, dict):
                 payload_by_serial = {
                     str(serial): payload
@@ -1366,6 +1395,8 @@ class LauncherApp:
                     str(serial): str(message)
                     for serial, message in raw_errors.items()
                 }
+        self.settings = replace(self.settings, devices=profiles)
+        self._populate_profiles()
         self.status_by_serial = payload_by_serial
         online_count = 0
         for row_id, serial in self.row_serials.items():
@@ -1378,7 +1409,6 @@ class LauncherApp:
                 "在线" if online else "不可用",
                 _profile_name(profile),
                 profile.serial,
-                " / ".join(profile.roles),
                 payload.get("kingdom", "-"),
                 payload.get("process", "-") if online else "-",
                 profile.frida_host,
@@ -1388,7 +1418,7 @@ class LauncherApp:
                 values=values,
                 tags=("online" if online else "offline",),
             )
-        summary = f"检查完成：{online_count}/{len(self.settings.devices)} 台在线且位于 4549"
+        summary = f"检查完成：发现 {len(self.settings.devices)} 台运行实例，{online_count} 台在线可用"
         if errors_by_serial:
             failed = ", ".join(
                 f"{serial}：{message}"
@@ -1423,7 +1453,10 @@ class LauncherApp:
         if profile is None:
             self.selection_text.set("请选择一台在线模拟器")
         elif online:
-            self.selection_text.set(f"已选择：{_profile_name(profile)}  |  {profile.serial}  |  区域 4549")
+            payload = self.status_by_serial.get(profile.serial, {})
+            self.selection_text.set(
+                f"已选择：{_profile_name(profile)}  |  {profile.serial}  |  区域 {payload.get('kingdom', '-')}"
+            )
         else:
             self.selection_text.set(f"{_profile_name(profile)} 当前不可用，请刷新设备状态")
         self.start_button.configure(
@@ -1438,7 +1471,7 @@ class LauncherApp:
         if not _is_online_status(status):
             messagebox.showwarning(
                 "设备不可用",
-                "所选模拟器未通过 ADB、Frida 或 4549 检查，请先刷新设备。",
+                "所选模拟器未通过 ADB、Frida、区域一致性或游戏前台检查，请先刷新设备。",
                 parent=self.root,
             )
             return
@@ -1486,7 +1519,9 @@ class DeviceManagerWindow:
         self._closing = False
         self.current_items: list[dict[str, Any]] = []
         self.current_role: str | None = None
+        self.current_kingdom: int | None = None
         self.hunt_role: str | None = None
+        self.hunt_kingdom: int | None = None
         self.hunt_batch: HuntWaveBatch | None = None
 
         self.window = tk.Toplevel(launcher.root)
@@ -1607,7 +1642,7 @@ class DeviceManagerWindow:
         ).grid(row=0, column=0, sticky="w")
         ttk.Label(
             title,
-            text=f"{self.profile.serial}  |  区域 {ALLOWED_KINGDOM}  |  {self.profile.frida_host}",
+            text=f"{self.profile.serial}  |  {self.profile.frida_host}",
             style="Subtle.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
         self.refresh_intel_button = ttk.Button(
@@ -1938,21 +1973,12 @@ class DeviceManagerWindow:
             return
         self.current_items = []
         self._render_items()
-        self._set_busy(True, "正在确保游戏位于野外并读取情报...")
-        self._log("开始返回野外检查。")
+        self._set_busy(True, "正在读取当前角色和情报...")
+        self._log("开始只读读取当前角色和情报。")
         self.dispatcher.submit(
-            self._ensure_world_then_inspect,
+            self._inspect_current_tasks,
             self._intel_refreshed,
         )
-
-    def _ensure_world_then_inspect(self) -> Mapping[str, Any]:
-        ensure_world = getattr(self.backend, "ensure_world", None)
-        if callable(ensure_world):
-            ensure_world(self.profile.serial)
-        inspect_tasks = getattr(self.backend, "inspect_tasks", None)
-        if callable(inspect_tasks):
-            return inspect_tasks(self.profile.serial)
-        return self.backend.inspect_intel(self.profile.serial)
 
     def _intel_refreshed(self, value: Any | None, error: Exception | None) -> None:
         if not self.exists:
@@ -1964,30 +1990,31 @@ class DeviceManagerWindow:
             self._log(f"情报检查失败：{error}")
             return
         payload = value if isinstance(value, Mapping) else {}
-        if (
-            payload.get("serial") != self.profile.serial
-            or payload.get("kingdom") != ALLOWED_KINGDOM
-        ):
+        if payload.get("serial") != self.profile.serial:
             self.current_items = []
-            self.identity_text.set("设备或区域回执不匹配，已阻止执行")
+            self.current_role = None
+            self.current_kingdom = None
+            self.identity_text.set("设备回执不匹配，已阻止执行")
             self._set_busy(False, "安全校验失败")
-            self._log("安全校验失败：情报回执的设备或区域不匹配。")
+            self._log("安全校验失败：情报回执的设备不匹配。")
+            return
+        kingdom = _positive_kingdom(payload.get("kingdom"))
+        if kingdom is None:
+            self.current_items = []
+            self.current_role = None
+            self.current_kingdom = None
+            self.identity_text.set("情报回执缺少有效区域，已阻止执行")
+            self._set_busy(False, "区域校验失败")
+            self._log("区域校验失败：情报回执缺少有效区域。")
             return
         items = payload.get("items", [])
         self.current_items = [dict(item) for item in items if isinstance(item, Mapping)]
         role = str(payload.get("role", "未知"))
-        if role not in self.profile.roles:
-            self.current_role = None
-            self.current_items = []
-            self.identity_text.set("当前角色不在此设备白名单，已阻止执行")
-            self._render_items()
-            self._set_busy(False, "角色安全校验失败")
-            self._log(f"角色安全校验失败：回执角色 {role!r} 不在设备白名单。")
-            return
         self.current_role = role
+        self.current_kingdom = kingdom
         pid = payload.get("pid", "-")
         self.identity_text.set(
-            f"当前角色：{role}  |  区域：{ALLOWED_KINGDOM}  |  PID：{pid}  |  可用情报：{len(self.current_items)}"
+            f"当前角色：{role}  |  区域：{kingdom}  |  PID：{pid}  |  可用情报：{len(self.current_items)}"
         )
         self._render_items()
         self._set_busy(False, "情报检查完成")
@@ -2031,10 +2058,12 @@ class DeviceManagerWindow:
         categories = self._selected_categories()
         selected_qualities = self._selected_qualities()
         concurrency = int(self.concurrency_var.get())
-        if self.current_role not in self.profile.roles:
+        current_role = getattr(self, "current_role", None)
+        current_kingdom = getattr(self, "current_kingdom", None)
+        if not current_role or current_kingdom is None:
             messagebox.showwarning(
                 "无法开始批次",
-                "当前角色尚未通过刷新校验，请先刷新情报。",
+                "当前角色或区域尚未通过刷新读取，请先刷新情报。",
                 parent=self.window,
             )
             return
@@ -2049,10 +2078,11 @@ class DeviceManagerWindow:
             self._update_hunt_button()
             messagebox.showwarning("无法开始批次", str(exc), parent=self.window)
             return
-        role_text = self.current_role
+        role_text = current_role
         target_text = self._format_target_counts(targets, selected_qualities)
         self.hunt_batch = HuntWaveBatch(targets, concurrency)
         self.hunt_role = role_text
+        self.hunt_kingdom = current_kingdom
         self._set_busy(True, f"正在处理 {len(targets)} 个目标，请勿切换角色或关闭窗口...")
         self._log(
             f"批量自动处理开始：{target_text}，共 {len(targets)} 个目标；"
@@ -2201,16 +2231,17 @@ class DeviceManagerWindow:
         self,
         targets: Sequence[HuntBatchTarget],
     ) -> Mapping[str, Any]:
-        ensure_world = getattr(self.backend, "ensure_world", None)
-        if callable(ensure_world):
-            ensure_world(
-                self.profile.serial,
-                expected_role=self.hunt_role,
-            )
         batch_intel = getattr(self.backend, "batch_intel", None)
         if callable(batch_intel):
+            full_items_by_id = {
+                int(item["runtime_id"]): dict(item)
+                for item in self.current_items
+                if isinstance(item.get("runtime_id"), int)
+                and not isinstance(item.get("runtime_id"), bool)
+            }
             payload_targets = [
                 {
+                    **full_items_by_id.get(target.runtime_id, {}),
                     "category": target.category,
                     "runtime_id": target.runtime_id,
                     "quality": target.quality,
@@ -2226,12 +2257,6 @@ class DeviceManagerWindow:
         return {"results": results}
 
     def _guarded_task_target(self, target: HuntBatchTarget) -> Mapping[str, Any]:
-        ensure_world = getattr(self.backend, "ensure_world", None)
-        if callable(ensure_world):
-            ensure_world(
-                self.profile.serial,
-                expected_role=self.hunt_role,
-            )
         return self._dispatch_task_target(target)
 
     def _dispatch_task_target(self, target: HuntBatchTarget) -> Mapping[str, Any]:
@@ -2342,6 +2367,7 @@ class DeviceManagerWindow:
                 self.profile.serial,
                 target.runtime_id,
                 expected_role=expected_role,
+                expected_kingdom=getattr(self, "hunt_kingdom", None),
             )
         except HuntBatchError as exc:
             detail = str(exc)
@@ -2534,6 +2560,7 @@ class DeviceManagerWindow:
                 self.profile.serial,
                 target_ids,
                 expected_role=self.hunt_role,
+                expected_kingdom=getattr(self, "hunt_kingdom", None),
             )
             outcomes = batch.complete_current_wave(
                 completed_ids,
@@ -2632,6 +2659,7 @@ class DeviceManagerWindow:
                     self.profile.serial,
                     target_ids,
                     expected_role=self.hunt_role,
+                    expected_kingdom=getattr(self, "hunt_kingdom", None),
                 )
             except HuntBatchError as exc:
                 detail = f"统一领取回执验证失败：{exc}"
@@ -2674,6 +2702,7 @@ class DeviceManagerWindow:
                 target_ids,
                 require_missing=True,
                 expected_role=self.hunt_role,
+                expected_kingdom=getattr(self, "hunt_kingdom", None),
             )
         except HuntBatchError as exc:
             statuses = payload.get("statuses")
@@ -2700,26 +2729,27 @@ class DeviceManagerWindow:
         self._finish_hunt_batch()
 
     def _apply_intel_payload(self, payload: Mapping[str, Any]) -> set[int]:
-        if (
-            payload.get("serial") != self.profile.serial
-            or payload.get("kingdom") != ALLOWED_KINGDOM
-        ):
-            raise HuntBatchError("情报刷新回执的设备或区域不匹配")
+        if payload.get("serial") != self.profile.serial:
+            raise HuntBatchError("情报刷新回执的设备不匹配")
+        kingdom = _validate_payload_kingdom(
+            payload,
+            "情报刷新",
+            getattr(self, "hunt_kingdom", None) if self.hunt_batch is not None else None,
+        )
         items = payload.get("items")
         if not isinstance(items, list):
             raise HuntBatchError("情报刷新回执缺少目标列表")
         role = str(payload.get("role", "未知"))
-        if role not in self.profile.roles:
-            raise HuntBatchError("情报刷新回执角色不在设备白名单")
         if self.hunt_batch is not None and role != self.hunt_role:
             raise HuntBatchError("情报刷新回执角色与批次开始角色不匹配")
         self.current_items = [
             dict(item) for item in items if isinstance(item, Mapping)
         ]
         self.current_role = role
+        self.current_kingdom = kingdom
         pid = payload.get("pid", "-")
         self.identity_text.set(
-            f"当前角色：{role}  |  区域：{ALLOWED_KINGDOM}  |  "
+            f"当前角色：{role}  |  区域：{kingdom}  |  "
             f"PID：{pid}  |  可用情报：{len(self.current_items)}"
         )
         self._render_items()
@@ -2754,6 +2784,7 @@ class DeviceManagerWindow:
         summary = batch.summary()
         self.hunt_batch = None
         self.hunt_role = None
+        self.hunt_kingdom = None
         self._set_busy(False, summary)
         self.action_text.set(summary)
         self._log(summary)
@@ -2800,6 +2831,7 @@ class DeviceManagerWindow:
                 self.profile.serial,
                 target_ids,
                 expected_role=self.hunt_role,
+                expected_kingdom=getattr(self, "hunt_kingdom", None),
             )
             updates = batch.reconcile_terminal_outcomes(
                 terminal_ids,
@@ -2866,8 +2898,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     _configure_file_logging(config_path)
     try:
         settings = load_settings(config_path)
-        if len(settings.devices) != 3:
-            raise ConfigError("GUI requires exactly the three configured MuMu devices")
     except ConfigError as exc:
         root = tk.Tk()
         root.withdraw()

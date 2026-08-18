@@ -246,14 +246,14 @@ class LauncherRefreshTests(unittest.TestCase):
 
         launcher.refresh_devices()
         action, _callback = dispatcher.submissions[0]
-        statuses, errors = action()  # type: ignore[operator]
+        _profiles, statuses, errors = action()  # type: ignore[operator]
 
         self.assertEqual(
             backend.calls,
-            ["connect", "status:device-1", "status:device-2"],
+            ["status:device-1", "status:device-2"],
         )
         self.assertEqual(set(statuses), {"device-1", "device-2"})
-        self.assertIn("连接阶段", errors)
+        self.assertIn("发现阶段", errors)
 
 
 class HuntWaveBatchTests(unittest.TestCase):
@@ -530,6 +530,7 @@ class HuntWaveBatchTests(unittest.TestCase):
                 "device-1",
                 (100, 101),
                 expected_role="打工人",
+                expected_kingdom=4549,
             ),
             (100, 101),
         )
@@ -571,6 +572,7 @@ class HuntWaveBatchTests(unittest.TestCase):
                 "device-1",
                 100,
                 expected_role="打工人",
+                expected_kingdom=4549,
             ),
             100,
         )
@@ -588,6 +590,7 @@ class HuntWaveBatchTests(unittest.TestCase):
                         "device-1",
                         100,
                         expected_role="打工人",
+                        expected_kingdom=4549,
                     )
 
     def test_reconcile_refresh_rejects_role_drift_before_mutating_items(self) -> None:
@@ -620,6 +623,7 @@ class HuntWaveBatchTests(unittest.TestCase):
             roles=("打工人", "打工魂"),
         )
         manager.current_role = "打工人"
+        manager.current_kingdom = 4549
         manager.current_items = [
             intel_item(100 + index, "purple", expires_at=1000 + index)
             for index in range(4)
@@ -652,6 +656,63 @@ class HuntWaveBatchTests(unittest.TestCase):
         self.assertEqual(manager.hunt_batch.concurrency, 3)
         self.assertEqual([len(wave) for wave in manager.hunt_batch.waves], [3, 1])
         self.assertEqual(events[-1], ("dispatch", {100, 101, 102, 103}))
+
+    def test_refresh_intel_reads_tasks_without_ensuring_world(self) -> None:
+        manager = object.__new__(DeviceManagerWindow)
+        manager.busy = False
+        manager.current_items = [intel_item(99, "purple", expires_at=1000)]
+        manager.profile = SimpleNamespace(serial="device-1")
+        events: list[tuple[object, ...]] = []
+        manager._render_items = lambda: events.append(("render", tuple(manager.current_items)))
+        manager._set_busy = lambda busy, message: (
+            setattr(manager, "busy", busy),
+            events.append(("busy", busy, message)),
+        )
+        manager._log = lambda message: events.append(("log", message))
+
+        def ensure_world(*args: object, **kwargs: object) -> None:
+            raise AssertionError("refresh_intel must not ensure world before reading tasks")
+
+        def inspect_tasks(serial: str) -> dict[str, object]:
+            events.append(("inspect-tasks", serial))
+            return {"serial": serial, "kingdom": 4549, "items": []}
+
+        manager.backend = SimpleNamespace(
+            ensure_world=ensure_world,
+            inspect_tasks=inspect_tasks,
+        )
+
+        class CapturingDispatcher:
+            def __init__(self) -> None:
+                self.submissions: list[tuple[object, object]] = []
+
+            def submit(self, action: object, callback: object) -> None:
+                self.submissions.append((action, callback))
+
+        dispatcher = CapturingDispatcher()
+        manager.dispatcher = dispatcher
+
+        manager.refresh_intel()
+
+        self.assertEqual(manager.current_items, [])
+        self.assertEqual(len(dispatcher.submissions), 1)
+        action, callback = dispatcher.submissions[0]
+        self.assertIs(callback.__func__, DeviceManagerWindow._intel_refreshed)  # type: ignore[attr-defined]
+        self.assertIs(action.__func__, DeviceManagerWindow._inspect_current_tasks)  # type: ignore[attr-defined]
+        self.assertEqual(
+            events,
+            [
+                ("render", ()),
+                ("busy", True, "正在读取当前角色和情报..."),
+                ("log", "开始只读读取当前角色和情报。"),
+            ],
+        )
+
+        self.assertEqual(
+            action(),
+            {"serial": "device-1", "kingdom": 4549, "items": []},
+        )
+        self.assertIn(("inspect-tasks", "device-1"), events)
 
     def test_click_and_keyboard_handler_directly_start_without_second_event(self) -> None:
         manager = object.__new__(DeviceManagerWindow)
@@ -688,13 +749,8 @@ class HuntWaveBatchTests(unittest.TestCase):
         march_calls: list[int] = []
         call_order: list[tuple[str, object]] = []
 
-        def ensure_world(
-            serial: str,
-            *,
-            expected_role: str,
-        ) -> None:
-            self.assertEqual((serial, expected_role), ("device-1", "打工人"))
-            call_order.append(("ensure-world", expected_role))
+        def ensure_world(*args: object, **kwargs: object) -> None:
+            raise AssertionError("direct task dispatch must not ensure world")
 
         def march(
             serial: str,
@@ -744,15 +800,7 @@ class HuntWaveBatchTests(unittest.TestCase):
         self.assertFalse(any(event[0] == "wait" for event in events))
         callback(result, None)  # type: ignore[operator]
 
-        self.assertEqual(
-            call_order,
-            [
-                ("ensure-world", "打工人"),
-                ("march", 100),
-                ("march", 101),
-                ("march", 102),
-            ],
-        )
+        self.assertEqual(call_order, [("march", 100), ("march", 101), ("march", 102)])
         self.assertEqual(len(dispatcher.submissions), 1)
         self.assertEqual(manager.hunt_batch.dispatch_pending_ids, ())
         self.assertEqual(manager.hunt_batch.wait_target_ids, (100, 101, 102))
@@ -1178,6 +1226,7 @@ class HuntWaveBatchTests(unittest.TestCase):
                         "device-1",
                         (100, 101),
                         expected_role="打工人",
+                        expected_kingdom=4549,
                     )
 
 

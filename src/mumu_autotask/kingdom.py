@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from xml.etree import ElementTree
 
 from .adb import AdbClient
-from .config import ALLOWED_KINGDOM, DEFAULT_PACKAGE, DeviceProfile
+from .config import DEFAULT_PACKAGE, DeviceProfile
 
 
 PLAYERPREFS_KEY = "__KEY_KINGDOM__"
@@ -72,19 +72,11 @@ def parse_sdk_server_id(xml_text: str) -> int:
 
 
 class KingdomGuard:
-    def __init__(self, adb: AdbClient, allowed_kingdom: int = ALLOWED_KINGDOM) -> None:
-        if allowed_kingdom != ALLOWED_KINGDOM:
-            raise KingdomGuardError(
-                f"only kingdom {ALLOWED_KINGDOM} is permitted by this build"
-            )
+    def __init__(self, adb: AdbClient, allowed_kingdom: int | None = None) -> None:
         self.adb = adb
         self.allowed_kingdom = allowed_kingdom
 
     def read(self, profile: DeviceProfile) -> KingdomStatus:
-        if profile.expected_kingdom != self.allowed_kingdom:
-            raise KingdomGuardError(
-                f"{profile.serial}: configured kingdom {profile.expected_kingdom} is blocked"
-            )
         if profile.package_name != DEFAULT_PACKAGE:
             raise KingdomGuardError(
                 f"{profile.serial}: only package {DEFAULT_PACKAGE!r} is permitted"
@@ -118,7 +110,7 @@ class KingdomGuard:
                 f"{profile.serial}: kingdom sources disagree: PlayerPrefs="
                 f"{status.playerprefs_kingdom}, SDK={status.sdk_server_id}"
             )
-        if (
+        if self.allowed_kingdom is not None and (
             status.playerprefs_kingdom != self.allowed_kingdom
             or status.sdk_server_id != self.allowed_kingdom
         ):

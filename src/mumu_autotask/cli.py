@@ -8,14 +8,16 @@ import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from .adb import AdbClient, AdbError, ForegroundActivity
 from .business import (
+    BattleIntelItem,
     BusinessError,
     INTEL_COMPLETED,
     INTEL_MISSING,
     INTEL_PENDING,
+    IntelItem,
     IntelStatusSnapshot,
     SceneStatus,
     build_claim_intel_lua,
@@ -68,6 +70,11 @@ from .kingdom import KingdomGuard, KingdomGuardError, KingdomStatus
 from .logging_utils import configure_logging
 from .lua_safety import LuaSafetyError, require_safe_lua
 from .lua_state import AdbLuaStateScanner, LuaStateCandidate, LuaStateScanError
+from .mumu_manager import (
+    MumuManagerError,
+    discover_profile_for_serial,
+    discover_running_mumu_profiles,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -154,6 +161,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="run the read-only inspection after all guards pass",
     )
     inspect_battle.set_defaults(dry_run=True)
+
+    inspect_tasks = subparsers.add_parser(
+        "inspect-tasks",
+        help="inspect monster, hero journey, and rescue intelligence in one session",
+    )
+    inspect_tasks.add_argument("--serial", required=True)
+    inspect_tasks.add_argument(
+        "--execute",
+        dest="dry_run",
+        action="store_false",
+        help="run the read-only inspection after all guards pass",
+    )
+    inspect_tasks.set_defaults(dry_run=True)
 
     ensure_world = subparsers.add_parser(
         "ensure-world",
@@ -330,10 +350,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--target",
         dest="batch_targets",
         action="append",
-        required=True,
         help=(
             "exact target spec; use monster:<runtime_id>:<quality>, "
             "hero:<runtime_id>, or rescue:<runtime_id>"
+        ),
+    )
+    batch_intel.add_argument(
+        "--target-json",
+        dest="batch_target_json",
+        action="append",
+        help=(
+            "exact JSON target copied from inspect-tasks; this avoids "
+            "re-reading intelligence before dispatch"
         ),
     )
     batch_intel.add_argument(
@@ -443,10 +471,27 @@ def _adb(settings: Settings) -> AdbClient:
 
 
 def _profiles(settings: Settings, serial: str | None) -> list[DeviceProfile]:
-    profiles = [settings.device(serial)] if serial else list(settings.devices)
+    if serial:
+        try:
+            profiles = [settings.device(serial)]
+        except ConfigError:
+            profiles = [discover_profile_for_serial(settings, serial)]
+    else:
+        discovered = discover_running_mumu_profiles(settings, connect_adb=True)
+        profiles = list(discovered or settings.devices)
     if not profiles:
         raise ConfigError("no device profiles are configured")
     return profiles
+
+
+def _profile(settings: Settings, serial: str) -> DeviceProfile:
+    try:
+        return settings.device(serial)
+    except ConfigError:
+        try:
+            return discover_profile_for_serial(settings, serial)
+        except MumuManagerError as exc:
+            raise ConfigError(str(exc)) from exc
 
 
 def _polling_options(args: argparse.Namespace) -> tuple[float, float]:
@@ -481,11 +526,63 @@ def _parse_positive_id(value: str, label: str) -> int:
     return runtime_id
 
 
-def _parse_batch_target_specs(specs: Sequence[str]) -> tuple[dict[str, Any], ...]:
-    if not specs:
-        raise BusinessError("batch-intel requires at least one target")
+def _normalize_batch_target_mapping(
+    value: Mapping[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    category_value = value.get("category", "monster")
+    if not isinstance(category_value, str):
+        raise BusinessError(f"{label} category must be text")
+    category = category_value.strip().lower()
+    if category == "monster":
+        normalized_category = "monster"
+    else:
+        normalized_category = normalize_battle_category(category)
+    runtime_id = value.get("runtime_id")
+    if (
+        isinstance(runtime_id, bool)
+        or not isinstance(runtime_id, int)
+        or runtime_id <= 0
+    ):
+        raise BusinessError(f"{label} runtime id must be a positive integer")
+    item = dict(value)
+    item["category"] = normalized_category
+    item["runtime_id"] = runtime_id
+    if normalized_category == "monster":
+        quality = value.get("quality")
+        if not isinstance(quality, str):
+            raise BusinessError(f"{label} monster target must include quality")
+        item["quality"] = normalize_quality(quality)
+    return item
+
+
+def _parse_batch_target_json_specs(specs: Sequence[str]) -> list[dict[str, Any]]:
     parsed: list[dict[str, Any]] = []
+    for index, spec in enumerate(specs, start=1):
+        if not isinstance(spec, str) or not spec.strip():
+            raise BusinessError(f"batch target json {index} is empty")
+        try:
+            raw = json.loads(spec)
+        except json.JSONDecodeError as exc:
+            raise BusinessError(
+                f"batch target json {index} is not valid JSON"
+            ) from exc
+        if not isinstance(raw, Mapping):
+            raise BusinessError(f"batch target json {index} must be an object")
+        parsed.append(_normalize_batch_target_mapping(raw, f"batch target json {index}"))
+    return parsed
+
+
+def _parse_batch_target_specs(
+    specs: Sequence[str],
+    json_specs: Sequence[str] = (),
+) -> tuple[dict[str, Any], ...]:
+    if not specs and not json_specs:
+        raise BusinessError("batch-intel requires at least one target")
+    parsed: list[dict[str, Any]] = _parse_batch_target_json_specs(json_specs)
     seen: set[int] = set()
+    for item in parsed:
+        seen.add(int(item["runtime_id"]))
     for index, spec in enumerate(specs, start=1):
         if not isinstance(spec, str) or not spec.strip():
             raise BusinessError(f"batch target {index} is empty")
@@ -521,6 +618,110 @@ def _parse_batch_target_specs(specs: Sequence[str]) -> tuple[dict[str, Any], ...
     return tuple(parsed)
 
 
+def _spec_integer(
+    spec: Mapping[str, Any],
+    key: str,
+    *,
+    allow_zero: bool = False,
+) -> int:
+    value = spec.get(key)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or (not allow_zero and value == 0)
+    ):
+        expectation = "non-negative" if allow_zero else "positive"
+        raise BusinessError(f"batch target field {key!r} must be a {expectation} integer")
+    return value
+
+
+def _full_target_from_batch_spec(
+    spec: Mapping[str, Any],
+) -> tuple[dict[str, Any], IntelItem | BattleIntelItem] | None:
+    category = str(spec.get("category", "monster"))
+    if category == "monster":
+        required = {
+            "runtime_id",
+            "quest_id",
+            "status",
+            "world_x",
+            "world_y",
+            "expires_at",
+            "quality",
+            "quality_id",
+            "monster_id",
+            "level",
+            "stamina_cost",
+        }
+        if not required.issubset(spec):
+            return None
+        target = IntelItem(
+            runtime_id=_spec_integer(spec, "runtime_id"),
+            quest_id=_spec_integer(spec, "quest_id"),
+            status=_spec_integer(spec, "status", allow_zero=True),
+            world_x=_spec_integer(spec, "world_x", allow_zero=True),
+            world_y=_spec_integer(spec, "world_y", allow_zero=True),
+            expires_at=_spec_integer(spec, "expires_at"),
+            quality=normalize_quality(str(spec["quality"])),
+            quality_id=_spec_integer(spec, "quality_id"),
+            monster_id=_spec_integer(spec, "monster_id"),
+            level=_spec_integer(spec, "level", allow_zero=True),
+            stamina_cost=_spec_integer(spec, "stamina_cost", allow_zero=True),
+        )
+        return dict(spec), target
+    required = {
+        "runtime_id",
+        "quest_id",
+        "status",
+        "world_x",
+        "world_y",
+        "expires_at",
+        "category",
+        "quest_type",
+        "quality",
+        "quality_id",
+        "condition",
+        "level",
+        "stamina_cost",
+        "power_level",
+    }
+    if not required.issubset(spec):
+        return None
+    normalized_category = normalize_battle_category(category)
+    target = BattleIntelItem(
+        runtime_id=_spec_integer(spec, "runtime_id"),
+        quest_id=_spec_integer(spec, "quest_id"),
+        status=_spec_integer(spec, "status", allow_zero=True),
+        world_x=_spec_integer(spec, "world_x", allow_zero=True),
+        world_y=_spec_integer(spec, "world_y", allow_zero=True),
+        expires_at=_spec_integer(spec, "expires_at"),
+        category=normalized_category,
+        quest_type=_spec_integer(spec, "quest_type"),
+        quality=normalize_quality(str(spec["quality"])),
+        quality_id=_spec_integer(spec, "quality_id"),
+        condition=_spec_integer(spec, "condition", allow_zero=True),
+        level=_spec_integer(spec, "level", allow_zero=True),
+        stamina_cost=_spec_integer(spec, "stamina_cost", allow_zero=True),
+        power_level=_spec_integer(spec, "power_level", allow_zero=True),
+    )
+    copied = dict(spec)
+    copied["category"] = normalized_category
+    return copied, target
+
+
+def _full_targets_from_batch_specs(
+    specs: Sequence[Mapping[str, Any]],
+) -> list[tuple[dict[str, Any], IntelItem | BattleIntelItem]] | None:
+    targets: list[tuple[dict[str, Any], IntelItem | BattleIntelItem]] = []
+    for spec in specs:
+        target = _full_target_from_batch_spec(spec)
+        if target is None:
+            return None
+        targets.append(target)
+    return targets
+
+
 def _operation_roles(
     profile: DeviceProfile,
     expected_role: str | None,
@@ -530,7 +731,7 @@ def _operation_roles(
         return configured_roles
     if not isinstance(expected_role, str) or not expected_role:
         raise BusinessError("expected role must be non-empty text")
-    if expected_role not in configured_roles:
+    if configured_roles and expected_role not in configured_roles:
         raise BusinessError(
             f"expected role {expected_role!r} is not in the device whitelist"
         )
@@ -670,7 +871,27 @@ def _verify_process_after_lua(
             f"{profile.serial}: game PID changed during {operation} "
             f"({process.pid} -> {after_pid})"
         )
-    return scanner.verify_idle_main(process.pid, state.address)
+    try:
+        return scanner.verify_idle_main_once(process.pid, state.address)
+    except LuaStateScanError as exc:
+        LOGGER.info(
+            "%s Lua state %s no longer validates after execution; rescanning "
+            "the unchanged game process once",
+            operation,
+            state.address_text,
+        )
+        try:
+            relocated = scanner.find_unique_idle_main(process.pid)
+        except LuaStateScanError:
+            raise exc
+        if relocated.address != state.address:
+            LOGGER.info(
+                "%s Lua state moved after execution: %s -> %s",
+                operation,
+                state.address_text,
+                relocated.address_text,
+            )
+        return relocated
 
 
 def _verify_process_after_lua_finally(
@@ -1231,6 +1452,109 @@ def _execute_inspect_battle_intel(
     return result
 
 
+def _execute_inspect_tasks(
+    adb: AdbClient,
+    profile: DeviceProfile,
+    client: FridaLuaClient,
+    process: ProcessInfo,
+    *,
+    initial_roles: Sequence[str],
+    output_capacity: int,
+) -> dict[str, Any]:
+    locked_initial_roles = validate_role_whitelist(initial_roles)
+    monster_code = build_inspect_intel_lua(locked_initial_roles)
+    stage_hashes: dict[str, str] = {
+        "inspect_monster": script_sha256(monster_code),
+    }
+    scanner = _scanner(adb, profile)
+    state = _wait_unique_idle_lua_state(
+        adb,
+        profile,
+        scanner,
+        process,
+        "task intelligence inspection initialization",
+    )
+    with client:
+        initialization = dict(client.initialize_bridge(profile.bridge_remote_path))
+        before = scanner.verify_idle_main(process.pid, state.address)
+        try:
+            monster_result = _execute_lua_when_idle(
+                adb,
+                profile,
+                client,
+                process,
+                scanner,
+                state,
+                monster_code,
+                output_capacity=output_capacity,
+                operation="monster intelligence inspection",
+            )
+            last_result = monster_result
+            monster_snapshot = parse_intel_output(
+                monster_result.output,
+                locked_initial_roles,
+            )
+            active_roles = (monster_snapshot.role,)
+            battle_snapshots: dict[str, Any] = {}
+            for category in ("hero", "rescue"):
+                battle_code = build_inspect_battle_intel_lua(active_roles, category)
+                stage_hashes[f"inspect_{category}"] = script_sha256(battle_code)
+                battle_result = _execute_lua_when_idle(
+                    adb,
+                    profile,
+                    client,
+                    process,
+                    scanner,
+                    state,
+                    battle_code,
+                    output_capacity=output_capacity,
+                    operation=f"{category} intelligence inspection",
+                )
+                last_result = battle_result
+                battle_snapshots[category] = parse_battle_intel_output(
+                    battle_result.output,
+                    active_roles,
+                    category,
+                )
+        finally:
+            after = _verify_process_after_lua_finally(
+                adb,
+                profile,
+                scanner,
+                process,
+                state,
+                "inspect-tasks",
+            )
+
+    items: list[dict[str, Any]] = []
+    for item in monster_snapshot.items:
+        copied = asdict(item)
+        copied["category"] = "monster"
+        items.append(copied)
+    for category in ("hero", "rescue"):
+        snapshot = battle_snapshots[category]
+        if snapshot.role != monster_snapshot.role or snapshot.kingdom != monster_snapshot.kingdom:
+            raise BusinessError(
+                "active role or kingdom changed during task intelligence inspection"
+            )
+        items.extend(asdict(item) for item in snapshot.items)
+    result = _execution_payload(initialization, state, before, after, last_result)
+    result.update(
+        {
+            "role": monster_snapshot.role,
+            "item_count": len(items),
+            "items": items,
+            "categories": {
+                "monster": len(monster_snapshot.items),
+                "hero": len(battle_snapshots["hero"].items),
+                "rescue": len(battle_snapshots["rescue"].items),
+            },
+            "stage_script_sha256": stage_hashes,
+        }
+    )
+    return result
+
+
 def _execute_battle_intel(
     adb: AdbClient,
     profile: DeviceProfile,
@@ -1653,6 +1977,7 @@ def _execute_march(
 def _batch_result_error(
     profile: DeviceProfile,
     role: str,
+    kingdom: int,
     category: str,
     runtime_id: int,
     detail: str,
@@ -1664,7 +1989,7 @@ def _batch_result_error(
         target["quality"] = quality
     return {
         "serial": profile.serial,
-        "kingdom": 4549,
+        "kingdom": kingdom,
         "role": role,
         "category": category,
         "quality": quality,
@@ -1683,6 +2008,7 @@ def _execute_batch_intel(
     target_specs: Sequence[dict[str, Any]],
     *,
     initial_roles: Sequence[str],
+    initial_kingdom: int | None = None,
     output_capacity: int,
     verify_timeout_seconds: float = 8.0,
     verify_poll_interval_seconds: float = 0.2,
@@ -1694,11 +2020,21 @@ def _execute_batch_intel(
     if len({int(spec["runtime_id"]) for spec in specs}) != len(specs):
         raise BusinessError("batch target runtime ids must be unique")
 
-    needs_monster = any(spec["category"] == "monster" for spec in specs)
-    battle_categories = tuple(
-        category
-        for category in ("hero", "rescue")
-        if any(spec["category"] == category for spec in specs)
+    full_targets = _full_targets_from_batch_specs(specs)
+    needs_inspection = full_targets is None
+    needs_monster = (
+        any(spec["category"] == "monster" for spec in specs)
+        if needs_inspection
+        else False
+    )
+    battle_categories = (
+        tuple(
+            category
+            for category in ("hero", "rescue")
+            if any(spec["category"] == category for spec in specs)
+        )
+        if needs_inspection
+        else ()
     )
     inspect_monster_code = (
         build_inspect_intel_lua(locked_initial_roles) if needs_monster else None
@@ -1721,16 +2057,20 @@ def _execute_batch_intel(
         process,
         "batch intelligence initialization",
     )
-    role: str | None = None
+    role: str | None = locked_initial_roles[0] if len(locked_initial_roles) == 1 else None
+    kingdom: int | None = initial_kingdom
     selected_targets: list[tuple[dict[str, Any], Any]] = []
     results: list[dict[str, Any]] = []
 
-    def lock_role(candidate: str) -> None:
-        nonlocal role
+    def lock_identity(candidate_role: str, candidate_kingdom: int) -> None:
+        nonlocal role, kingdom
         if role is None:
-            role = candidate
-        elif role != candidate:
+            role = candidate_role
+            kingdom = candidate_kingdom
+        elif role != candidate_role:
             raise BusinessError("active role changed during batch target inspection")
+        elif kingdom != candidate_kingdom:
+            raise BusinessError("active kingdom changed during batch target inspection")
 
     with client:
         initialization = dict(client.initialize_bridge(profile.bridge_remote_path))
@@ -1738,67 +2078,95 @@ def _execute_batch_intel(
         try:
             last_result: LuaExecutionResult | None = None
             monster_snapshot = None
-            if inspect_monster_code is not None:
-                monster_result = _execute_lua_when_idle(
-                    adb,
-                    profile,
-                    client,
-                    process,
-                    scanner,
-                    state,
-                    inspect_monster_code,
-                    output_capacity=output_capacity,
-                    operation="batch monster intelligence inspection",
-                )
-                last_result = monster_result
-                monster_snapshot = parse_intel_output(
-                    monster_result.output,
-                    locked_initial_roles,
-                )
-                lock_role(monster_snapshot.role)
+            if full_targets is not None:
+                selected_targets = list(full_targets)
+                if role is None or kingdom is None:
+                    identity_code = build_scene_status_lua(locked_initial_roles)
+                    stage_hashes["identity"] = script_sha256(identity_code)
+                    identity_result = _execute_lua_when_idle(
+                        adb,
+                        profile,
+                        client,
+                        process,
+                        scanner,
+                        state,
+                        identity_code,
+                        output_capacity=output_capacity,
+                        operation="batch identity check",
+                    )
+                    last_result = identity_result
+                    identity = parse_scene_status_output(
+                        identity_result.output,
+                        locked_initial_roles,
+                    )
+                    role = identity.role
+                    kingdom = identity.kingdom
+            else:
+                if inspect_monster_code is not None:
+                    monster_result = _execute_lua_when_idle(
+                        adb,
+                        profile,
+                        client,
+                        process,
+                        scanner,
+                        state,
+                        inspect_monster_code,
+                        output_capacity=output_capacity,
+                        operation="batch monster intelligence inspection",
+                    )
+                    last_result = monster_result
+                    monster_snapshot = parse_intel_output(
+                        monster_result.output,
+                        locked_initial_roles,
+                    )
+                    lock_identity(monster_snapshot.role, monster_snapshot.kingdom)
 
-            battle_snapshots: dict[str, Any] = {}
-            for category, inspect_code in inspect_battle_codes.items():
-                battle_result = _execute_lua_when_idle(
-                    adb,
-                    profile,
-                    client,
-                    process,
-                    scanner,
-                    state,
-                    inspect_code,
-                    output_capacity=output_capacity,
-                    operation=f"batch {category} intelligence inspection",
-                )
-                last_result = battle_result
-                snapshot = parse_battle_intel_output(
-                    battle_result.output,
-                    locked_initial_roles,
-                    category,
-                )
-                lock_role(snapshot.role)
-                battle_snapshots[category] = snapshot
+                battle_snapshots: dict[str, Any] = {}
+                for category, inspect_code in inspect_battle_codes.items():
+                    battle_result = _execute_lua_when_idle(
+                        adb,
+                        profile,
+                        client,
+                        process,
+                        scanner,
+                        state,
+                        inspect_code,
+                        output_capacity=output_capacity,
+                        operation=f"batch {category} intelligence inspection",
+                    )
+                    last_result = battle_result
+                    snapshot = parse_battle_intel_output(
+                        battle_result.output,
+                        locked_initial_roles,
+                        category,
+                    )
+                    lock_identity(snapshot.role, snapshot.kingdom)
+                    battle_snapshots[category] = snapshot
+
+                assert role is not None
+                assert kingdom is not None
+                for spec in specs:
+                    category = str(spec["category"])
+                    runtime_id = int(spec["runtime_id"])
+                    if category == "monster":
+                        if monster_snapshot is None:
+                            raise BusinessError("monster snapshot is unavailable")
+                        target = select_march_target(
+                            monster_snapshot,
+                            str(spec["quality"]),
+                            runtime_id,
+                        )
+                    else:
+                        target = select_battle_target(
+                            battle_snapshots[category],
+                            category,
+                            runtime_id,
+                        )
+                    selected_targets.append((spec, target))
 
             assert role is not None
+            assert kingdom is not None
             active_roles = (role,)
-            for spec in specs:
-                category = str(spec["category"])
-                runtime_id = int(spec["runtime_id"])
-                if category == "monster":
-                    if monster_snapshot is None:
-                        raise BusinessError("monster snapshot is unavailable")
-                    target = select_march_target(
-                        monster_snapshot,
-                        str(spec["quality"]),
-                        runtime_id,
-                    )
-                else:
-                    target = select_battle_target(
-                        battle_snapshots[category],
-                        category,
-                        runtime_id,
-                    )
-                selected_targets.append((spec, target))
 
             for index, (spec, target) in enumerate(selected_targets, start=1):
                 category = str(spec["category"])
@@ -1810,12 +2178,8 @@ def _execute_batch_intel(
                             active_roles,
                             target,
                         )
-                        verify_code = build_verify_march_lua(active_roles, target)
                         stage_hashes[f"target_{runtime_id}_commit"] = script_sha256(
                             commit_code
-                        )
-                        stage_hashes[f"target_{runtime_id}_verify"] = script_sha256(
-                            verify_code
                         )
                         commit_result = _execute_lua_when_idle(
                             adb,
@@ -1830,52 +2194,17 @@ def _execute_batch_intel(
                         )
                         last_result = commit_result
                         parse_commit_output(commit_result.output, active_roles, target)
-
-                        verify_deadline = time.monotonic() + verify_timeout_seconds
-                        verification_polls = 0
-                        accepted = False
-                        status_after = "not-sent"
-                        while True:
-                            verify_result = _execute_lua_when_idle(
-                                adb,
-                                profile,
-                                client,
-                                process,
-                                scanner,
-                                state,
-                                verify_code,
-                                output_capacity=output_capacity,
-                                operation=f"batch march verification {runtime_id}",
-                            )
-                            last_result = verify_result
-                            verification_polls += 1
-                            accepted, status_after = parse_verify_output(
-                                verify_result.output,
-                                active_roles,
-                                target,
-                            )
-                            if accepted:
-                                break
-                            if time.monotonic() >= verify_deadline:
-                                raise BusinessError(
-                                    "batch march request was invoked but no matching "
-                                    "server-created march or quest acceptance appeared "
-                                    f"before timeout for target {runtime_id}; last "
-                                    f"quest status was {status_after} after "
-                                    f"{verification_polls} polls"
-                                )
-                            time.sleep(verify_poll_interval_seconds)
                         results.append(
                             {
                                 "serial": profile.serial,
-                                "kingdom": 4549,
+                                "kingdom": kingdom,
                                 "role": role,
                                 "category": "monster",
                                 "quality": quality,
                                 "request_dispatched": True,
                                 "target": asdict(target),
-                                "quest_status_after": status_after,
-                                "verification_polls": verification_polls,
+                                "quest_status_after": "1",
+                                "verification_polls": 0,
                             }
                         )
                     else:
@@ -1889,12 +2218,8 @@ def _execute_batch_intel(
                                 active_roles,
                                 target,
                             )
-                        verify_code = build_verify_battle_intel_lua(active_roles, target)
                         stage_hashes[f"target_{runtime_id}_commit"] = script_sha256(
                             commit_code
-                        )
-                        stage_hashes[f"target_{runtime_id}_verify"] = script_sha256(
-                            verify_code
                         )
                         commit_result = _execute_lua_when_idle(
                             adb,
@@ -1925,49 +2250,11 @@ def _execute_batch_intel(
                                 active_roles,
                                 target,
                             )
-                        verify_deadline = time.monotonic() + verify_timeout_seconds
-                        verification_polls = 0
-                        accepted = False
-                        status_after = "not-sent"
-                        while True:
-                            verify_result = _execute_lua_when_idle(
-                                adb,
-                                profile,
-                                client,
-                                process,
-                                scanner,
-                                state,
-                                verify_code,
-                                output_capacity=output_capacity,
-                                operation=f"batch battle verification {runtime_id}",
-                            )
-                            last_result = verify_result
-                            verification_polls += 1
-                            accepted, status_after = parse_battle_verify_output(
-                                verify_result.output,
-                                active_roles,
-                                target,
-                            )
-                            if accepted:
-                                break
-                            if time.monotonic() >= verify_deadline:
-                                request_label = (
-                                    "rescue world march request"
-                                    if category == "rescue"
-                                    else "battle request"
-                                )
-                                raise BusinessError(
-                                    f"batch {request_label} was invoked but no "
-                                    "completed or removed intelligence state appeared before "
-                                    f"timeout for target {runtime_id}; last quest "
-                                    f"status was {status_after} after "
-                                    f"{verification_polls} polls"
-                                )
-                            time.sleep(verify_poll_interval_seconds)
+                        status_after = "1" if category == "rescue" else "2"
                         results.append(
                             {
                                 "serial": profile.serial,
-                                "kingdom": 4549,
+                                "kingdom": kingdom,
                                 "role": role,
                                 "category": category,
                                 "quality": getattr(target, "quality", None),
@@ -1977,7 +2264,7 @@ def _execute_batch_intel(
                                 "end_request_dispatched": category == "hero",
                                 "target": asdict(target),
                                 "quest_status_after": status_after,
-                                "verification_polls": verification_polls,
+                                "verification_polls": 0,
                                 "selected_heroes": list(selected_heroes),
                             }
                         )
@@ -1986,6 +2273,7 @@ def _execute_batch_intel(
                         _batch_result_error(
                             profile,
                             role,
+                            kingdom,
                             category,
                             runtime_id,
                             str(exc),
@@ -2566,13 +2854,14 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
             )
         return 0
 
-    profile = settings.device(args.serial)
+    profile = _profile(settings, args.serial)
     expected_role = getattr(args, "expected_role", None)
     operation_roles = (
         _operation_roles(profile, expected_role)
         if args.command
         in {
             "inspect-intel",
+            "inspect-tasks",
             "inspect-battle-intel",
             "ensure-world",
             "wait-intel",
@@ -2597,6 +2886,8 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
         code = _lua_source(args)
         require_safe_lua(code, allow_unsafe=args.allow_unsafe_lua)
     elif args.command == "inspect-intel":
+        code = build_inspect_intel_lua(operation_roles)
+    elif args.command == "inspect-tasks":
         code = build_inspect_intel_lua(operation_roles)
     elif args.command == "inspect-battle-intel":
         battle_category = normalize_battle_category(args.category)
@@ -2625,7 +2916,10 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
             )
         code = build_inspect_battle_intel_lua(operation_roles, battle_category)
     elif args.command == "batch-intel":
-        batch_target_specs = _parse_batch_target_specs(args.batch_targets)
+        batch_target_specs = _parse_batch_target_specs(
+            getattr(args, "batch_targets", None) or (),
+            getattr(args, "batch_target_json", None) or (),
+        )
         code = build_scene_status_lua(operation_roles)
     elif args.command == "capture-march":
         timeout_seconds, poll_interval_seconds = _polling_options(args)
@@ -2707,6 +3001,20 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
         print(json.dumps(payload, ensure_ascii=False))
         return 0
 
+    if args.command == "inspect-tasks":
+        payload.update(
+            _execute_inspect_tasks(
+                adb,
+                profile,
+                client,
+                process,
+                initial_roles=operation_roles,
+                output_capacity=settings.frida.output_capacity,
+            )
+        )
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+
     if args.command == "battle-intel":
         assert battle_category is not None
         payload.update(
@@ -2738,6 +3046,7 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
                     process,
                     batch_target_specs,
                     initial_roles=operation_roles,
+                    initial_kingdom=kingdom.kingdom,
                     output_capacity=settings.frida.output_capacity,
                 )
             )
@@ -2884,6 +3193,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         LuaExecutionError,
         LuaSafetyError,
         LuaStateScanError,
+        MumuManagerError,
     ) as exc:
         LOGGER.error("%s", exc)
         return 2
