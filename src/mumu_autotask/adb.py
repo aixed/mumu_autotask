@@ -266,6 +266,16 @@ class AdbClient:
             raise AdbError("an explicit non-interactive shell command is required")
         return self._run("-s", serial, "shell", *args)
 
+    def push(self, local_path: str | Path, remote_path: str) -> str:
+        """Copy one trusted local runtime asset to an ADB device."""
+
+        local = Path(local_path).expanduser()
+        if not local.is_file():
+            raise AdbError(f"local ADB push source does not exist: {local}")
+        if not remote_path or not remote_path.startswith("/"):
+            raise AdbError("remote ADB push path must be absolute")
+        return self._run("push", str(local), remote_path)
+
     def pidof(self, serial: str, package_name: str) -> int:
         pids = _pid_tokens(self.shell(serial, "pidof", package_name))
         if len(pids) == 1:

@@ -899,6 +899,40 @@ def _ensure_frida_forward(adb: AdbClient, profile: DeviceProfile) -> bool:
     return True
 
 
+def _bundled_bridge_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "tools" / "bin" / "libmumu_bridge.so"
+
+
+def _ensure_bridge_binary(adb: AdbClient, profile: DeviceProfile) -> bool:
+    """Install the bridge library for a newly discovered or reset emulator."""
+
+    try:
+        adb.shell(profile.serial, "test", "-r", profile.bridge_remote_path)
+        return False
+    except (AdbError, OSError):
+        local_path = _bundled_bridge_path()
+        if not local_path.is_file():
+            raise FridaDriverError(
+                "game bridge is missing on the device and the bundled runtime "
+                f"asset was not found: {local_path}"
+            )
+        try:
+            adb.push(local_path, profile.bridge_remote_path)
+            adb.shell(
+                profile.serial,
+                "su",
+                "0",
+                "chmod",
+                "644",
+                profile.bridge_remote_path,
+            )
+        except (AdbError, OSError) as exc:
+            raise FridaDriverError(
+                f"cannot install game bridge on {profile.serial}: {exc}"
+            ) from exc
+        return True
+
+
 def _ensure_frida_forwards(
     adb: AdbClient,
     profiles: Sequence[DeviceProfile],
@@ -3515,6 +3549,7 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
             if activity.matches(profile.activity_name):
                 client = _client(profile, pid=adb_pid, adb=adb)
                 if getattr(args, "prepare_frida", False):
+                    _ensure_bridge_binary(adb, profile)
                     with client:
                         initialization = dict(
                             client.initialize_bridge(profile.bridge_remote_path)
@@ -3661,6 +3696,7 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
     activity = _require_game_foreground(adb, profile)
     adb_pid = _adb_pid(adb, profile)
     _ensure_frida_forward(adb, profile)
+    _ensure_bridge_binary(adb, profile)
     client = _client(profile, pid=adb_pid, adb=adb)
     process = client.inspect_process()
     payload = _base_payload(profile, kingdom, process, activity)

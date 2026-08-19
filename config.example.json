@@ -4,6 +4,7 @@
     "connect_targets": [
       "127.0.0.1:16384",
       "127.0.0.1:16416",
+      "127.0.0.1:16448",
       "127.0.0.1:16480"
     ],
     "command_timeout_seconds": 10
@@ -27,6 +28,16 @@
       "roles": ["打工的"],
       "frida_host": "127.0.0.1:27052",
       "frida_remote_port": 38417,
+      "bridge_remote_path": "/data/local/tmp/libmumu_bridge.so",
+      "activity_name": "com.gof.global/com.unity3d.player.MyMainPlayerActivity",
+      "expected_kingdom": 4549
+    },
+    {
+      "serial": "127.0.0.1:16448",
+      "instance_name": "MuMuPlayer-12.0-2",
+      "roles": [],
+      "frida_host": "127.0.0.1:26448",
+      "frida_remote_port": 27042,
       "bridge_remote_path": "/data/local/tmp/libmumu_bridge.so",
       "activity_name": "com.gof.global/com.unity3d.player.MyMainPlayerActivity",
       "expected_kingdom": 4549

@@ -28,6 +28,10 @@ class ConfigTests(unittest.TestCase):
                     "MuMuPlayer-12.0-1",
                     ("打工的",),
                 ),
+                "127.0.0.1:16448": (
+                    "MuMuPlayer-12.0-2",
+                    (),
+                ),
                 "127.0.0.1:16480": (
                     "MuMuPlayer-12.0-3",
                     ("打工客", "打工仔"),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from importlib import resources
+from pathlib import Path
 import shlex
 import threading
 from types import ModuleType
@@ -22,6 +23,7 @@ class LuaExecutionError(FridaDriverError):
 
 EXPECTED_BRIDGE_PROBE = 0x0123456789ABCDEF
 FRIDA_SERVER_REMOTE_PATH = "/data/local/tmp/frida-server-x64-17.17.0"
+FRIDA_SERVER_FILENAME = "frida-server-17.17.0-android-x86_64"
 LUA_BRIDGE_CODE_CAPACITY = 16384
 
 _FRIDA_CONNECTION_MARKERS = (
@@ -235,8 +237,45 @@ class FridaServerRecovery:
             'echo "Frida server did not acquire its endpoint" >&2; exit 30'
         )
 
+    @staticmethod
+    def _bundled_server_path() -> Path:
+        return (
+            Path(__file__).resolve().parents[2]
+            / "tools"
+            / "bin"
+            / FRIDA_SERVER_FILENAME
+        )
+
+    def _ensure_server_binary(self, serial: str) -> None:
+        """Install the matching x86_64 server only when the device is missing it."""
+
+        adb = self._adb_client()
+        # Lightweight test adapters do not expose push; production AdbClient
+        # does, and can install a missing runtime asset.
+        if not callable(getattr(adb, "push", None)):
+            return
+        try:
+            adb.shell(serial, "test", "-x", self.server_path)
+            return
+        except (AdbError, OSError):
+            local_path = self._bundled_server_path()
+            if not local_path.is_file():
+                raise FridaDriverError(
+                    "Frida server is missing on the device and the bundled "
+                    f"runtime asset was not found: {local_path}"
+                )
+            try:
+                adb.push(local_path, self.server_path)
+                adb.shell(serial, "su", "0", "chmod", "755", self.server_path)
+            except (AdbError, OSError) as exc:
+                raise FridaDriverError(
+                    f"cannot install Frida server on {serial}: {exc}"
+                ) from exc
+
     def recover(self) -> str:
         serial, remote_port = self._find_forward()
+        launch = self._restart_script(remote_port)
+        self._ensure_server_binary(serial)
         recovery_key = (serial, remote_port, self.server_path)
         lock = _recovery_lock(recovery_key)
         with _SERVER_LOCKS_GUARD:
@@ -248,7 +287,6 @@ class FridaServerRecovery:
                     != observed_generation
                 ):
                     return "already recovered"
-            launch = self._restart_script(remote_port)
             try:
                 output = self._adb_client().shell(
                     serial,
