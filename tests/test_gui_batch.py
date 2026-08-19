@@ -9,6 +9,7 @@ from mumu_autotask.gui import (
     DeviceManagerWindow,
     HuntBatchError,
     HuntBatchQueue,
+    HuntSlotBatch,
     HuntWaveBatch,
     LauncherApp,
     build_task_queue,
@@ -270,6 +271,59 @@ class LauncherRefreshTests(unittest.TestCase):
         self.assertIn("发现阶段", errors)
 
 
+class HuntSlotBatchTests(unittest.TestCase):
+    @staticmethod
+    def targets() -> tuple[object, ...]:
+        items = [
+            intel_item(100 + index, "purple", expires_at=1000 + index)
+            for index in range(6)
+        ]
+        items.extend((
+            intel_item(200, "blue", expires_at=2000, category="hero"),
+            intel_item(201, "yellow", expires_at=2001, category="rescue"),
+        ))
+        return build_task_queue(
+            items,
+            ("monster", "hero", "rescue"),
+            ("purple",),
+        )
+
+    def test_fills_four_monster_slots_and_dispatches_other_categories(self) -> None:
+        batch = HuntSlotBatch(self.targets(), 4)  # type: ignore[arg-type]
+
+        selected = batch.next_dispatch_targets()
+
+        self.assertEqual(
+            [target.runtime_id for target in selected],
+            [100, 101, 102, 103, 200, 201],
+        )
+        self.assertEqual(batch.active_monster_count, 4)
+
+    def test_completed_monster_immediately_opens_exactly_one_slot(self) -> None:
+        batch = HuntSlotBatch(self.targets(), 4)  # type: ignore[arg-type]
+        selected = batch.next_dispatch_targets()
+        for target in selected:
+            batch.mark_dispatched(target.runtime_id, "accepted")
+
+        batch.mark_completed((101,), "returned")
+        replacement = batch.next_dispatch_target()
+
+        self.assertIsNotNone(replacement)
+        self.assertEqual(replacement.runtime_id, 104)  # type: ignore[union-attr]
+        self.assertEqual(batch.active_monster_count, 4)
+
+    def test_non_monster_completion_does_not_open_extra_monster_slot(self) -> None:
+        batch = HuntSlotBatch(self.targets(), 4)  # type: ignore[arg-type]
+        selected = batch.next_dispatch_targets()
+        for target in selected:
+            batch.mark_dispatched(target.runtime_id, "accepted")
+
+        batch.mark_completed((200, 201), "completed")
+
+        self.assertIsNone(batch.next_dispatch_target())
+        self.assertEqual(batch.active_monster_count, 4)
+
+
 class HuntWaveBatchTests(unittest.TestCase):
     def test_world_hunt_start_freezes_level_and_concurrency(self) -> None:
         manager = object.__new__(DeviceManagerWindow)
@@ -364,6 +418,19 @@ class HuntWaveBatchTests(unittest.TestCase):
 
         self.assertEqual(manager.world_dispatch_count, 1)
         self.assertEqual(len(logs), 1)
+
+        manager._apply_world_hunt_loop_event(
+            4,
+            {
+                "event": "retry",
+                "serial": "device-1",
+                "active_march_ids": [101, 102],
+                "detail": "地图搜索暂未返回目标，正在重试。",
+            },
+        )
+
+        self.assertTrue(manager.world_hunt_running)
+        self.assertIn("正在重试", logs[-1])
 
     def test_world_hunt_returned_march_immediately_refills_one_slot(self) -> None:
         manager = object.__new__(DeviceManagerWindow)

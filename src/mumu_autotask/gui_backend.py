@@ -1064,6 +1064,28 @@ class GuiBackend:
             raise GuiBackendError("情报等待命令返回了意外的数据条数")
         return payloads[0]
 
+    def wait_intel_any(
+        self,
+        serial: str,
+        target_ids: Sequence[int],
+        *,
+        expected_role: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Wait for one exact intelligence target, without waiting for all."""
+
+        ids = _validate_target_ids(target_ids)
+        arguments = ["wait-intel", "--serial", serial]
+        for target_id in ids:
+            arguments.extend(("--target-id", str(target_id)))
+        if expected_role is not None:
+            arguments.extend(("--expected-role", _validate_expected_role(expected_role)))
+        arguments.extend(("--return-on-any", "--execute"))
+        result = self.runner.run(arguments, timeout=1860)
+        payloads = parse_json_lines(result.stdout)
+        if len(payloads) != 1:
+            raise GuiBackendError("情报单项等待命令返回了意外的数据条数")
+        return payloads[0]
+
     def intel_status(
         self,
         serial: str,

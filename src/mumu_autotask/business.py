@@ -2933,7 +2933,14 @@ if type(previous) == "table" then
     pcall(GameMsg.RemoveMessageByTargetAndMsgId, previous,
         GameMsgId.REQ_WORLD_SEARCH_BACK)
 end
-local view_id = 986081900 + LEVEL
+local sequence = _G.__MUMU_AUTOTASK_WORLD_MONSTER_SEQUENCE
+if type(sequence) ~= "number" or sequence ~= math.floor(sequence)
+    or sequence < 0 or sequence >= 999999 then
+    sequence = 0
+end
+sequence = sequence + 1
+_G.__MUMU_AUTOTASK_WORLD_MONSTER_SEQUENCE = sequence
+local view_id = 986000000 + sequence
 local state = { level = LEVEL, view_id = view_id }
 state.callback = function(_, point, response_view_id)
     if response_view_id == view_id and type(point) == "table" then
@@ -3086,7 +3093,7 @@ if map_object == nil and type(map_data) == "table" then
         end
     end
 end
-if map_object ~= nil and (
+if map_object == nil or (
     call(map_object, "GetId", "monster id") ~= state.monster_id
     or call(map_object, "GetLevel", "monster level") ~= LEVEL
 ) then

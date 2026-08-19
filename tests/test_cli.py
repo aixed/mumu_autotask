@@ -263,6 +263,7 @@ def business_args(
     count: int = 1,
     concurrency: int = 4,
     march_ids: list[int] | None = None,
+    return_on_any: bool = False,
 ) -> argparse.Namespace:
     return argparse.Namespace(
         command=command,
@@ -282,6 +283,7 @@ def business_args(
         count=count,
         concurrency=concurrency,
         march_ids=march_ids,
+        return_on_any=return_on_any,
         dry_run=dry_run,
     )
 
@@ -1495,6 +1497,61 @@ class CliTests(unittest.TestCase):
         self.assertIn("status", event_names)
         self.assertEqual(event_names[-1], "stopped")
 
+    def test_world_monster_loop_keeps_polling_one_search_after_notice_timeout(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        level = 16
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        pending = "\n".join((
+            "MUMU_AUTOTASK\t1\tWORLD_MONSTER_SEARCH",
+            f"ROLE\t{role.encode('utf-8').hex()}",
+            "KINGDOM\t4549",
+            f"LEVEL\t{level}",
+            "READY\t0",
+            "POINT\tmissing\tmissing",
+            "MONSTER\tmissing\tmissing",
+            "STAMINA\t40",
+            "END\t1",
+        ))
+        outputs = (
+            world_monster_search_sent_protocol(role, level),
+            pending,
+            world_monster_search_protocol(role, level),
+            world_monster_commit_protocol(
+                role, level, current=2, required=8, sent=False
+            ),
+        )
+        output = io.StringIO()
+        monotonic_values = iter((0.0,) * 5 + (31.0,) * 20)
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, outputs=outputs),
+            ),
+            patch(
+                "mumu_autotask.cli.time.monotonic",
+                side_effect=lambda: next(monotonic_values),
+            ),
+            patch("mumu_autotask.cli.time.sleep"),
+            redirect_stdout(output),
+        ):
+            result_code = execute(business_args(
+                "world-monster-loop",
+                dry_run=False,
+                level=level,
+                concurrency=1,
+                poll_interval=0.05,
+            ), settings)
+            self.assertEqual(result_code, 0, output.getvalue())
+
+        payloads = [json.loads(line) for line in output.getvalue().splitlines()]
+        event_names = [payload["event"] for payload in payloads]
+        self.assertIn("retry", event_names)
+        self.assertIn("blocked", event_names)
+        self.assertNotIn("error", event_names)
+        self.assertEqual(events.count("lua-execute"), 4)
+
     def test_world_monster_status_outputs_returned_and_stamina(self) -> None:
         events: list[str] = []
         role = "打工的"
@@ -2462,6 +2519,44 @@ class CliTests(unittest.TestCase):
         self.assertEqual(events.count("lua-execute"), 2)
         self.assertEqual(events.count("frida-attach"), 1)
         self.assertEqual(events.count("frida-detach"), 1)
+
+    def test_wait_intel_can_return_when_one_target_is_terminal(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        output = io.StringIO()
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(
+                    events,
+                    outputs=(status_protocol(
+                        role,
+                        "TARGET\t71\tCOMPLETED\t2",
+                        "TARGET\t72\tPENDING\t3",
+                    ),),
+                ),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args(
+                        "wait-intel",
+                        dry_run=False,
+                        target_ids=[71, 72],
+                        expected_role=role,
+                        return_on_any=True,
+                    ),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["wait_completed"])
+        self.assertEqual(result["terminal_target_ids"], [71])
+        self.assertEqual(result["poll_count"], 1)
 
     def test_wait_intel_rejects_role_drift_between_polls(self) -> None:
         events: list[str] = []
