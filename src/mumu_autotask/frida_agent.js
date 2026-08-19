@@ -1,8 +1,12 @@
 "use strict";
 
+import Java from "frida-java-bridge";
+
 let bridge = null;
 let bridgeAllocations = [];
 const BRIDGE_CODE_CAPACITY = 16384;
+let unityFrameHook = null;
+let unityJob = null;
 
 function attachJniThread() {
   const getCreatedJavaVms = new NativeFunction(
@@ -252,6 +256,87 @@ function nativeBridgeError(result, output) {
   }
 }
 
+function executeBridgeNow(current, stateAddress, code, outputCapacity) {
+  const capacity = outputCapacity || 16384;
+  if (capacity < 2 || capacity > 16384) {
+    throw new Error("output capacity must be between 2 and 16384 bytes");
+  }
+  const codeLength = utf8ByteLength(code);
+  if (codeLength <= 0 || codeLength >= BRIDGE_CODE_CAPACITY) {
+    throw new Error(
+      `Lua source must be between 1 and ${BRIDGE_CODE_CAPACITY - 1} UTF-8 bytes; ` +
+        `received ${codeLength}`,
+    );
+  }
+  const codeBuffer = Memory.allocUtf8String(code);
+  const output = Memory.alloc(capacity);
+  output.writeU8(0);
+  const threadId = Process.getCurrentThreadId();
+  const thread = Process.enumerateThreads().find(
+    (candidate) => candidate.id === threadId,
+  );
+  const result = invokeJni(current.execute, [
+    ptr(stateAddress),
+    codeBuffer,
+    ptr(codeLength),
+    output,
+    ptr(capacity),
+  ]).toInt32();
+  const nativeError = nativeBridgeError(result, output);
+  const length = nativeError === null ? Math.max(0, Math.abs(result) - 1) : 0;
+  return {
+    ok: result > 0,
+    result,
+    output: nativeError || readBridgeOutput(output, length),
+    threadId,
+    threadName: thread?.name || "UnityMain",
+    threadMode: "unity-frame-hook",
+  };
+}
+
+function ensureUnityFrameHook() {
+  if (!Java.available) {
+    throw new Error("Android Java runtime is unavailable");
+  }
+  Java.performNow(() => {
+    if (unityFrameHook !== null) {
+      return;
+    }
+    const UnityPlayer = Java.use("com.unity3d.player.UnityPlayer");
+    const executeJobs = UnityPlayer.executeGLThreadJobs.overload();
+    executeJobs.implementation = function () {
+      executeJobs.call(this);
+      const job = unityJob;
+      if (job === null) {
+        return;
+      }
+      unityJob = null;
+      try {
+        job.resolve(job.execute());
+      } catch (error) {
+        job.reject(error);
+      }
+    };
+    unityFrameHook = executeJobs;
+  });
+}
+
+function executeOnUnityThread(current, stateAddress, code, outputCapacity) {
+  ensureUnityFrameHook();
+  return new Promise((resolve, reject) => {
+    if (unityJob !== null) {
+      reject(new Error("another Unity Lua job is already pending"));
+      return;
+    }
+    unityJob = {
+      execute: () =>
+        executeBridgeNow(current, stateAddress, code, outputCapacity),
+      resolve,
+      reject,
+    };
+  });
+}
+
 rpc.exports = {
   initialize(libraryPath) {
     bridgeAllocations = [];
@@ -313,40 +398,6 @@ rpc.exports = {
 
   execute(stateAddress, code, outputCapacity) {
     const current = requireBridge();
-    const capacity = outputCapacity || 16384;
-    if (capacity < 2 || capacity > 16384) {
-      throw new Error("output capacity must be between 2 and 16384 bytes");
-    }
-    const codeLength = utf8ByteLength(code);
-    if (codeLength <= 0 || codeLength >= BRIDGE_CODE_CAPACITY) {
-      throw new Error(
-        `Lua source must be between 1 and ${BRIDGE_CODE_CAPACITY - 1} UTF-8 bytes; ` +
-          `received ${codeLength}`,
-      );
-    }
-    const codeBuffer = Memory.allocUtf8String(code);
-    const output = Memory.alloc(capacity);
-    output.writeU8(0);
-    const threadId = Process.getCurrentThreadId();
-    const thread = Process.enumerateThreads().find(
-      (candidate) => candidate.id === threadId,
-    );
-    const result = invokeJni(current.execute, [
-      ptr(stateAddress),
-      codeBuffer,
-      ptr(codeLength),
-      output,
-      ptr(capacity),
-    ]).toInt32();
-    const nativeError = nativeBridgeError(result, output);
-    const length = nativeError === null ? Math.max(0, Math.abs(result) - 1) : 0;
-    return {
-      ok: result > 0,
-      result,
-      output: nativeError || readBridgeOutput(output, length),
-      threadId,
-      threadName: thread?.name || "FridaDirect",
-      threadMode: "frida-direct",
-    };
+    return executeOnUnityThread(current, stateAddress, code, outputCapacity);
   },
 };

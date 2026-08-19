@@ -2928,38 +2928,53 @@ local max_level = integer(call(GCtrl.WorldPlayerCtrl,
 if LEVEL > max_level then
     fail("requested monster level exceeds the player's attack limit")
 end
-local previous = _G.__MUMU_AUTOTASK_WORLD_MONSTER_SEARCH
-if type(previous) == "table" then
-    pcall(GameMsg.RemoveMessageByTargetAndMsgId, previous,
-        GameMsgId.REQ_WORLD_SEARCH_BACK)
-end
-local sequence = _G.__MUMU_AUTOTASK_WORLD_MONSTER_SEQUENCE
-if type(sequence) ~= "number" or sequence ~= math.floor(sequence)
-    or sequence < 0 or sequence >= 999999 then
-    sequence = 0
-end
-sequence = sequence + 1
-_G.__MUMU_AUTOTASK_WORLD_MONSTER_SEQUENCE = sequence
-local view_id = 986000000 + sequence
+local view_id = 207
 local state = { level = LEVEL, view_id = view_id }
-state.callback = function(_, point, response_view_id)
-    if response_view_id == view_id and type(point) == "table" then
-        state.world_x = point.x
-        state.world_y = point.y
+state.start = function()
+    if type(GModule) ~= "table" or type(GModule.UIModule) ~= "table" then
+        state.search_error = "UIModule is unavailable"
+        return false
     end
+    local ui = GModule.UIModule
+    local view = ui:FindOpenedView(GViewId.WORLD_SEARCH_OBJ)
+    if type(view) ~= "table" then
+        local ok, open_error = pcall(ui.OpenView, ui,
+            GViewId.WORLD_SEARCH_OBJ)
+        if not ok then
+            state.search_error = tostring(open_error)
+        end
+        return false
+    end
+    if type(view.IsLoaded) == "function" and view:IsLoaded() ~= true then
+        return false
+    end
+    if type(view.OnBtnSearchClick) ~= "function"
+        or type(view.objLvMap) ~= "table" then
+        state.search_error = "world search view is not ready"
+        return false
+    end
+    view._selectedObjType = 1
+    view.objLvMap[1] = LEVEL
+    if type(view._commonSlider) == "table"
+        and type(view._commonSlider.SetSliderValue) == "function" then
+        view._commonSlider:SetSliderValue(LEVEL)
+    end
+    if type(view._prePoint) == "table" then
+        view._prePoint.x = -1
+        view._prePoint.y = -1
+    else
+        view._prePoint = { x = -1, y = -1 }
+    end
+    local ok, search_error = pcall(view.OnBtnSearchClick, view)
+    if not ok then
+        state.search_error = tostring(search_error)
+        return false
+    end
+    state.request_started = true
+    return true
 end
-GameMsg.AddMessage(state, GameMsgId.REQ_WORLD_SEARCH_BACK, state.callback)
 _G.__MUMU_AUTOTASK_WORLD_MONSTER_SEARCH = state
-local ok = pcall(GCtrl.WorldPlayerCtrl.ReqWorldMapSearch,
-    GCtrl.WorldPlayerCtrl,
-    WorldMapDefine.mapobj_type.map_monster,
-    LEVEL, LEVEL, nil, nil, false, view_id)
-if not ok then
-    pcall(GameMsg.RemoveMessageByTargetAndMsgId, state,
-        GameMsgId.REQ_WORLD_SEARCH_BACK)
-    _G.__MUMU_AUTOTASK_WORLD_MONSTER_SEARCH = nil
-    fail("world monster search request failed")
-end
+state.start()
 return table.concat({
     "MUMU_AUTOTASK\t1\tWORLD_MONSTER_SEARCH_SENT",
     "ROLE\t" .. role_hex,
@@ -2979,6 +2994,23 @@ if type(state) ~= "table" or state.level ~= LEVEL then
     fail("matching world monster search state is unavailable")
 end
 local stamina = current_stamina()
+if state.search_error ~= nil then
+    fail("world monster search failed: " .. tostring(state.search_error))
+end
+if state.request_started ~= true then
+    state.start()
+    if state.search_error ~= nil then
+        fail("world monster search failed: " .. tostring(state.search_error))
+    end
+end
+local view = GModule.UIModule:FindOpenedView(GViewId.WORLD_SEARCH_OBJ)
+local point = type(view) == "table" and view._prePoint or nil
+if state.request_started == true and type(point) == "table"
+    and type(point.x) == "number" and point.x >= 0
+    and type(point.y) == "number" and point.y >= 0 then
+    state.world_x = point.x
+    state.world_y = point.y
+end
 if type(state.world_x) ~= "number" or type(state.world_y) ~= "number" then
     return table.concat({
         "MUMU_AUTOTASK\t1\tWORLD_MONSTER_SEARCH",

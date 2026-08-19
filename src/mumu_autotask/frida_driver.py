@@ -630,11 +630,12 @@ class FridaLuaClient:
         thread_name = response.get("threadName")
         thread_mode = response.get("threadMode")
         if thread_id <= 0 or (
-            thread_name != "UnityMain" and thread_mode != "frida-direct"
+            thread_name != "UnityMain"
+            and thread_mode not in {"frida-direct", "unity-frame-hook"}
         ):
             raise FridaDriverError(
                 "bridge execute did not run on a valid Unity thread or "
-                "approved direct bridge thread: "
+                "approved queued bridge thread: "
                 f"id={thread_id}, name={thread_name!r}, mode={thread_mode!r}"
             )
         if not ok or result_code <= 0:

@@ -214,8 +214,9 @@ class FridaDriverTests(unittest.TestCase):
 
     def test_agent_distinguishes_native_sentinels_from_short_lua_errors(self) -> None:
         source = load_agent_source()
-        self.assertNotIn("frida-java-bridge", source)
-        self.assertNotIn("Java.performNow", source)
+        self.assertIn("executeGLThreadJobs", source)
+        self.assertIn("unity-frame-hook", source)
+        self.assertNotIn("Java.registerClass", source)
         self.assertIn("output.writeU8(0);", source)
         self.assertIn("nativeBridgeError(result, output)", source)
         self.assertIn("if (output.readU8() !== 0)", source)
@@ -362,7 +363,7 @@ class FridaDriverTests(unittest.TestCase):
         )
         with client:
             client.initialize_bridge("/data/local/tmp/libmumu_bridge.so")
-            with self.assertRaisesRegex(FridaDriverError, "approved direct"):
+            with self.assertRaisesRegex(FridaDriverError, "approved queued"):
                 client.execute_lua(0xABC, "return 1")
 
     def test_execute_accepts_declared_direct_bridge_thread(self) -> None:
