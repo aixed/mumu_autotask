@@ -246,6 +246,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds between guarded status polls (default: 2)",
     )
     wait_intel.add_argument(
+        "--return-on-any",
+        action="store_true",
+        help="return as soon as at least one exact target leaves the pending state",
+    )
+    wait_intel.add_argument(
         "--execute",
         dest="dry_run",
         action="store_false",
@@ -2652,6 +2657,7 @@ def _execute_wait_intel(
     output_capacity: int,
     timeout_seconds: float,
     poll_interval_seconds: float,
+    return_on_any: bool = False,
 ) -> dict[str, Any]:
     normalized_ids = normalize_target_ids(target_ids)
     locked_initial_roles = validate_role_whitelist(initial_roles)
@@ -2712,7 +2718,12 @@ def _execute_wait_intel(
                     for target in snapshot.targets
                     if target.state == INTEL_PENDING
                 ]
-                if not pending_ids:
+                terminal_ids = [
+                    target.runtime_id
+                    for target in snapshot.targets
+                    if target.state != INTEL_PENDING
+                ]
+                if not pending_ids or (return_on_any and terminal_ids):
                     break
                 now = time.monotonic()
                 if now >= deadline:
@@ -2747,7 +2758,15 @@ def _execute_wait_intel(
             "statuses": _target_status_payload(snapshot),
             "status_counts": _target_status_counts(snapshot),
             "poll_count": poll_count,
-            "wait_completed": True,
+            "wait_completed": not any(
+                target.state == INTEL_PENDING for target in snapshot.targets
+            ),
+            "returned_on_any": return_on_any,
+            "terminal_target_ids": [
+                target.runtime_id
+                for target in snapshot.targets
+                if target.state != INTEL_PENDING
+            ],
             "stage_script_sha256": stage_hashes,
         }
     )
@@ -3153,52 +3172,93 @@ def _execute_world_monster_loop(
         if stop_requested:
             raise KeyboardInterrupt
 
-    def dispatch_one() -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        nonlocal current_stamina, dispatch_count
-        check_stop()
-        search_result = _execute_lua_when_idle(
+    def recover_lua_state(operation: str, error: LuaStateScanError) -> None:
+        nonlocal state
+        previous = state
+        _require_same_foreground_process(adb, profile, process, operation)
+        state = _wait_unique_idle_lua_state(
             adb,
             profile,
-            client,
-            process,
             scanner,
-            state,
-            search_code,
-            output_capacity=output_capacity,
-            operation=f"world monster loop search request {dispatch_count + 1}",
+            process,
+            f"{operation} Lua state recovery",
+            timeout_seconds=60.0,
         )
-        parse_world_monster_search_sent_output(
-            search_result.output, requested_level
+        emit(
+            "recover",
+            stage="lua_state",
+            previous_lua_state=previous.address_text,
+            lua_state=state.address_text,
+            detail=(
+                f"检测到游戏 Lua 状态变化（{previous.address_text} -> "
+                f"{state.address_text}），已在当前模拟器内重新绑定并继续。"
+            ),
+            recovery_cause=str(error),
         )
-        search_deadline = time.monotonic() + operation_timeout_seconds
+
+    def dispatch_one() -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        nonlocal current_stamina, dispatch_count
         while True:
             check_stop()
-            search_result = _execute_lua_when_idle(
-                adb,
-                profile,
-                client,
-                process,
-                scanner,
-                state,
-                search_result_code,
-                output_capacity=output_capacity,
-                operation=f"world monster loop search result {dispatch_count + 1}",
-            )
-            search = parse_world_monster_search_output(
-                search_result.output, requested_level
-            )
-            current_stamina = search.current_stamina
+            try:
+                search_result = _execute_lua_when_idle(
+                    adb,
+                    profile,
+                    client,
+                    process,
+                    scanner,
+                    state,
+                    search_code,
+                    output_capacity=output_capacity,
+                    operation=(
+                        f"world monster loop search request {dispatch_count + 1}"
+                    ),
+                )
+                parse_world_monster_search_sent_output(
+                    search_result.output, requested_level
+                )
+                search_deadline = time.monotonic() + operation_timeout_seconds
+                while True:
+                    check_stop()
+                    search_result = _execute_lua_when_idle(
+                        adb,
+                        profile,
+                        client,
+                        process,
+                        scanner,
+                        state,
+                        search_result_code,
+                        output_capacity=output_capacity,
+                        operation=(
+                            f"world monster loop search result {dispatch_count + 1}"
+                        ),
+                    )
+                    search = parse_world_monster_search_output(
+                        search_result.output, requested_level
+                    )
+                    current_stamina = search.current_stamina
+                    if search.ready:
+                        break
+                    now = time.monotonic()
+                    if now >= search_deadline:
+                        emit(
+                            "retry",
+                            stage="search",
+                            detail=(
+                                "本次地图搜索暂未返回可攻击目标；继续等待同一搜索回调，"
+                                "不会停止或叠加新的搜索请求。"
+                            ),
+                        )
+                        search_deadline = now + operation_timeout_seconds
+                    # The search result is delivered by a game-side callback.
+                    # Keep polling the same request; issuing another one here can
+                    # overlap native callbacks and crash the game.
+                    time.sleep(poll_interval_seconds)
+            except LuaStateScanError as exc:
+                recover_lua_state("world monster search", exc)
+                continue
             if search.ready:
                 break
-            if time.monotonic() >= search_deadline:
-                raise BusinessError(
-                    "world monster search did not return an actual map object before timeout"
-                )
-            # The search result is delivered by a game-side callback.  Polling
-            # the main Lua state too aggressively can race that callback even
-            # after an idle cframe pre-check, so keep the caller's guarded
-            # interval (1.5 seconds by default).
-            time.sleep(poll_interval_seconds)
 
         commit_result = _execute_lua_when_idle(
             adb,
@@ -3327,17 +3387,22 @@ def _execute_world_monster_loop(
 
                     check_stop()
                     status_code = build_world_monster_status_lua(tuple(sorted(active)))
-                    status_result = _execute_lua_when_idle(
-                        adb,
-                        profile,
-                        client,
-                        process,
-                        scanner,
-                        state,
-                        status_code,
-                        output_capacity=output_capacity,
-                        operation="world monster loop status",
-                    )
+                    try:
+                        status_result = _execute_lua_when_idle(
+                            adb,
+                            profile,
+                            client,
+                            process,
+                            scanner,
+                            state,
+                            status_code,
+                            output_capacity=output_capacity,
+                            operation="world monster loop status",
+                        )
+                    except LuaStateScanError as exc:
+                        recover_lua_state("world monster status", exc)
+                        previous_status_signature = None
+                        continue
                     snapshot = parse_world_monster_status_output(
                         status_result.output, tuple(sorted(active))
                     )
@@ -3366,7 +3431,7 @@ def _execute_world_monster_loop(
                     returned = [
                         status.march_id
                         for status in snapshot.statuses
-                        if status.state == "RETURNED"
+                        if status.state in {"RETURNED", "UNKNOWN"}
                     ]
                     if returned:
                         for march_id in returned:
@@ -3840,6 +3905,7 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
                 output_capacity=settings.frida.output_capacity,
                 timeout_seconds=timeout_seconds,
                 poll_interval_seconds=poll_interval_seconds,
+                return_on_any=bool(getattr(args, "return_on_any", False)),
             )
         )
         print(json.dumps(payload, ensure_ascii=False))

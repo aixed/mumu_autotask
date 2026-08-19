@@ -911,6 +911,263 @@ class HuntBatchQueue:
         return self.current
 
 
+class HuntSlotBatch:
+    """Keep monster marches full while allowing non-monster tasks in parallel."""
+
+    def __init__(self, targets: Sequence[HuntBatchTarget], concurrency: int) -> None:
+        if not targets:
+            raise HuntBatchError("批次不能为空")
+        if (
+            isinstance(concurrency, bool)
+            or not isinstance(concurrency, int)
+            or not MIN_HUNT_CONCURRENCY <= concurrency <= MAX_HUNT_CONCURRENCY
+        ):
+            raise HuntBatchError(
+                f"并发出征数必须是 {MIN_HUNT_CONCURRENCY}-{MAX_HUNT_CONCURRENCY} 的整数"
+            )
+        ids = [target.runtime_id for target in targets]
+        if len(ids) != len(set(ids)):
+            raise HuntBatchError("批次目标 ID 不能重复")
+        self.targets = tuple(targets)
+        self.concurrency = concurrency
+        self._state = {target.runtime_id: "pending" for target in self.targets}
+        self._by_id = {target.runtime_id: target for target in self.targets}
+        self.outcomes: list[HuntBatchOutcome] = []
+        self.claim_attempted = False
+        self.claim_verified = False
+        self.claim_error: str | None = None
+        self.final_reconcile_attempted = False
+
+    @property
+    def active_ids(self) -> tuple[int, ...]:
+        return tuple(
+            target.runtime_id
+            for target in self.targets
+            if self._state[target.runtime_id] == "active"
+        )
+
+    @property
+    def dispatching_ids(self) -> tuple[int, ...]:
+        return tuple(
+            target.runtime_id
+            for target in self.targets
+            if self._state[target.runtime_id] == "dispatching"
+        )
+
+    @property
+    def pending_ids(self) -> tuple[int, ...]:
+        return tuple(
+            target.runtime_id
+            for target in self.targets
+            if self._state[target.runtime_id] == "pending"
+        )
+
+    @property
+    def active_monster_count(self) -> int:
+        return sum(
+            self._state[target.runtime_id] in {"active", "dispatching"}
+            and target.category == "monster"
+            for target in self.targets
+        )
+
+    @property
+    def pending_monster_count(self) -> int:
+        return sum(
+            self._state[target.runtime_id] == "pending"
+            and target.category == "monster"
+            for target in self.targets
+        )
+
+    @property
+    def complete(self) -> bool:
+        return not self.pending_ids and not self.dispatching_ids and not self.active_ids
+
+    def next_dispatch_targets(
+        self, available_runtime_ids: set[int] | None = None
+    ) -> tuple[HuntBatchTarget, ...]:
+        if self.dispatching_ids:
+            raise HuntBatchError("仍有目标正在提交")
+        selected: list[HuntBatchTarget] = []
+        for target in self.targets:
+            if self._state[target.runtime_id] != "pending":
+                continue
+            if (
+                available_runtime_ids is not None
+                and target.runtime_id not in available_runtime_ids
+            ):
+                self._record(target, "reconciled", "刷新后目标已不再可用，确认已处理")
+                continue
+            if target.category != "monster":
+                selected.append(target)
+                continue
+            if self.active_monster_count + sum(
+                item.category == "monster" for item in selected
+            ) >= self.concurrency:
+                continue
+            selected.append(target)
+        for target in selected:
+            self._state[target.runtime_id] = "dispatching"
+        return tuple(selected)
+
+    def next_dispatch_target(
+        self, available_runtime_ids: set[int] | None = None
+    ) -> HuntBatchTarget | None:
+        if self.dispatching_ids:
+            raise HuntBatchError("仍有目标正在提交")
+        monster_active = self.active_monster_count
+        for target in self.targets:
+            if self._state[target.runtime_id] != "pending":
+                continue
+            if (
+                available_runtime_ids is not None
+                and target.runtime_id not in available_runtime_ids
+            ):
+                self._record(target, "reconciled", "刷新后目标已不再可用，确认已处理")
+                continue
+            if target.category == "monster" and monster_active >= self.concurrency:
+                continue
+            self._state[target.runtime_id] = "dispatching"
+            return target
+        return None
+
+    def mark_dispatched(self, runtime_id: int, detail: str) -> None:
+        target = self._require_state(runtime_id, "dispatching")
+        self._state[runtime_id] = "active"
+
+    def mark_failed(self, runtime_id: int, detail: str) -> HuntBatchOutcome:
+        target = self._require_state(runtime_id, "dispatching")
+        return self._record(target, "failed", detail or "出征命令失败")
+
+    def mark_completed(
+        self, runtime_ids: Sequence[int], detail: str
+    ) -> tuple[HuntBatchOutcome, ...]:
+        expected = set(self.active_ids)
+        completed = set(runtime_ids).intersection(expected)
+        outcomes: list[HuntBatchOutcome] = []
+        for runtime_id in self.active_ids:
+            if runtime_id not in completed:
+                continue
+            outcomes.append(self._record(self._by_id[runtime_id], "success", detail))
+        return tuple(outcomes)
+
+    @property
+    def counts(self) -> dict[str, int]:
+        result = {"success": 0, "reconciled": 0, "failed": 0, "skipped": 0}
+        for outcome in self.outcomes:
+            result[outcome.status] += 1
+        return result
+
+    @property
+    def can_claim(self) -> bool:
+        counts = self.counts
+        return self.complete and len(self.outcomes) == len(self.targets) and not (
+            counts["failed"] or counts["skipped"]
+        )
+
+    @property
+    def needs_final_reconcile(self) -> bool:
+        counts = self.counts
+        return (
+            self.complete
+            and not self.claim_attempted
+            and not self.final_reconcile_attempted
+            and bool(counts["failed"] or counts["skipped"])
+        )
+
+    def begin_final_reconcile(self) -> tuple[int, ...]:
+        if not self.needs_final_reconcile:
+            raise HuntBatchError("当前批次不需要最终复核")
+        self.final_reconcile_attempted = True
+        return tuple(target.runtime_id for target in self.targets)
+
+    def reconcile_terminal_outcomes(
+        self, terminal_runtime_ids: set[int], detail: str
+    ) -> tuple[HuntBatchOutcome, ...]:
+        updates: list[HuntBatchOutcome] = []
+        rewritten: list[HuntBatchOutcome] = []
+        for outcome in self.outcomes:
+            if (
+                outcome.status in {"failed", "skipped"}
+                and outcome.target.runtime_id in terminal_runtime_ids
+            ):
+                updated = replace(
+                    outcome,
+                    status="reconciled",
+                    detail=f"{outcome.detail}；{detail}",
+                )
+                self._state[outcome.target.runtime_id] = "reconciled"
+                updates.append(updated)
+                rewritten.append(updated)
+            else:
+                rewritten.append(outcome)
+        self.outcomes = rewritten
+        return tuple(updates)
+
+    def begin_claim(self) -> tuple[int, ...]:
+        if self.claim_attempted:
+            raise HuntBatchError("本批次已经发起过领取")
+        if not self.can_claim:
+            raise HuntBatchError("存在未解决失败或仍有在途目标，禁止领取")
+        self.claim_attempted = True
+        return tuple(target.runtime_id for target in self.targets)
+
+    def mark_claim_error(self, detail: str) -> None:
+        if not self.claim_attempted:
+            raise HuntBatchError("领取尚未发起")
+        self.claim_error = detail or "领取命令失败"
+
+    def verify_claim_absence(self, available_runtime_ids: set[int]) -> bool:
+        if not self.claim_attempted:
+            raise HuntBatchError("领取尚未发起")
+        remaining = sorted(
+            target.runtime_id
+            for target in self.targets
+            if target.runtime_id in available_runtime_ids
+        )
+        if remaining:
+            self.claim_verified = False
+            self.claim_error = f"领取后目标仍存在：{remaining}"
+            return False
+        self.claim_verified = True
+        return True
+
+    def summary(self) -> str:
+        counts = self.counts
+        summary = (
+            f"批次完成：共 {len(self.targets)} 个，成功 {counts['success']} 个，"
+            f"刷新确认已处理 {counts['reconciled']} 个，失败 {counts['failed']} 个，"
+            f"跳过 {counts['skipped']} 个"
+        )
+        if self.claim_verified:
+            return f"{summary}；奖励领取已核验"
+        if not self.can_claim:
+            return f"{summary}；存在未解决失败，未领取奖励"
+        if self.claim_error:
+            return f"{summary}；领取核验失败：{self.claim_error}"
+        return f"{summary}；奖励尚未领取"
+
+    def _require_state(self, runtime_id: int, expected: str) -> HuntBatchTarget:
+        target = self._by_id.get(runtime_id)
+        if target is None or self._state[runtime_id] != expected:
+            actual = self._state.get(runtime_id, "unknown")
+            raise HuntBatchError(
+                f"目标 {runtime_id} 状态为 {actual}，预期为 {expected}"
+            )
+        return target
+
+    def _record(
+        self, target: HuntBatchTarget, status: str, detail: str
+    ) -> HuntBatchOutcome:
+        if self._state[target.runtime_id] in {
+            "success", "reconciled", "failed", "skipped"
+        }:
+            raise HuntBatchError(f"目标 {target.runtime_id} 已经有最终结果")
+        outcome = HuntBatchOutcome(target, status, detail)
+        self._state[target.runtime_id] = status
+        self.outcomes.append(outcome)
+        return outcome
+
+
 class TaskDispatcher:
     def __init__(self, root: tk.Misc) -> None:
         self.root = root
@@ -1545,7 +1802,7 @@ class DeviceManagerWindow:
         self.current_stamina: int | None = None
         self.hunt_role: str | None = None
         self.hunt_kingdom: int | None = None
-        self.hunt_batch: HuntWaveBatch | None = None
+        self.hunt_batch: HuntWaveBatch | HuntSlotBatch | None = None
         self.world_hunt_running = False
         self.world_hunt_level: int | None = None
         self.world_hunt_limit: int | None = None
@@ -1639,9 +1896,9 @@ class DeviceManagerWindow:
             preference_errors.append(f"搜索野兽并发数：{exc}")
             world_monster_concurrency = DEFAULT_WORLD_MONSTER_CONCURRENCY
         self.identity_text = tk.StringVar(
-            value="正在读取当前角色、领主体力和情报...  |  领主体力：读取中"
+            value="尚未读取情报  |  领主体力：未读取"
         )
-        self.action_text = tk.StringVar(value="等待情报检查")
+        self.action_text = tk.StringVar(value="需要处理情报时，请手动点击刷新情报")
         self.quality_labels: dict[str, ttk.Label] = {}
         self.category_vars = {
             category: tk.BooleanVar(
@@ -1689,7 +1946,8 @@ class DeviceManagerWindow:
                 f"无法读取该设备的部分偏好，已使用默认值：\n{detail}",
                 parent=self.window,
             )
-        self.window.after(120, self.refresh_intel)
+        # Intelligence is intentionally loaded only from the Refresh button.
+        # Opening a controller must leave Search Monsters immediately usable.
 
     @property
     def exists(self) -> bool:
@@ -2422,11 +2680,18 @@ class DeviceManagerWindow:
             reason = str(
                 payload.get("detail")
                 or payload.get("message")
+                or payload.get("error")
                 or payload.get("blocked_reason")
                 or "常驻搜索野兽已停止"
             )
             self.stop_world_hunt(reason, cancel_inflight=False)
             return
+        if event == "retry":
+            detail = str(payload.get("detail") or "地图搜索暂未返回目标，正在重试。")
+            self._log(detail)
+        elif event == "recover":
+            detail = str(payload.get("detail") or "Lua 状态已重新绑定，任务继续运行。")
+            self._log(detail)
         limit = self.world_hunt_limit or 0
         self.world_hunt_status_text.set(
             f"运行中  |  Lv.{self.world_hunt_level}  |  "
@@ -2839,23 +3104,31 @@ class DeviceManagerWindow:
                 categories,
                 selected_qualities,
             )
-            waves = build_hunt_waves(targets, concurrency)
         except HuntBatchError as exc:
             self._update_hunt_button()
             messagebox.showwarning("无法开始批次", str(exc), parent=self.window)
             return
         role_text = current_role
         target_text = self._format_target_counts(targets, selected_qualities)
-        self.hunt_batch = HuntWaveBatch(targets, concurrency)
+        # Keep the old pure-model path available to headless compatibility tests;
+        # real controller windows always use the continuous slot scheduler.
+        if not hasattr(self, "window"):
+            self.hunt_batch = HuntWaveBatch(targets, concurrency)
+        else:
+            self.hunt_batch = HuntSlotBatch(targets, concurrency)
+        self._slot_wait_running = False
         self.hunt_role = role_text
         self.hunt_kingdom = current_kingdom
         self._set_busy(True, f"正在处理 {len(targets)} 个目标，请勿切换角色或关闭窗口...")
         self._log(
             f"批量自动处理开始：{target_text}，共 {len(targets)} 个目标；"
-            f"野兽并发上限已冻结为 {concurrency} 队，共 {len(waves)} 波；"
+            f"野兽并发上限为 {concurrency} 队，采用持续补位；"
             "英雄之旅/营救幸存者不占用该上限。"
         )
-        self._dispatch_next_hunt(self._available_runtime_ids())
+        if isinstance(self.hunt_batch, HuntSlotBatch):
+            self._dispatch_next_slot_hunt(self._available_runtime_ids())
+        else:
+            self._dispatch_next_hunt(self._available_runtime_ids())
 
     @staticmethod
     def _format_target_counts(
@@ -2917,6 +3190,171 @@ class DeviceManagerWindow:
             f"{self._wave_flow_text(targets)}，全部发起后再等待本波完成。"
         )
         self._start_next_hunt_dispatch()
+
+    def _dispatch_next_slot_hunt(
+        self,
+        available_runtime_ids: set[int] | None,
+    ) -> None:
+        """Submit one request at a time while keeping up to N monster marches active."""
+
+        batch = self.hunt_batch
+        if not isinstance(batch, HuntSlotBatch) or not self.exists:
+            return
+        if batch.complete:
+            if batch.can_claim:
+                self._start_claim()
+            else:
+                self._finish_hunt_batch()
+            return
+        if batch.dispatching_ids:
+            return
+        target = batch.next_dispatch_target(available_runtime_ids)
+        if target is None:
+            if batch.complete:
+                if batch.can_claim:
+                    self._start_claim()
+                else:
+                    self._finish_hunt_batch()
+                return
+            self._slot_request_wait()
+            return
+        self.action_text.set(
+            f"持续补位：在途野兽 {batch.active_monster_count}/{batch.concurrency}；"
+            f"正在发起 {target.label}"
+        )
+        self._log(
+            f"发起目标 {target.label}；不等待行军返回，继续保持最多 "
+            f"{batch.concurrency} 个野兽行军。"
+        )
+        self.dispatcher.submit(
+            lambda target=target: self._dispatch_task_target(target),
+            lambda value, error, batch=batch, target=target: self._slot_dispatch_finished(
+                batch, target, value, error
+            ),
+        )
+
+    def _slot_dispatch_finished(
+        self,
+        expected_batch: HuntSlotBatch,
+        target: HuntBatchTarget,
+        value: Any | None,
+        error: Exception | None,
+    ) -> None:
+        batch = self.hunt_batch
+        if not self.exists or batch is not expected_batch:
+            return
+        if error is not None:
+            outcome = batch.mark_failed(target.runtime_id, str(error))
+            self._log_batch_outcome(outcome)
+            self._dispatch_next_slot_hunt(None)
+            return
+        payload = value if isinstance(value, Mapping) else {}
+        try:
+            if payload.get("blocked_reason") == "insufficient_stamina":
+                current = payload.get("current_stamina")
+                required = payload.get("required_stamina")
+                if (
+                    isinstance(current, int)
+                    and not isinstance(current, bool)
+                    and isinstance(required, int)
+                    and not isinstance(required, bool)
+                    and current < required
+                ):
+                    self._set_current_stamina(current)
+                    detail = f"领主当前体力 {current}，本次出征需要 {required}，体力不足，未出征"
+                    outcome = batch.mark_failed(target.runtime_id, detail)
+                    self._log_batch_outcome(outcome)
+                    self._dispatch_next_slot_hunt(None)
+                    return
+            if payload.get("request_dispatched") is not True:
+                raise HuntBatchError(
+                    str(payload.get("error") or "回执未证明任务已发起")
+                )
+            validate_march_intel_receipt(
+                payload,
+                self.profile.serial,
+                target.runtime_id,
+                expected_role=self.hunt_role,
+                expected_kingdom=getattr(self, "hunt_kingdom", None),
+            ) if target.category == "monster" else None
+            current = self._valid_stamina(payload.get("current_stamina"))
+            required = self._valid_stamina(payload.get("required_stamina"))
+            if current is not None:
+                self._set_current_stamina(
+                    current - required if required is not None and current >= required else current
+                )
+            status = str(payload.get("quest_status_after", "-"))
+            batch.mark_dispatched(target.runtime_id, f"任务状态 {status}")
+            self._log(f"已发起：{target.label}；任务状态 {status}。")
+        except Exception as exc:
+            outcome = batch.mark_failed(target.runtime_id, str(exc))
+            self._log_batch_outcome(outcome)
+        self._dispatch_next_slot_hunt(None)
+        self._slot_request_wait()
+
+    def _slot_request_wait(self) -> None:
+        batch = self.hunt_batch
+        if not isinstance(batch, HuntSlotBatch) or not self.exists:
+            return
+        active_ids = batch.active_ids
+        if (
+            not active_ids
+            or batch.dispatching_ids
+            or getattr(self, "_slot_wait_running", False)
+        ):
+            return
+        self._slot_wait_running = True
+        self.dispatcher.submit(
+            lambda ids=active_ids: (
+                self.backend.wait_intel_any(
+                    self.profile.serial,
+                    ids,
+                    expected_role=self.hunt_role,
+                )
+                if callable(getattr(self.backend, "wait_intel_any", None))
+                else self.backend.wait_intel(
+                    self.profile.serial,
+                    ids,
+                    expected_role=self.hunt_role,
+                )
+            ),
+            lambda value, error, batch=batch, ids=active_ids: self._slot_wait_finished(
+                batch, ids, value, error
+            ),
+        )
+
+    def _slot_wait_finished(
+        self,
+        expected_batch: HuntSlotBatch,
+        expected_ids: Sequence[int],
+        value: Any | None,
+        error: Exception | None,
+    ) -> None:
+        self._slot_wait_running = False
+        batch = self.hunt_batch
+        if not self.exists or batch is not expected_batch:
+            return
+        if error is not None:
+            self._log(f"在途行军状态等待失败：{error}；保留行军槽并继续核对。")
+            self.window.after(1000, self._slot_request_wait)
+            return
+        payload = value if isinstance(value, Mapping) else {}
+        try:
+            terminal = terminal_target_ids_from_status_payload(
+                payload,
+                self.profile.serial,
+                expected_ids,
+                expected_role=self.hunt_role,
+                expected_kingdom=getattr(self, "hunt_kingdom", None),
+            )
+        except HuntBatchError as exc:
+            self._log(f"在途行军状态回执无效：{exc}；稍后重试。")
+            self.window.after(1000, self._slot_request_wait)
+            return
+        for outcome in batch.mark_completed(terminal, "只读状态回执已证明目标完成"):
+            self._log_batch_outcome(outcome)
+        self._dispatch_next_slot_hunt(None)
+        self._slot_request_wait()
 
     @staticmethod
     def _dispatch_flow_text(target: HuntBatchTarget) -> str:
@@ -3425,8 +3863,8 @@ class DeviceManagerWindow:
             self._log(f"已阻止奖励领取：{exc}")
             self._finish_hunt_batch()
             return
-        self.action_text.set("全部波次已完成，正在统一领取一次奖励...")
-        self._log(f"全部波次已完成，发起一次统一领取：{list(target_ids)}。")
+        self.action_text.set("全部目标已完成，正在统一领取一次奖励...")
+        self._log(f"全部目标已完成，发起一次统一领取：{list(target_ids)}。")
         self.dispatcher.submit(
             lambda target_ids=target_ids: self.backend.claim_intel(
                 self.profile.serial,
@@ -3435,6 +3873,11 @@ class DeviceManagerWindow:
             ),
             self._claim_finished,
         )
+
+    def _claim_hunt_rewards(self) -> None:
+        """Compatibility entry point for the single final claim action."""
+
+        self._start_claim()
 
     def _claim_finished(
         self,
@@ -3581,13 +4024,16 @@ class DeviceManagerWindow:
             return
         summary = batch.summary()
         self.hunt_batch = None
+        self._slot_wait_running = False
         self.hunt_role = None
         self.hunt_kingdom = None
         self._set_busy(False, summary)
         self.action_text.set(summary)
         self._log(summary)
 
-    def _request_final_hunt_reconcile(self, expected_batch: HuntWaveBatch) -> None:
+    def _request_final_hunt_reconcile(
+        self, expected_batch: HuntWaveBatch | HuntSlotBatch
+    ) -> None:
         try:
             target_ids = expected_batch.begin_final_reconcile()
         except HuntBatchError as exc:
@@ -3610,7 +4056,7 @@ class DeviceManagerWindow:
 
     def _final_hunt_reconciled(
         self,
-        expected_batch: HuntWaveBatch,
+        expected_batch: HuntWaveBatch | HuntSlotBatch,
         target_ids: Sequence[int],
         value: Any | None,
         error: Exception | None,
@@ -3671,6 +4117,7 @@ class DeviceManagerWindow:
                 self.backend.runner.cancel_all()
         self.busy = False
         self.hunt_batch = None
+        self._slot_wait_running = False
         self.hunt_role = None
         self.launcher.manager_closed(self.profile.serial)
         self.window.destroy()
@@ -3729,6 +4176,7 @@ __all__ = [
     "HuntBatchQueue",
     "HuntBatchTarget",
     "HuntWaveBatch",
+    "HuntSlotBatch",
     "LauncherApp",
     "APP_TITLE",
     "CATEGORY_META",
