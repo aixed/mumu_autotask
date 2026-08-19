@@ -234,6 +234,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     toggle_world.set_defaults(dry_run=True)
 
+    restart_game = subparsers.add_parser(
+        "restart-game",
+        help="force-stop and restart the selected game's Android activity",
+    )
+    restart_game.add_argument("--serial", required=True)
+    restart_game.add_argument(
+        "--execute",
+        dest="dry_run",
+        action="store_false",
+        help="restart the configured game package after validation",
+    )
+    restart_game.set_defaults(dry_run=True)
+
     wait_intel = subparsers.add_parser(
         "wait-intel",
         help="wait for exact intelligence runtime IDs to leave the pending state",
@@ -3612,6 +3625,29 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
                     ensure_ascii=False,
                 )
             )
+        return 0
+
+    if args.command == "restart-game":
+        profile = _profile(settings, args.serial)
+        adb = _adb(settings)
+        adb.require_connected([profile.serial])
+        payload = {
+            "serial": profile.serial,
+            "instance_name": profile.instance_name,
+            "operation": "restart-game",
+            "package_name": profile.package_name,
+            "activity": profile.activity_name,
+            "dry_run": bool(args.dry_run),
+            "restarted": False,
+        }
+        if not args.dry_run:
+            adb.restart_package(
+                profile.serial,
+                profile.package_name,
+                profile.activity_name,
+            )
+            payload["restarted"] = True
+        print(json.dumps(payload, ensure_ascii=False))
         return 0
 
     profile = _profile(settings, args.serial)

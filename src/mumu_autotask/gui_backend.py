@@ -848,6 +848,16 @@ class GuiBackend:
             raise GuiBackendError("野外/城镇切换命令返回了意外的数据条数")
         return payloads[0]
 
+    def restart_game(self, serial: str) -> Mapping[str, Any]:
+        result = self.runner.run(
+            ("restart-game", "--serial", serial, "--execute"),
+            timeout=45,
+        )
+        payloads = parse_json_lines(result.stdout)
+        if len(payloads) != 1:
+            raise GuiBackendError("重启游戏命令返回了意外的数据条数")
+        return payloads[0]
+
     def march(
         self,
         serial: str,

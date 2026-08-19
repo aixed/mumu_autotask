@@ -119,6 +119,10 @@ class FakeAdb:
         self.events.append(f"input-tap:{x},{y}")
         return ""
 
+    def restart_package(self, serial: str, package_name: str, component: str) -> str:
+        self.events.append(f"restart:{serial}:{package_name}:{component}")
+        return "Starting"
+
 
 class FakeClient:
     def __init__(
@@ -618,6 +622,7 @@ class CliTests(unittest.TestCase):
             "inspect-tasks",
             "ensure-world",
             "toggle-world",
+            "restart-game",
             "wait-intel",
             "claim-intel",
             "march",
@@ -657,6 +662,28 @@ class CliTests(unittest.TestCase):
                         parser.parse_args(
                             [command, "--serial", "device-1", "--target-id", "71"]
                         )
+
+    def test_restart_game_uses_adb_only_for_selected_device(self) -> None:
+        events: list[str] = []
+        settings = Settings(
+            devices=(DeviceProfile("device-1", roles=("打工的",)),)
+        )
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(business_args("restart-game", dry_run=False), settings),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["restarted"])
+        self.assertIn(
+            "restart:device-1:com.gof.global:com.gof.global/com.unity3d.player.MyMainPlayerActivity",
+            events,
+        )
+        self.assertNotIn("frida-attach", events)
 
     def test_capture_march_keep_hook_skips_uninstall(self) -> None:
         events: list[str] = []

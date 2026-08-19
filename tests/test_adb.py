@@ -297,6 +297,41 @@ class AdbTests(unittest.TestCase):
             ["fake-adb", "-s", "device-1", "shell", "input", "tap", "200", "1212"],
         )
 
+    def test_restart_package_force_stops_then_starts_activity(self) -> None:
+        runner = FakeRunner("")
+        client = AdbClient("fake-adb", runner=runner)
+
+        client.restart_package(
+            "device-1",
+            "com.gof.global",
+            "com.gof.global/com.unity3d.player.MyMainPlayerActivity",
+        )
+
+        self.assertEqual(
+            runner.calls[-2:],
+            [
+                [
+                    "fake-adb",
+                    "-s",
+                    "device-1",
+                    "shell",
+                    "am",
+                    "force-stop",
+                    "com.gof.global",
+                ],
+                [
+                    "fake-adb",
+                    "-s",
+                    "device-1",
+                    "shell",
+                    "am",
+                    "start",
+                    "-n",
+                    "com.gof.global/com.unity3d.player.MyMainPlayerActivity",
+                ],
+            ],
+        )
+
     def test_input_tap_rejects_invalid_coordinates(self) -> None:
         client = AdbClient("fake-adb", runner=FakeRunner(""))
 

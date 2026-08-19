@@ -2142,14 +2142,23 @@ class DeviceManagerWindow:
             title,
             text="刷新情报",
             command=self.refresh_intel,
+            width=9,
         )
-        self.refresh_intel_button.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.refresh_intel_button.grid(row=0, column=1, sticky="e")
         self.toggle_world_button = ttk.Button(
             title,
             text="野外/城镇",
             command=self.toggle_world,
+            width=9,
         )
-        self.toggle_world_button.grid(row=2, column=1, sticky="e", pady=(6, 0))
+        self.toggle_world_button.grid(row=1, column=1, sticky="e", pady=(2, 0))
+        self.restart_game_button = ttk.Button(
+            title,
+            text="重启游戏",
+            command=self.restart_game,
+            width=9,
+        )
+        self.restart_game_button.grid(row=2, column=1, sticky="e", pady=(2, 0))
         ttk.Label(
             title,
             textvariable=self.identity_text,
@@ -2486,6 +2495,8 @@ class DeviceManagerWindow:
         self.refresh_intel_button.configure(state="disabled" if busy else "normal")
         if hasattr(self, "toggle_world_button"):
             self.toggle_world_button.configure(state="disabled" if busy else "normal")
+        if hasattr(self, "restart_game_button"):
+            self.restart_game_button.configure(state="disabled" if busy else "normal")
         for check in self.category_checks.values():
             check.configure(state="disabled" if busy else "normal")
         for check in self.quality_checks.values():
@@ -2657,6 +2668,8 @@ class DeviceManagerWindow:
         locked = running or bool(getattr(self, "busy", False))
         if hasattr(self, "toggle_world_button"):
             self.toggle_world_button.configure(state="disabled" if locked else "normal")
+        if hasattr(self, "restart_game_button"):
+            self.restart_game_button.configure(state="disabled" if locked else "normal")
         self.world_level_scale.configure(state="disabled" if locked else "normal")
         self.world_concurrency_scale.configure(
             state="disabled" if locked else "normal"
@@ -3202,6 +3215,41 @@ class DeviceManagerWindow:
             lambda: self.backend.toggle_world(self.profile.serial),
             self._world_toggled,
         )
+
+    def restart_game(self) -> None:
+        """Restart only this device's game process through ADB."""
+
+        if self.busy or getattr(self, "world_hunt_running", False):
+            self._log("当前任务执行中，暂不能重启游戏。")
+            return
+        self._set_busy(True, "正在重启游戏...")
+        self._log("正在通过 ADB 重启当前模拟器的游戏。")
+        self.dispatcher.submit(
+            lambda: self.backend.restart_game(self.profile.serial),
+            self._game_restarted,
+        )
+
+    def _game_restarted(self, value: Any | None, error: Exception | None) -> None:
+        if not self.exists:
+            return
+        if error is not None:
+            self._set_busy(False, f"重启游戏失败：{error}")
+            self._log(f"重启游戏失败：{error}")
+            return
+        payload = value if isinstance(value, Mapping) else {}
+        if payload.get("serial") != self.profile.serial or payload.get("restarted") is not True:
+            self._set_busy(False, "重启游戏未确认")
+            self._log("重启游戏失败：ADB 未确认目标设备已重启。")
+            return
+        self.current_pid = "重启中"
+        self.current_role = None
+        self.current_kingdom = None
+        self.current_stamina = None
+        self.current_items = []
+        self._render_items()
+        self._refresh_identity_text()
+        self._set_busy(False, "游戏已重启，请等待加载完成后刷新情报")
+        self._log("游戏已重启；等待加载完成后可点击刷新情报。")
 
     def _world_toggled(self, value: Any | None, error: Exception | None) -> None:
         if not self.exists:

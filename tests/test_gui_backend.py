@@ -420,6 +420,23 @@ class GuiBackendTests(unittest.TestCase):
             ),
         )
 
+    def test_backend_restart_game_uses_explicit_execute_command(self) -> None:
+        runner = FakeRunner(
+            ['{"serial":"device-1","restarted":true}\n']
+        )
+        backend = GuiBackend(runner)  # type: ignore[arg-type]
+
+        payload = backend.restart_game("device-1")
+
+        self.assertTrue(payload["restarted"])
+        self.assertEqual(
+            runner.calls[0],
+            (
+                ("restart-game", "--serial", "device-1", "--execute"),
+                45,
+            ),
+        )
+
     def test_backend_world_monster_commands_bind_level_count_and_march_ids(self) -> None:
         runner = FakeRunner(
             [

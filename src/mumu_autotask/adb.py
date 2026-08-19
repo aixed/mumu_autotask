@@ -311,6 +311,14 @@ class AdbClient:
     def start_activity(self, serial: str, component: str) -> str:
         return self.shell(serial, "am", "start", "-n", component)
 
+    def restart_package(self, serial: str, package_name: str, component: str) -> str:
+        """Stop one package and start its configured activity again."""
+
+        if not package_name or not component:
+            raise AdbError("package name and activity component are required")
+        self.shell(serial, "am", "force-stop", package_name)
+        return self.start_activity(serial, component)
+
     def input_tap(self, serial: str, x: int, y: int) -> str:
         if (
             isinstance(x, bool)
