@@ -1,7 +1,5 @@
 "use strict";
 
-import Java from "frida-java-bridge";
-
 let bridge = null;
 let bridgeAllocations = [];
 const BRIDGE_CODE_CAPACITY = 16384;
@@ -295,17 +293,16 @@ function executeBridgeNow(current, stateAddress, code, outputCapacity) {
 }
 
 function ensureUnityFrameHook() {
-  if (!Java.available) {
-    throw new Error("Android Java runtime is unavailable");
+  if (unityFrameHook !== null) {
+    return;
   }
-  Java.performNow(() => {
-    if (unityFrameHook !== null) {
-      return;
-    }
-    const UnityPlayer = Java.use("com.unity3d.player.UnityPlayer");
-    const executeJobs = UnityPlayer.executeGLThreadJobs.overload();
-    executeJobs.implementation = function () {
-      executeJobs.call(this);
+  const egl = Process.findModuleByName("libEGL.so");
+  if (egl === null) {
+    throw new Error("libEGL.so is unavailable");
+  }
+  const swapBuffers = egl.getExportByName("eglSwapBuffers");
+  unityFrameHook = Interceptor.attach(swapBuffers, {
+    onEnter() {
       const job = unityJob;
       if (job === null) {
         return;
@@ -316,8 +313,7 @@ function ensureUnityFrameHook() {
       } catch (error) {
         job.reject(error);
       }
-    };
-    unityFrameHook = executeJobs;
+    },
   });
 }
 

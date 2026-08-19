@@ -214,8 +214,10 @@ class FridaDriverTests(unittest.TestCase):
 
     def test_agent_distinguishes_native_sentinels_from_short_lua_errors(self) -> None:
         source = load_agent_source()
-        self.assertIn("executeGLThreadJobs", source)
+        self.assertIn("eglSwapBuffers", source)
         self.assertIn("unity-frame-hook", source)
+        self.assertNotIn("frida-java-bridge", source)
+        self.assertNotIn("Java.performNow", source)
         self.assertNotIn("Java.registerClass", source)
         self.assertIn("output.writeU8(0);", source)
         self.assertIn("nativeBridgeError(result, output)", source)
