@@ -63,6 +63,7 @@ class IntelItem:
     monster_id: int
     level: int
     stamina_cost: int
+    recommended_power: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +71,7 @@ class IntelSnapshot:
     role: str
     kingdom: int
     items: tuple[IntelItem, ...]
+    current_stamina: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +121,78 @@ class MarchReceipt:
     quality_id: int
     target: IntelItem
     request_dispatched: bool
+
+
+@dataclass(frozen=True, slots=True)
+class MarchPrepareReceipt:
+    ready_to_commit: bool
+    current_stamina: int
+    required_stamina: int
+    base_stamina: int
+    blocked_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MarchCommitReceipt:
+    request_dispatched: bool
+    current_stamina: int
+    required_stamina: int
+    base_stamina: int
+    blocked_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WorldMonsterSearchReceipt:
+    role: str
+    kingdom: int
+    level: int
+    ready: bool
+    world_x: int | None
+    world_y: int | None
+    monster_id: int | None
+    recommended_power: int | None
+    current_stamina: int
+
+
+@dataclass(frozen=True, slots=True)
+class WorldMonsterHuntReceipt:
+    role: str
+    kingdom: int
+    level: int
+    monster_id: int
+    world_x: int
+    world_y: int
+    request_dispatched: bool
+    current_stamina: int
+    required_stamina: int
+    base_stamina: int
+    blocked_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WorldMonsterMarchReceipt:
+    role: str
+    kingdom: int
+    level: int
+    monster_id: int
+    world_x: int
+    world_y: int
+    march_id: int | None
+    current_stamina: int
+
+
+@dataclass(frozen=True, slots=True)
+class WorldMonsterMarchStatus:
+    march_id: int
+    state: str
+
+
+@dataclass(frozen=True, slots=True)
+class WorldMonsterStatusSnapshot:
+    role: str
+    kingdom: int
+    current_stamina: int
+    statuses: tuple[WorldMonsterMarchStatus, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +291,39 @@ def normalize_target_ids(target_ids: Sequence[int]) -> tuple[int, ...]:
         raise BusinessError("at least one intelligence target id is required")
     if len(result) > 128:
         raise BusinessError("cannot track more than 128 intelligence targets")
+    return tuple(result)
+
+
+def normalize_world_monster_level(level: int) -> int:
+    if isinstance(level, bool) or not isinstance(level, int) or not 1 <= level <= 20:
+        raise BusinessError("world monster level must be between 1 and 20")
+    return level
+
+
+def normalize_world_monster_count(count: int) -> int:
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 4:
+        raise BusinessError("world monster hunt count must be between 1 and 4")
+    return count
+
+
+def normalize_world_monster_march_ids(march_ids: Sequence[int]) -> tuple[int, ...]:
+    if isinstance(march_ids, (str, bytes)):
+        raise BusinessError("world monster march ids must be an array")
+    result: list[int] = []
+    seen: set[int] = set()
+    for index, march_id in enumerate(march_ids):
+        if isinstance(march_id, bool) or not isinstance(march_id, int) or march_id <= 0:
+            raise BusinessError(
+                f"world monster march ids[{index}] must be a positive integer"
+            )
+        if march_id in seen:
+            raise BusinessError(f"world monster march id {march_id} is duplicated")
+        seen.add(march_id)
+        result.append(march_id)
+    if not result:
+        raise BusinessError("at least one world monster march id is required")
+    if len(result) > 16:
+        raise BusinessError("cannot track more than 16 world monster marches")
     return tuple(result)
 
 
@@ -335,6 +442,18 @@ local function collect_monster_intel()
                 fail("quest config is unavailable")
             end
             local monster_id = integer(config.condition, "monster id", false)
+            if type(GConfig) ~= "table" or type(GConfig.world_map_monster) ~= "table" then
+                fail("world monster config is unavailable")
+            end
+            local monster_config = GConfig.world_map_monster[monster_id]
+            if type(monster_config) ~= "table" then
+                fail("selected monster config is unavailable")
+            end
+            local recommended_power = integer(
+                monster_config.recommendPower,
+                "recommended power",
+                false
+            )
             local stamina_cost = integer(
                 config.stamtina_expend,
                 "stamina cost",
@@ -357,6 +476,7 @@ local function collect_monster_intel()
                 monster_id = monster_id,
                 level = quest_integer(quest, "GetLevel", "monster level", false),
                 stamina_cost = stamina_cost,
+                recommended_power = recommended_power,
                 object = quest,
             }
             items[#items + 1] = item
@@ -656,10 +776,27 @@ end
 _INSPECT_INTEL_BODY = r'''
 local role_hex, kingdom = checked_identity()
 local items = collect_monster_intel()
+if type(GCtrl) ~= "table"
+    or type(GCtrl.RecoverCtrl) ~= "table"
+    or type(GCtrl.RecoverCtrl.GetLeftCount) ~= "function"
+    or type(ResDefine) ~= "table"
+    or ResDefine.COMMANDER_STAMINA == nil then
+    fail("commander stamina API is unavailable")
+end
+local stamina_ok, current_stamina = pcall(
+    GCtrl.RecoverCtrl.GetLeftCount,
+    GCtrl.RecoverCtrl,
+    ResDefine.COMMANDER_STAMINA
+)
+if not stamina_ok then
+    fail("commander stamina lookup failed")
+end
+current_stamina = integer(current_stamina, "current commander stamina", true)
 local lines = {
     "MUMU_AUTOTASK\t1\tINTEL",
     "ROLE\t" .. role_hex,
     "KINGDOM\t" .. tostring(kingdom),
+    "STAMINA\t" .. tostring(current_stamina),
 }
 for _, item in ipairs(items) do
     lines[#lines + 1] = table.concat({
@@ -675,6 +812,7 @@ for _, item in ipairs(items) do
         tostring(item.monster_id),
         tostring(item.level),
         tostring(item.stamina_cost),
+        tostring(item.recommended_power),
     }, "\t")
 end
 lines[#lines + 1] = "END\t" .. tostring(#items)
@@ -1539,6 +1677,42 @@ end
 if GHelper.FormationHelper.IsHaveCaptain(view.showHeroList) ~= true then
     fail("average formation selected no captain")
 end
+local current_stamina = integer(
+    call(
+        GCtrl.RecoverCtrl,
+        "GetLeftCount",
+        "current commander stamina",
+        ResDefine.COMMANDER_STAMINA
+    ),
+    "current commander stamina",
+    true
+)
+local required_stamina = integer(
+    call(
+        view,
+        "GetCostStaminaEduce",
+        "actual march stamina cost",
+        TARGET_STAMINA_COST,
+        view.showHeroList
+    ),
+    "actual march stamina cost",
+    true
+)
+if current_stamina < required_stamina then
+    return table.concat({
+        "MUMU_AUTOTASK\t1\tCOMMIT",
+        "ROLE\t" .. role_hex,
+        "KINGDOM\t" .. tostring(kingdom),
+        "TARGET\t" .. tostring(TARGET_RUNTIME_ID),
+        "AVERAGE\t1",
+        "STAMINA\t" .. tostring(current_stamina)
+            .. "\t" .. tostring(required_stamina)
+            .. "\t" .. tostring(TARGET_STAMINA_COST),
+        "GO\t0",
+        "REASON\tINSUFFICIENT_STAMINA",
+        "END\t1",
+    }, "\n")
+end
 _, config = require_target(
     TARGET_RUNTIME_ID,
     TARGET_QUEST_ID,
@@ -1568,7 +1742,11 @@ return table.concat({
     "KINGDOM\t" .. tostring(kingdom),
     "TARGET\t" .. tostring(TARGET_RUNTIME_ID),
     "AVERAGE\t1",
+    "STAMINA\t" .. tostring(current_stamina)
+        .. "\t" .. tostring(required_stamina)
+        .. "\t" .. tostring(TARGET_STAMINA_COST),
     "GO\t1",
+    "REASON\tNONE",
     "END\t1",
 }, "\n")
 '''
@@ -1710,8 +1888,167 @@ return table.concat(lines, "\n")
 '''
 
 
-_DIRECT_COMMIT_MARCH_BODY = r'''
+_DIRECT_MARCH_COMMON = r'''
+local ALLOWED_ROLES = { __ROLE_TABLE__ }
+
+local function fail(message)
+    error("mumu-autotask: " .. message, 0)
+end
+
+local function integer(value, label, allow_zero)
+    if type(value) ~= "number" or value ~= math.floor(value) then
+        fail(label .. " is not an integer")
+    end
+    if value < 0 or (not allow_zero and value == 0) then
+        fail(label .. " is outside the accepted range")
+    end
+    return value
+end
+
+local function call(object, method_name, label)
+    if type(object) ~= "table" or type(object[method_name]) ~= "function" then
+        fail(label .. " method is unavailable")
+    end
+    local ok, value = pcall(object[method_name], object)
+    if not ok then
+        fail(label .. " method failed")
+    end
+    return value
+end
+
+local function hex(value)
+    if type(value) ~= "string" or value == "" then
+        fail("active role is unavailable")
+    end
+    return (value:gsub(".", function(character)
+        return string.format("%02x", string.byte(character))
+    end))
+end
+
+local function checked_identity()
+    if type(GCtrl) ~= "table" or type(GCtrl.PlayerCtrl) ~= "table" then
+        fail("PlayerCtrl is unavailable")
+    end
+    local role_hex = hex(call(GCtrl.PlayerCtrl, "GetPlayerName", "player name"))
+    if next(ALLOWED_ROLES) ~= nil and ALLOWED_ROLES[role_hex] ~= true then
+        fail("active role is not in this device whitelist")
+    end
+    local kid = integer(
+        call(GCtrl.PlayerCtrl, "GetPlayerKid", "player kingdom"),
+        "player kingdom",
+        false
+    )
+    local server_id = integer(
+        call(GCtrl.PlayerCtrl, "GetPlayerServerId", "player server"),
+        "player server",
+        false
+    )
+    if kid ~= server_id then
+        fail("active player kingdom/server disagree")
+    end
+    return role_hex, server_id
+end
+
+local function quest_integer(quest, method_name, label, allow_zero)
+    return integer(call(quest, method_name, label), label, allow_zero)
+end
+
+local function require_target(
+    runtime_id,
+    quest_id,
+    quality_id,
+    world_x,
+    world_y,
+    expires_at,
+    monster_id,
+    level,
+    stamina_cost
+)
+    if type(GCtrl) ~= "table" or type(GCtrl.RadarCtrl) ~= "table" then
+        fail("RadarCtrl is unavailable")
+    end
+    local quest_map = call(GCtrl.RadarCtrl, "GetQuestDataMap", "quest map")
+    local quest = quest_map[runtime_id]
+    if type(quest) ~= "table" then
+        fail("selected intelligence no longer exists")
+    end
+    if quest_integer(quest, "GetId", "quest runtime id", false) ~= runtime_id
+        or integer(quest._questId, "quest id", false) ~= quest_id
+        or quest_integer(quest, "GetQuestType", "quest type", false) ~= 1
+        or quest_integer(quest, "GetQuality", "quality", false) ~= quality_id
+        or integer(quest._worldX, "world x", true) ~= world_x
+        or integer(quest._worldY, "world y", true) ~= world_y
+        or integer(quest._expireTime, "expire time", false) ~= expires_at then
+        fail("selected intelligence identity changed")
+    end
+    if integer(quest._status, "quest status", true) ~= 1 then
+        fail("selected intelligence is not available")
+    end
+    if call(quest, "IsShowInWorld", "world visibility") ~= true then
+        fail("selected intelligence is no longer shown in world")
+    end
+    if quest_integer(quest, "GetValidTime", "valid time", true) <= 30 then
+        fail("selected intelligence is expired or too close to expiry")
+    end
+    if quest_integer(quest, "GetLevel", "monster level", false) ~= level then
+        fail("selected intelligence monster level changed")
+    end
+    local config = call(quest, "GetQuestConfig", "quest config")
+    if type(config) ~= "table" then
+        fail("quest config is unavailable")
+    end
+    if integer(config.condition, "monster id", false) ~= monster_id then
+        fail("selected intelligence monster id changed")
+    end
+    if integer(config.stamtina_expend, "stamina cost", false) ~= stamina_cost then
+        fail("selected intelligence stamina cost changed")
+    end
+    return quest, config
+end
+
+local function capture_self_march_ids(server_id)
+    if type(GCtrl) ~= "table"
+        or type(GCtrl.WorldMarchCtrl) ~= "table"
+        or type(GCtrl.WorldMarchCtrl.GetSelfMarchMap) ~= "function" then
+        fail("self march map is unavailable")
+    end
+    local ok, march_map = pcall(
+        GCtrl.WorldMarchCtrl.GetSelfMarchMap,
+        GCtrl.WorldMarchCtrl,
+        server_id
+    )
+    if not ok or type(march_map) ~= "table" then
+        fail("self march map lookup failed")
+    end
+    local ids = {}
+    for key, march in pairs(march_map) do
+        local value = nil
+        if type(march) == "table" or type(march) == "userdata" then
+            local method = march.GetId
+            if type(method) == "function" then
+                local id_ok, id = pcall(method, march)
+                if id_ok then
+                    value = id
+                end
+            end
+        end
+        if type(value) ~= "number" then
+            value = key
+        end
+        if type(value) == "number"
+            and value == math.floor(value)
+            and value > 0 then
+            ids[value] = true
+        end
+    end
+    _G.__MUMU_AUTOTASK_SELF_MARCH_IDS = ids
+end
+'''
+
+
+_PREPARE_DIRECT_MARCH_BODY = r'''
 local role_hex, kingdom = checked_identity()
+_G.__MUMU_AUTOTASK_DIRECT_MARCH = nil
 local quest, config = require_target(
     TARGET_RUNTIME_ID,
     TARGET_QUEST_ID,
@@ -1725,7 +2062,7 @@ local quest, config = require_target(
 )
 local initial_status = integer(quest._status, "initial quest status", false)
 if initial_status ~= 1 then
-    fail("selected intelligence was not available before direct march")
+    fail("selected intelligence was not available before march preparation")
 end
 local march_map_type = GDefine.WorldMarchDefine.MARCH_MAP_TYPE.NORMAL
 local march_type = WorldMapDefine.march_type.transaction_slg
@@ -1737,10 +2074,6 @@ if not GHelper.WorldMarchHelper.CheckHasIdleMarch(
     true
 ) then
     fail("no idle march queue is available")
-end
-local world_ok, quest_x, quest_y = pcall(quest.GetWorldPos, quest)
-if not world_ok or quest_x ~= TARGET_WORLD_X or quest_y ~= TARGET_WORLD_Y then
-    fail("selected intelligence world position changed")
 end
 local extra = { event_id = TARGET_RUNTIME_ID }
 local formation_march_type = GHelper.WorldMarchHelper.GetAttackMarchType(
@@ -1756,7 +2089,7 @@ local hero_list = GHelper.ExpeditionHelper.GetRecommendedHeroList(
 )
 if type(hero_list) ~= "table"
     or GHelper.FormationHelper.IsHaveCaptain(hero_list) ~= true then
-    fail("direct average formation selected no captain")
+    fail("average formation selected no captain")
 end
 local fight_type = GDefine.HeroDefine.HeroAttrType.SLG
 local formation_limit = GHelper.ExpeditionHelper.GetTroopLimit(
@@ -1786,7 +2119,7 @@ local soldier_list = GHelper.ExpeditionHelper.GetSoldierInfoByMarchType(
     nil
 )
 if type(soldier_list) ~= "table" then
-    fail("direct soldier list is unavailable")
+    fail("soldier list is unavailable")
 end
 local averaged_soldiers = GHelper.FormationHelper.GetAverageSoldierList(
     march_map_type,
@@ -1796,7 +2129,7 @@ local averaged_soldiers = GHelper.FormationHelper.GetAverageSoldierList(
     extra
 )
 if type(averaged_soldiers) ~= "table" then
-    fail("direct average soldier list is unavailable")
+    fail("average soldier list is unavailable")
 end
 local selected = 0
 for _, soldier in ipairs(averaged_soldiers) do
@@ -1805,24 +2138,158 @@ for _, soldier in ipairs(averaged_soldiers) do
     end
 end
 if selected <= 0 then
-    fail("direct average formation selected no soldiers")
+    fail("average formation selected no soldiers")
 end
 local hero_id, soldier = GHelper.FormationHelper.DealWithExpeditionInfo(
     hero_list,
     averaged_soldiers
 )
 if type(hero_id) ~= "table" or type(soldier) ~= "table" then
-    fail("direct formation payload is unavailable")
+    fail("formation payload is unavailable")
+end
+local current_stamina = integer(
+    GCtrl.RecoverCtrl:GetLeftCount(ResDefine.COMMANDER_STAMINA),
+    "current stamina",
+    true
+)
+local stamina_reduction = GHelper.AttributeHelper.GetCostStaminaEduce(hero_list)
+if type(stamina_reduction) ~= "number"
+    or stamina_reduction < 0
+    or stamina_reduction > 1 then
+    fail("stamina reduction is invalid")
+end
+local required_stamina = integer(
+    math.ceil(TARGET_STAMINA_COST * (1 - stamina_reduction)),
+    "required stamina",
+    true
+)
+local ready = current_stamina >= required_stamina
+local reason = ready and "NONE" or "INSUFFICIENT_STAMINA"
+if ready then
+    _G.__MUMU_AUTOTASK_DIRECT_MARCH = {
+        runtime_id = TARGET_RUNTIME_ID,
+        quest_id = TARGET_QUEST_ID,
+        quality_id = TARGET_QUALITY_ID,
+        world_x = TARGET_WORLD_X,
+        world_y = TARGET_WORLD_Y,
+        expires_at = TARGET_EXPIRES_AT,
+        monster_id = TARGET_MONSTER_ID,
+        level = TARGET_LEVEL,
+        base_stamina = TARGET_STAMINA_COST,
+        required_stamina = required_stamina,
+        hero_id = hero_id,
+        soldier = soldier,
+        extra = extra,
+        march_map_type = march_map_type,
+        march_type = march_type,
+        map_object_type = map_object_type,
+        initial_status = initial_status,
+    }
+end
+return table.concat({
+    "MUMU_AUTOTASK\t1\tPREPARE",
+    "ROLE\t" .. role_hex,
+    "KINGDOM\t" .. tostring(kingdom),
+    "TARGET\t" .. tostring(TARGET_RUNTIME_ID),
+    "AVERAGE\t1",
+    "STAMINA\t" .. tostring(current_stamina)
+        .. "\t" .. tostring(required_stamina)
+        .. "\t" .. tostring(TARGET_STAMINA_COST),
+    "READY\t" .. (ready and "1" or "0"),
+    "REASON\t" .. reason,
+    "END\t1",
+}, "\n")
+'''
+
+
+_COMMIT_PREPARED_MARCH_BODY = r'''
+local role_hex, kingdom = checked_identity()
+local cache = _G.__MUMU_AUTOTASK_DIRECT_MARCH
+if type(cache) ~= "table" then
+    fail("prepared march payload is unavailable")
+end
+if cache.runtime_id ~= TARGET_RUNTIME_ID
+    or cache.quest_id ~= TARGET_QUEST_ID
+    or cache.quality_id ~= TARGET_QUALITY_ID
+    or cache.world_x ~= TARGET_WORLD_X
+    or cache.world_y ~= TARGET_WORLD_Y
+    or cache.expires_at ~= TARGET_EXPIRES_AT
+    or cache.monster_id ~= TARGET_MONSTER_ID
+    or cache.level ~= TARGET_LEVEL
+    or cache.base_stamina ~= TARGET_STAMINA_COST then
+    _G.__MUMU_AUTOTASK_DIRECT_MARCH = nil
+    fail("prepared march payload does not match the selected intelligence")
+end
+if type(cache.hero_id) ~= "table"
+    or type(cache.soldier) ~= "table"
+    or type(cache.extra) ~= "table" then
+    _G.__MUMU_AUTOTASK_DIRECT_MARCH = nil
+    fail("prepared formation payload is invalid")
+end
+local quest = require_target(
+    TARGET_RUNTIME_ID,
+    TARGET_QUEST_ID,
+    TARGET_QUALITY_ID,
+    TARGET_WORLD_X,
+    TARGET_WORLD_Y,
+    TARGET_EXPIRES_AT,
+    TARGET_MONSTER_ID,
+    TARGET_LEVEL,
+    TARGET_STAMINA_COST
+)
+local initial_status = integer(quest._status, "initial quest status", false)
+if initial_status ~= cache.initial_status or initial_status ~= 1 then
+    _G.__MUMU_AUTOTASK_DIRECT_MARCH = nil
+    fail("selected intelligence status changed after march preparation")
+end
+local required_stamina = integer(
+    cache.required_stamina,
+    "required stamina",
+    true
+)
+local current_stamina = integer(
+    GCtrl.RecoverCtrl:GetLeftCount(ResDefine.COMMANDER_STAMINA),
+    "current stamina",
+    true
+)
+local function commit_result(go, reason)
+    return table.concat({
+        "MUMU_AUTOTASK\t1\tCOMMIT",
+        "ROLE\t" .. role_hex,
+        "KINGDOM\t" .. tostring(kingdom),
+        "TARGET\t" .. tostring(TARGET_RUNTIME_ID),
+        "AVERAGE\t1",
+        "STAMINA\t" .. tostring(current_stamina)
+            .. "\t" .. tostring(required_stamina)
+            .. "\t" .. tostring(TARGET_STAMINA_COST),
+        "GO\t" .. go,
+        "REASON\t" .. reason,
+        "END\t1",
+    }, "\n")
+end
+if current_stamina < required_stamina then
+    _G.__MUMU_AUTOTASK_DIRECT_MARCH = nil
+    return commit_result("0", "INSUFFICIENT_STAMINA")
+end
+if not GHelper.WorldMarchHelper.CheckHasIdleMarch(
+    cache.march_map_type,
+    cache.march_type,
+    nil,
+    true
+) then
+    _G.__MUMU_AUTOTASK_DIRECT_MARCH = nil
+    fail("no idle march queue is available")
 end
 local blocked_ok, blocked = pcall(
     GHelper.ExpeditionHelper.IsBeforehandMarch,
-    march_map_type,
-    march_type,
-    map_object_type,
-    extra,
+    cache.march_map_type,
+    cache.march_type,
+    cache.map_object_type,
+    cache.extra,
     true
 )
 if blocked_ok and blocked then
+    _G.__MUMU_AUTOTASK_DIRECT_MARCH = nil
     fail("selected intelligence is already marching")
 end
 capture_self_march_ids(kingdom)
@@ -1830,28 +2297,21 @@ _G.__MUMU_AUTOTASK_INITIAL_STATUS = initial_status
 _G.__MUMU_AUTOTASK_GO_INVOKED = true
 local request_ok = pcall(
     GHelper.WorldMarchHelper.RequestMarchStartOff,
-    march_map_type,
-    march_type,
+    cache.march_map_type,
+    cache.march_type,
     TARGET_WORLD_X,
     TARGET_WORLD_Y,
     {
-        hero_id = hero_id,
-        soldier = soldier,
+        hero_id = cache.hero_id,
+        soldier = cache.soldier,
     },
-    extra
+    cache.extra
 )
+_G.__MUMU_AUTOTASK_DIRECT_MARCH = nil
 if not request_ok then
     fail("direct march request failed")
 end
-return table.concat({
-    "MUMU_AUTOTASK\t1\tCOMMIT",
-    "ROLE\t" .. role_hex,
-    "KINGDOM\t" .. tostring(kingdom),
-    "TARGET\t" .. tostring(TARGET_RUNTIME_ID),
-    "AVERAGE\t1",
-    "GO\t1",
-    "END\t1",
-}, "\n")
+return commit_result("1", "NONE")
 '''
 
 
@@ -2206,6 +2666,12 @@ wrap(GHelper and GHelper.WorldMarchHelper, "RequestMarchStartOff",
     "WorldMarchHelper.RequestMarchStartOff")
 wrap(GCtrl and GCtrl.WorldMarchCtrl, "RequestWorldMarchStartOff",
     "WorldMarchCtrl.RequestWorldMarchStartOff")
+wrap(GCtrl and GCtrl.WorldPlayerCtrl, "ReqWorldMapSearch",
+    "WorldPlayerCtrl.ReqWorldMapSearch")
+wrap(GCtrl and GCtrl.WorldPlayerCtrl, "OnReqWorldSearch",
+    "WorldPlayerCtrl.OnReqWorldSearch")
+wrap(GHelper and GHelper.WorldHelper, "SearchToMapObj",
+    "WorldHelper.SearchToMapObj")
 hook.installed = true
 
 local lines = {
@@ -2339,12 +2805,503 @@ def build_inspect_formation_lua(roles: Sequence[str], target: IntelItem) -> str:
     return _target_lua(roles, target, _INSPECT_FORMATION_BODY)
 
 
+def _direct_march_target_lua(
+    roles: Sequence[str],
+    target: IntelItem,
+    body: str,
+) -> str:
+    common = _DIRECT_MARCH_COMMON.replace("__ROLE_TABLE__", _lua_role_table(roles))
+    return _finalize_lua(textwrap.dedent(common + _target_constants(target) + body))
+
+
+def build_prepare_direct_march_lua(
+    roles: Sequence[str],
+    target: IntelItem,
+) -> str:
+    return _direct_march_target_lua(roles, target, _PREPARE_DIRECT_MARCH_BODY)
+
+
+def build_commit_prepared_march_lua(
+    roles: Sequence[str],
+    target: IntelItem,
+) -> str:
+    return _direct_march_target_lua(roles, target, _COMMIT_PREPARED_MARCH_BODY)
+
+
 def build_direct_commit_march_lua(roles: Sequence[str], target: IntelItem) -> str:
-    return _target_lua(roles, target, _DIRECT_COMMIT_MARCH_BODY)
+    """Build the commit half of the split direct-march workflow.
+
+    Callers must execute :func:`build_prepare_direct_march_lua` first on the
+    same Lua state. The legacy name remains available for external callers.
+    """
+    return build_commit_prepared_march_lua(roles, target)
 
 
 def build_verify_march_lua(roles: Sequence[str], target: IntelItem) -> str:
     return _target_lua(roles, target, _VERIFY_MARCH_BODY)
+
+
+_WORLD_MONSTER_COMMON = r'''
+local function fail(message)
+    error("mumu-autotask: " .. message, 0)
+end
+
+local function integer(value, label, allow_zero)
+    if type(value) ~= "number" or value ~= math.floor(value)
+        or value < 0 or (not allow_zero and value == 0) then
+        fail(label .. " is not a valid integer")
+    end
+    return value
+end
+
+local function call(object, method_name, label, ...)
+    if type(object) ~= "table" or type(object[method_name]) ~= "function" then
+        fail(label .. " method is unavailable")
+    end
+    local ok, first, second = pcall(object[method_name], object, ...)
+    if not ok then
+        fail(label .. " method failed")
+    end
+    return first, second
+end
+
+local function hex(value)
+    if type(value) ~= "string" or value == "" then
+        fail("active role is unavailable")
+    end
+    return (value:gsub(".", function(character)
+        return string.format("%02x", string.byte(character))
+    end))
+end
+
+local function identity()
+    local role = call(GCtrl.PlayerCtrl, "GetPlayerName", "player name")
+    local kid = integer(call(GCtrl.PlayerCtrl, "GetPlayerKid", "player kingdom"),
+        "player kingdom", false)
+    return hex(role), kid
+end
+
+local function current_stamina()
+    return integer(call(GCtrl.RecoverCtrl, "GetLeftCount", "commander stamina",
+        ResDefine.COMMANDER_STAMINA), "commander stamina", true)
+end
+
+local function self_marches(kingdom)
+    local marches = call(GCtrl.WorldMarchCtrl, "GetSelfMarchMap",
+        "self march map", kingdom)
+    if type(marches) ~= "table" then
+        fail("self march map is unavailable")
+    end
+    return marches
+end
+
+local function march_call(march, method_name)
+    if (type(march) ~= "table" and type(march) ~= "userdata")
+        or type(march[method_name]) ~= "function" then
+        return nil
+    end
+    local ok, first, second = pcall(march[method_name], march)
+    if not ok then return nil end
+    return first, second
+end
+
+local function march_id(march, fallback)
+    local value = march_call(march, "GetId")
+    if type(value) == "number" and value == math.floor(value) and value > 0 then
+        return value
+    end
+    if type(fallback) == "number" and fallback == math.floor(fallback)
+        and fallback > 0 then
+        return fallback
+    end
+    return nil
+end
+'''
+
+
+_WORLD_MONSTER_SEARCH_BODY = r'''
+local LEVEL = __LEVEL__
+local role_hex, kingdom = identity()
+local max_level = integer(call(GCtrl.WorldPlayerCtrl,
+    "GetPlayerCanKillMonsterMaxLv", "maximum monster level"),
+    "maximum monster level", true)
+if LEVEL > max_level then
+    fail("requested monster level exceeds the player's attack limit")
+end
+local previous = _G.__MUMU_AUTOTASK_WORLD_MONSTER_SEARCH
+if type(previous) == "table" then
+    pcall(GameMsg.RemoveMessageByTargetAndMsgId, previous,
+        GameMsgId.REQ_WORLD_SEARCH_BACK)
+end
+local view_id = 986081900 + LEVEL
+local state = { level = LEVEL, view_id = view_id }
+state.callback = function(_, point, response_view_id)
+    if response_view_id == view_id and type(point) == "table" then
+        state.world_x = point.x
+        state.world_y = point.y
+    end
+end
+GameMsg.AddMessage(state, GameMsgId.REQ_WORLD_SEARCH_BACK, state.callback)
+_G.__MUMU_AUTOTASK_WORLD_MONSTER_SEARCH = state
+local ok = pcall(GCtrl.WorldPlayerCtrl.ReqWorldMapSearch,
+    GCtrl.WorldPlayerCtrl,
+    WorldMapDefine.mapobj_type.map_monster,
+    LEVEL, LEVEL, nil, nil, false, view_id)
+if not ok then
+    pcall(GameMsg.RemoveMessageByTargetAndMsgId, state,
+        GameMsgId.REQ_WORLD_SEARCH_BACK)
+    _G.__MUMU_AUTOTASK_WORLD_MONSTER_SEARCH = nil
+    fail("world monster search request failed")
+end
+return table.concat({
+    "MUMU_AUTOTASK\t1\tWORLD_MONSTER_SEARCH_SENT",
+    "ROLE\t" .. role_hex,
+    "KINGDOM\t" .. tostring(kingdom),
+    "LEVEL\t" .. tostring(LEVEL),
+    "SENT\t1",
+    "END\t1",
+}, "\n")
+'''
+
+
+_WORLD_MONSTER_SEARCH_RESULT_BODY = r'''
+local LEVEL = __LEVEL__
+local role_hex, kingdom = identity()
+local state = _G.__MUMU_AUTOTASK_WORLD_MONSTER_SEARCH
+if type(state) ~= "table" or state.level ~= LEVEL then
+    fail("matching world monster search state is unavailable")
+end
+local stamina = current_stamina()
+if type(state.world_x) ~= "number" or type(state.world_y) ~= "number" then
+    return table.concat({
+        "MUMU_AUTOTASK\t1\tWORLD_MONSTER_SEARCH",
+        "ROLE\t" .. role_hex,
+        "KINGDOM\t" .. tostring(kingdom),
+        "LEVEL\t" .. tostring(LEVEL),
+        "READY\t0",
+        "POINT\tmissing\tmissing",
+        "MONSTER\tmissing\tmissing",
+        "STAMINA\t" .. tostring(stamina),
+        "END\t1",
+    }, "\n")
+end
+state.world_x = integer(state.world_x, "monster world x", true)
+state.world_y = integer(state.world_y, "monster world y", true)
+local map_data = call(GCtrl.WorldMapCtrl, "GetMapDataDic",
+    "world map data", kingdom)
+if type(map_data) ~= "table" then fail("world map data is unavailable") end
+local map_object = map_data[state.world_x * 10000 + state.world_y]
+if map_object == nil then
+    for _, candidate in pairs(map_data) do
+        if type(candidate) == "table" or type(candidate) == "userdata" then
+            local pos_method = candidate.GetPos
+            if type(pos_method) == "function" then
+                local ok, x, y = pcall(pos_method, candidate)
+                if ok and x == state.world_x and y == state.world_y then
+                    if map_object ~= nil then
+                        fail("multiple world map objects matched the searched position")
+                    end
+                    map_object = candidate
+                end
+            end
+        end
+    end
+end
+if map_object == nil then
+    return table.concat({
+        "MUMU_AUTOTASK\t1\tWORLD_MONSTER_SEARCH",
+        "ROLE\t" .. role_hex,
+        "KINGDOM\t" .. tostring(kingdom),
+        "LEVEL\t" .. tostring(LEVEL),
+        "READY\t0",
+        "POINT\t" .. tostring(state.world_x) .. "\t" .. tostring(state.world_y),
+        "MONSTER\tmissing\tmissing",
+        "STAMINA\t" .. tostring(stamina),
+        "END\t1",
+    }, "\n")
+end
+local object_type = integer(call(map_object, "GetType", "map object type"),
+    "map object type", false)
+local object_level = integer(call(map_object, "GetLevel", "monster level"),
+    "monster level", false)
+local object_x, object_y = call(map_object, "GetPos", "monster position")
+if object_type ~= WorldMapDefine.mapobj_type.map_monster
+    or object_level ~= LEVEL or object_x ~= state.world_x
+    or object_y ~= state.world_y then
+    fail("searched world map object identity does not match the request")
+end
+local monster_id = integer(call(map_object, "GetId", "monster id"),
+    "monster id", false)
+local config = GRead.WorldRead.GetMapMonsterConfig(monster_id)
+if type(config) ~= "table" then fail("monster configuration is unavailable") end
+local recommended_power = integer(config.recommendPower,
+    "recommended power", false)
+local base_stamina = integer(call(map_object, "GetAttackCostEnergy",
+    "monster stamina cost"), "monster stamina cost", false)
+state.monster_id = monster_id
+state.recommended_power = recommended_power
+state.base_stamina = base_stamina
+pcall(GameMsg.RemoveMessageByTargetAndMsgId, state,
+    GameMsgId.REQ_WORLD_SEARCH_BACK)
+return table.concat({
+    "MUMU_AUTOTASK\t1\tWORLD_MONSTER_SEARCH",
+    "ROLE\t" .. role_hex,
+    "KINGDOM\t" .. tostring(kingdom),
+    "LEVEL\t" .. tostring(LEVEL),
+    "READY\t1",
+    "POINT\t" .. tostring(state.world_x) .. "\t" .. tostring(state.world_y),
+    "MONSTER\t" .. tostring(monster_id) .. "\t" .. tostring(recommended_power),
+    "STAMINA\t" .. tostring(stamina),
+    "END\t1",
+}, "\n")
+'''
+
+
+_WORLD_MONSTER_COMMIT_BODY = r'''
+local LEVEL = __LEVEL__
+local role_hex, kingdom = identity()
+local state = _G.__MUMU_AUTOTASK_WORLD_MONSTER_SEARCH
+if type(state) ~= "table" or state.level ~= LEVEL
+    or type(state.world_x) ~= "number" or type(state.world_y) ~= "number"
+    or type(state.monster_id) ~= "number" then
+    fail("prepared world monster search result is unavailable")
+end
+local map_data = call(GCtrl.WorldMapCtrl, "GetMapDataDic",
+    "world map data", kingdom)
+local map_object = type(map_data) == "table"
+    and map_data[state.world_x * 10000 + state.world_y] or nil
+if map_object == nil and type(map_data) == "table" then
+    for _, candidate in pairs(map_data) do
+        if type(candidate) == "table" or type(candidate) == "userdata" then
+            local pos_method = candidate.GetPos
+            if type(pos_method) == "function" then
+                local ok, x, y = pcall(pos_method, candidate)
+                if ok and x == state.world_x and y == state.world_y then
+                    if map_object ~= nil then
+                        fail("multiple world map objects matched the searched position")
+                    end
+                    map_object = candidate
+                end
+            end
+        end
+    end
+end
+if map_object ~= nil and (
+    call(map_object, "GetId", "monster id") ~= state.monster_id
+    or call(map_object, "GetLevel", "monster level") ~= LEVEL
+) then
+    fail("searched world monster is no longer available")
+end
+local march_map_type = GDefine.WorldMarchDefine.MARCH_MAP_TYPE.NORMAL
+local march_type = WorldMapDefine.march_type.atk_monster
+local map_object_type = WorldMapDefine.mapobj_type.map_monster
+if not GHelper.WorldMarchHelper.CheckHasIdleMarch(
+    march_map_type, march_type, nil, true) then
+    fail("no idle march queue is available")
+end
+local extra = { monsterid = state.monster_id }
+local hero_list = GHelper.ExpeditionHelper.GetRecommendedHeroList(
+    false, false, march_type, state.monster_id, march_map_type, extra)
+if type(hero_list) ~= "table"
+    or GHelper.FormationHelper.IsHaveCaptain(hero_list) ~= true then
+    fail("average formation selected no captain")
+end
+local formation_limit = integer(GHelper.ExpeditionHelper.GetTroopLimit(
+    march_map_type, hero_list, GDefine.HeroDefine.HeroAttrType.SLG, extra),
+    "formation limit", false)
+local yields = GHelper.ExpeditionHelper.GetResourceYields(march_type, nil)
+local open_params = {
+    marchMapType = march_map_type,
+    marchType = march_type,
+    formationNumLimt = formation_limit,
+    targetId = state.monster_id,
+    yields = yields,
+    isAttack = true,
+}
+local soldier_list = GHelper.ExpeditionHelper.GetSoldierInfoByMarchType(
+    march_type, 0, false, open_params, nil)
+if type(soldier_list) ~= "table" then
+    fail("soldier list is unavailable")
+end
+local averaged = GHelper.FormationHelper.GetAverageSoldierList(
+    march_map_type, soldier_list, formation_limit, false, extra)
+if type(averaged) ~= "table" then
+    fail("average soldier list is unavailable")
+end
+local selected = 0
+for _, item in ipairs(averaged) do
+    if type(item) == "table" and type(item.selectNum) == "number" then
+        selected = selected + item.selectNum
+    end
+end
+if selected <= 0 then fail("average formation selected no soldiers") end
+local hero_id, soldier = GHelper.FormationHelper.DealWithExpeditionInfo(
+    hero_list, averaged)
+if type(hero_id) ~= "table" or type(soldier) ~= "table" then
+    fail("formation payload is unavailable")
+end
+local base_stamina = integer(state.base_stamina,
+    "base stamina", false)
+local reduction = GHelper.AttributeHelper.GetCostStaminaEduce(hero_list)
+if type(reduction) ~= "number" or reduction < 0 or reduction > 1 then
+    fail("stamina reduction is invalid")
+end
+local required_stamina = integer(math.ceil(base_stamina * (1 - reduction)),
+    "required stamina", true)
+local stamina = current_stamina()
+local function result(sent, reason)
+    return table.concat({
+        "MUMU_AUTOTASK\t1\tWORLD_MONSTER_COMMIT",
+        "ROLE\t" .. role_hex,
+        "KINGDOM\t" .. tostring(kingdom),
+        "LEVEL\t" .. tostring(LEVEL),
+        "MONSTER\t" .. tostring(state.monster_id),
+        "POINT\t" .. tostring(state.world_x) .. "\t" .. tostring(state.world_y),
+        "AVERAGE\t1",
+        "STAMINA\t" .. tostring(stamina) .. "\t"
+            .. tostring(required_stamina) .. "\t" .. tostring(base_stamina),
+        "SENT\t" .. sent,
+        "REASON\t" .. reason,
+        "END\t1",
+    }, "\n")
+end
+if stamina < required_stamina then
+    return result("0", "INSUFFICIENT_STAMINA")
+end
+local before_ids = {}
+for key, march in pairs(self_marches(kingdom)) do
+    local id = march_id(march, key)
+    if id ~= nil then before_ids[id] = true end
+end
+state.before_ids = before_ids
+state.requested = true
+local ok = pcall(GHelper.WorldMarchHelper.RequestMarchStartOff,
+    march_map_type, march_type, state.world_x, state.world_y,
+    { hero_id = hero_id, soldier = soldier }, extra)
+if not ok then
+    state.requested = false
+    fail("world monster march request failed")
+end
+return result("1", "NONE")
+'''
+
+
+_WORLD_MONSTER_VERIFY_BODY = r'''
+local LEVEL = __LEVEL__
+local role_hex, kingdom = identity()
+local state = _G.__MUMU_AUTOTASK_WORLD_MONSTER_SEARCH
+if type(state) ~= "table" or state.level ~= LEVEL or state.requested ~= true
+    or type(state.before_ids) ~= "table" then
+    fail("world monster march verification state is unavailable")
+end
+local found_id = nil
+for key, march in pairs(self_marches(kingdom)) do
+    local id = march_id(march, key)
+    if id ~= nil and state.before_ids[id] ~= true then
+        local target = march_call(march, "GetTargetMapObjectId")
+        local data = march_call(march, "GetData")
+        if target == nil and type(data) == "table" then
+            local attack = data.atk_monster or data.transaction_slg
+            if type(attack) == "table" then target = attack.monster_id end
+        end
+        local x, y = march_call(march, "GetEndPos")
+        if target == state.monster_id and x == state.world_x and y == state.world_y then
+            if found_id ~= nil then
+                fail("multiple new marches matched the searched monster")
+            end
+            found_id = id
+        end
+    end
+end
+if found_id ~= nil then
+    local known = _G.__MUMU_AUTOTASK_WORLD_MONSTER_MARCHES
+    if type(known) ~= "table" then known = {} end
+    known[found_id] = {
+        level = LEVEL,
+        monster_id = state.monster_id,
+        world_x = state.world_x,
+        world_y = state.world_y,
+    }
+    _G.__MUMU_AUTOTASK_WORLD_MONSTER_MARCHES = known
+end
+return table.concat({
+    "MUMU_AUTOTASK\t1\tWORLD_MONSTER_VERIFY",
+    "ROLE\t" .. role_hex,
+    "KINGDOM\t" .. tostring(kingdom),
+    "LEVEL\t" .. tostring(LEVEL),
+    "MONSTER\t" .. tostring(state.monster_id),
+    "POINT\t" .. tostring(state.world_x) .. "\t" .. tostring(state.world_y),
+    "MARCH\t" .. (found_id ~= nil and tostring(found_id) or "missing"),
+    "STAMINA\t" .. tostring(current_stamina()),
+    "END\t1",
+}, "\n")
+'''
+
+
+_WORLD_MONSTER_STATUS_BODY = r'''
+local MARCH_IDS = { __MARCH_IDS__ }
+local role_hex, kingdom = identity()
+local active = {}
+for key, march in pairs(self_marches(kingdom)) do
+    local id = march_id(march, key)
+    if id ~= nil then active[id] = true end
+end
+local known = _G.__MUMU_AUTOTASK_WORLD_MONSTER_MARCHES
+if type(known) ~= "table" then known = {} end
+local lines = {
+    "MUMU_AUTOTASK\t1\tWORLD_MONSTER_STATUS",
+    "ROLE\t" .. role_hex,
+    "KINGDOM\t" .. tostring(kingdom),
+    "STAMINA\t" .. tostring(current_stamina()),
+}
+for _, id in ipairs(MARCH_IDS) do
+    local status = "UNKNOWN"
+    if active[id] then
+        status = "ACTIVE"
+        if known[id] == nil then known[id] = { observed = true } end
+    elseif known[id] ~= nil then
+        status = "RETURNED"
+    end
+    lines[#lines + 1] = "MARCH\t" .. tostring(id) .. "\t" .. status
+end
+_G.__MUMU_AUTOTASK_WORLD_MONSTER_MARCHES = known
+lines[#lines + 1] = "END\t" .. tostring(#MARCH_IDS)
+return table.concat(lines, "\n")
+'''
+
+
+def _world_monster_lua(level: int, body: str) -> str:
+    normalized = normalize_world_monster_level(level)
+    return _finalize_lua(
+        textwrap.dedent(_WORLD_MONSTER_COMMON + body.replace("__LEVEL__", str(normalized)))
+    )
+
+
+def build_world_monster_search_lua(level: int) -> str:
+    return _world_monster_lua(level, _WORLD_MONSTER_SEARCH_BODY)
+
+
+def build_world_monster_search_result_lua(level: int) -> str:
+    return _world_monster_lua(level, _WORLD_MONSTER_SEARCH_RESULT_BODY)
+
+
+def build_world_monster_commit_lua(level: int) -> str:
+    return _world_monster_lua(level, _WORLD_MONSTER_COMMIT_BODY)
+
+
+def build_world_monster_verify_lua(level: int) -> str:
+    return _world_monster_lua(level, _WORLD_MONSTER_VERIFY_BODY)
+
+
+def build_world_monster_status_lua(march_ids: Sequence[int]) -> str:
+    normalized = normalize_world_monster_march_ids(march_ids)
+    ids = ", ".join(str(march_id) for march_id in normalized)
+    return _finalize_lua(
+        textwrap.dedent(
+            _WORLD_MONSTER_COMMON
+            + _WORLD_MONSTER_STATUS_BODY.replace("__MARCH_IDS__", ids)
+        )
+    )
 
 
 def build_close_expedition_lua(roles: Sequence[str]) -> str:
@@ -2475,8 +3432,8 @@ def _parse_kingdom_line(fields: list[str], location: str) -> int:
 
 
 def _parse_item(fields: list[str], location: str) -> IntelItem:
-    if len(fields) != 12 or fields[0] != "ITEM":
-        raise BusinessError(f"{location} must contain exactly 12 ITEM fields")
+    if len(fields) != 13 or fields[0] != "ITEM":
+        raise BusinessError(f"{location} must contain exactly 13 ITEM fields")
     quality = normalize_quality(fields[7])
     if quality != fields[7]:
         raise BusinessError(f"{location} quality must use its canonical name")
@@ -2496,6 +3453,9 @@ def _parse_item(fields: list[str], location: str) -> IntelItem:
         level=_parse_integer(fields[10], f"{location} level", allow_zero=False),
         stamina_cost=_parse_integer(
             fields[11], f"{location} stamina cost", allow_zero=False
+        ),
+        recommended_power=_parse_integer(
+            fields[12], f"{location} recommended power", allow_zero=False
         ),
     )
 
@@ -2560,10 +3520,19 @@ def parse_intel_output(
         raise BusinessError("INTEL output is missing ROLE")
     role = _parse_role(lines[1][1], allowed_roles)
     kingdom = _parse_kingdom_line(lines[2], "INTEL")
+    item_start = 3
+    current_stamina: int | None = None
+    if len(lines) > 3 and len(lines[3]) == 2 and lines[3][0] == "STAMINA":
+        current_stamina = _parse_integer(
+            lines[3][1],
+            "INTEL current stamina",
+            allow_zero=True,
+        )
+        item_start = 4
     if len(lines[-1]) != 2 or lines[-1][0] != "END":
         raise BusinessError("INTEL output is missing END")
     count = _parse_integer(lines[-1][1], "END count", allow_zero=True)
-    item_lines = lines[3:-1]
+    item_lines = lines[item_start:-1]
     if count != len(item_lines):
         raise BusinessError("INTEL END count does not match ITEM lines")
     if count > 128:
@@ -2581,7 +3550,12 @@ def parse_intel_output(
     )
     if list(items) != expected_order:
         raise BusinessError("INTEL items are not in canonical order")
-    return IntelSnapshot(role=role, kingdom=kingdom, items=items)
+    return IntelSnapshot(
+        role=role,
+        kingdom=kingdom,
+        items=items,
+        current_stamina=current_stamina,
+    )
 
 
 def parse_battle_intel_output(
@@ -2827,18 +3801,277 @@ def parse_ready_output(
     return lines[4][1] == "1"
 
 
+def _parse_stamina_stage(
+    output: str,
+    kind: str,
+    action_name: str,
+    allowed_roles: Sequence[str],
+    target: IntelItem,
+) -> tuple[bool, int, int, int, str | None]:
+    lines = _parse_target_stage(output, kind, allowed_roles, target)
+    if (
+        len(lines) != 9
+        or lines[4] != ["AVERAGE", "1"]
+        or len(lines[5]) != 4
+        or lines[5][0] != "STAMINA"
+        or len(lines[6]) != 2
+        or lines[6][0] != action_name
+        or lines[6][1] not in {"0", "1"}
+        or len(lines[7]) != 2
+        or lines[7][0] != "REASON"
+    ):
+        raise BusinessError(
+            f"{kind} output has invalid average, stamina, or {action_name.lower()} fields"
+        )
+    current_stamina = _parse_integer(
+        lines[5][1], f"{kind} current stamina", allow_zero=True
+    )
+    required_stamina = _parse_integer(
+        lines[5][2], f"{kind} required stamina", allow_zero=True
+    )
+    base_stamina = _parse_integer(
+        lines[5][3], f"{kind} base stamina", allow_zero=False
+    )
+    if base_stamina != target.stamina_cost:
+        raise BusinessError(f"{kind} base stamina does not match the target")
+    succeeded = lines[6][1] == "1"
+    reason = lines[7][1]
+    if succeeded:
+        if reason != "NONE" or current_stamina < required_stamina:
+            raise BusinessError(f"{kind} state is inconsistent with stamina")
+        blocked_reason = None
+    else:
+        if reason != "INSUFFICIENT_STAMINA" or current_stamina >= required_stamina:
+            raise BusinessError(f"{kind} blocked state is inconsistent with stamina")
+        blocked_reason = "insufficient_stamina"
+    return (
+        succeeded,
+        current_stamina,
+        required_stamina,
+        base_stamina,
+        blocked_reason,
+    )
+
+
+def parse_prepare_output(
+    output: str,
+    allowed_roles: Sequence[str],
+    target: IntelItem,
+) -> MarchPrepareReceipt:
+    ready, current, required, base, blocked = _parse_stamina_stage(
+        output,
+        "PREPARE",
+        "READY",
+        allowed_roles,
+        target,
+    )
+    return MarchPrepareReceipt(
+        ready_to_commit=ready,
+        current_stamina=current,
+        required_stamina=required,
+        base_stamina=base,
+        blocked_reason=blocked,
+    )
+
+
 def parse_commit_output(
     output: str,
     allowed_roles: Sequence[str],
     target: IntelItem,
-) -> None:
-    lines = _parse_target_stage(output, "COMMIT", allowed_roles, target)
+) -> MarchCommitReceipt:
+    dispatched, current_stamina, required_stamina, base_stamina, blocked_reason = (
+        _parse_stamina_stage(
+            output,
+            "COMMIT",
+            "GO",
+            allowed_roles,
+            target,
+        )
+    )
+    return MarchCommitReceipt(
+        request_dispatched=dispatched,
+        current_stamina=current_stamina,
+        required_stamina=required_stamina,
+        base_stamina=base_stamina,
+        blocked_reason=blocked_reason,
+    )
+
+
+def _parse_world_monster_identity(
+    lines: list[list[str]], kind: str
+) -> tuple[str, int]:
+    if len(lines) < 4 or len(lines[1]) != 2 or lines[1][0] != "ROLE":
+        raise BusinessError(f"{kind} output is missing ROLE")
+    role = _parse_role(lines[1][1], ())
+    kingdom = _parse_kingdom_line(lines[2], kind)
+    return role, kingdom
+
+
+def parse_world_monster_search_sent_output(output: str, level: int) -> None:
+    requested_level = normalize_world_monster_level(level)
+    lines = _protocol_lines(output, "WORLD_MONSTER_SEARCH_SENT")
+    _parse_world_monster_identity(lines, "WORLD_MONSTER_SEARCH_SENT")
     if (
-        len(lines) != 7
-        or lines[4] != ["AVERAGE", "1"]
-        or lines[5] != ["GO", "1"]
+        len(lines) != 6
+        or lines[3] != ["LEVEL", str(requested_level)]
+        or lines[4] != ["SENT", "1"]
+        or lines[5] != ["END", "1"]
     ):
-            raise BusinessError("COMMIT output did not confirm average and go actions")
+        raise BusinessError("WORLD_MONSTER_SEARCH_SENT output is invalid")
+
+
+def parse_world_monster_search_output(
+    output: str, level: int
+) -> WorldMonsterSearchReceipt:
+    requested_level = normalize_world_monster_level(level)
+    lines = _protocol_lines(output, "WORLD_MONSTER_SEARCH")
+    role, kingdom = _parse_world_monster_identity(lines, "WORLD_MONSTER_SEARCH")
+    if (
+        len(lines) != 9
+        or lines[3] != ["LEVEL", str(requested_level)]
+        or lines[4] not in (["READY", "0"], ["READY", "1"])
+        or len(lines[5]) != 3 or lines[5][0] != "POINT"
+        or len(lines[6]) != 3 or lines[6][0] != "MONSTER"
+        or len(lines[7]) != 2 or lines[7][0] != "STAMINA"
+        or lines[8] != ["END", "1"]
+    ):
+        raise BusinessError("WORLD_MONSTER_SEARCH output is invalid")
+    ready = lines[4][1] == "1"
+    stamina = _parse_integer(
+        lines[7][1], "WORLD_MONSTER_SEARCH stamina", allow_zero=True
+    )
+    if not ready:
+        if (
+            lines[6][1:] != ["missing", "missing"]
+            or (
+                lines[5][1:] != ["missing", "missing"]
+                and any(
+                    _INTEGER_PATTERN.fullmatch(value) is None
+                    for value in lines[5][1:]
+                )
+            )
+        ):
+            raise BusinessError("WORLD_MONSTER_SEARCH pending state is inconsistent")
+        return WorldMonsterSearchReceipt(
+            role, kingdom, requested_level, False, None, None, None, None, stamina
+        )
+    world_x = _parse_integer(
+        lines[5][1], "WORLD_MONSTER_SEARCH world x", allow_zero=True
+    )
+    world_y = _parse_integer(
+        lines[5][2], "WORLD_MONSTER_SEARCH world y", allow_zero=True
+    )
+    monster_id = _parse_integer(
+        lines[6][1], "WORLD_MONSTER_SEARCH monster id", allow_zero=False
+    )
+    recommended_power = _parse_integer(
+        lines[6][2], "WORLD_MONSTER_SEARCH recommended power", allow_zero=False
+    )
+    return WorldMonsterSearchReceipt(
+        role, kingdom, requested_level, True, world_x, world_y,
+        monster_id, recommended_power, stamina
+    )
+
+
+def parse_world_monster_commit_output(
+    output: str, search: WorldMonsterSearchReceipt
+) -> WorldMonsterHuntReceipt:
+    if not isinstance(search, WorldMonsterSearchReceipt) or not search.ready:
+        raise BusinessError("world monster commit requires a ready search result")
+    lines = _protocol_lines(output, "WORLD_MONSTER_COMMIT")
+    role, kingdom = _parse_world_monster_identity(lines, "WORLD_MONSTER_COMMIT")
+    if (
+        len(lines) != 11 or role != search.role or kingdom != search.kingdom
+        or lines[3] != ["LEVEL", str(search.level)]
+        or lines[4] != ["MONSTER", str(search.monster_id)]
+        or lines[5] != ["POINT", str(search.world_x), str(search.world_y)]
+        or lines[6] != ["AVERAGE", "1"]
+        or len(lines[7]) != 4 or lines[7][0] != "STAMINA"
+        or lines[8] not in (["SENT", "0"], ["SENT", "1"])
+        or len(lines[9]) != 2 or lines[9][0] != "REASON"
+        or lines[10] != ["END", "1"]
+    ):
+        raise BusinessError("WORLD_MONSTER_COMMIT output is invalid")
+    current = _parse_integer(lines[7][1], "world monster stamina", allow_zero=True)
+    required = _parse_integer(lines[7][2], "world monster required stamina", allow_zero=True)
+    base = _parse_integer(lines[7][3], "world monster base stamina", allow_zero=False)
+    dispatched = lines[8][1] == "1"
+    if dispatched:
+        if lines[9][1] != "NONE" or current < required:
+            raise BusinessError("WORLD_MONSTER_COMMIT dispatch state is inconsistent")
+        blocked_reason = None
+    else:
+        if lines[9][1] != "INSUFFICIENT_STAMINA" or current >= required:
+            raise BusinessError("WORLD_MONSTER_COMMIT blocked state is inconsistent")
+        blocked_reason = "insufficient_stamina"
+    return WorldMonsterHuntReceipt(
+        role, kingdom, search.level, int(search.monster_id),
+        int(search.world_x), int(search.world_y), dispatched,
+        current, required, base, blocked_reason
+    )
+
+
+def parse_world_monster_verify_output(
+    output: str, search: WorldMonsterSearchReceipt
+) -> WorldMonsterMarchReceipt:
+    if not isinstance(search, WorldMonsterSearchReceipt) or not search.ready:
+        raise BusinessError("world monster verification requires a ready search result")
+    lines = _protocol_lines(output, "WORLD_MONSTER_VERIFY")
+    role, kingdom = _parse_world_monster_identity(lines, "WORLD_MONSTER_VERIFY")
+    if (
+        len(lines) != 9 or role != search.role or kingdom != search.kingdom
+        or lines[3] != ["LEVEL", str(search.level)]
+        or lines[4] != ["MONSTER", str(search.monster_id)]
+        or lines[5] != ["POINT", str(search.world_x), str(search.world_y)]
+        or len(lines[6]) != 2 or lines[6][0] != "MARCH"
+        or len(lines[7]) != 2 or lines[7][0] != "STAMINA"
+        or lines[8] != ["END", "1"]
+    ):
+        raise BusinessError("WORLD_MONSTER_VERIFY output is invalid")
+    march_id = None if lines[6][1] == "missing" else _parse_integer(
+        lines[6][1], "WORLD_MONSTER_VERIFY march id", allow_zero=False
+    )
+    current_stamina = _parse_integer(
+        lines[7][1], "WORLD_MONSTER_VERIFY stamina", allow_zero=True
+    )
+    return WorldMonsterMarchReceipt(
+        role, kingdom, search.level, int(search.monster_id),
+        int(search.world_x), int(search.world_y), march_id, current_stamina
+    )
+
+
+def parse_world_monster_status_output(
+    output: str, march_ids: Sequence[int]
+) -> WorldMonsterStatusSnapshot:
+    expected_ids = normalize_world_monster_march_ids(march_ids)
+    lines = _protocol_lines(output, "WORLD_MONSTER_STATUS")
+    role, kingdom = _parse_world_monster_identity(lines, "WORLD_MONSTER_STATUS")
+    if (
+        len(lines) != len(expected_ids) + 5
+        or len(lines[3]) != 2 or lines[3][0] != "STAMINA"
+        or lines[-1] != ["END", str(len(expected_ids))]
+    ):
+        raise BusinessError("WORLD_MONSTER_STATUS output is invalid")
+    stamina = _parse_integer(
+        lines[3][1], "WORLD_MONSTER_STATUS stamina", allow_zero=True
+    )
+    statuses: list[WorldMonsterMarchStatus] = []
+    for index, (march_id, fields) in enumerate(
+        zip(expected_ids, lines[4:-1], strict=True)
+    ):
+        if len(fields) != 3 or fields[0] != "MARCH" \
+                or fields[1] != str(march_id):
+            raise BusinessError(
+                f"WORLD_MONSTER_STATUS MARCH[{index}] does not match the request"
+            )
+        if fields[2] == "UNKNOWN":
+            raise BusinessError(
+                f"world monster march id {march_id} was never observed in this game process"
+            )
+        if fields[2] not in {"ACTIVE", "RETURNED"}:
+            raise BusinessError(f"WORLD_MONSTER_STATUS MARCH[{index}] is invalid")
+        statuses.append(WorldMonsterMarchStatus(march_id, fields[2]))
+    return WorldMonsterStatusSnapshot(role, kingdom, stamina, tuple(statuses))
 
 
 def parse_battle_commit_output(
@@ -3062,14 +4295,22 @@ __all__ = [
     "IntelSnapshot",
     "IntelStatusSnapshot",
     "IntelTargetStatus",
+    "MarchCommitReceipt",
+    "MarchPrepareReceipt",
     "MarchReceipt",
     "QUALITY_ALIASES",
     "QUALITY_BY_ID",
     "QUALITY_IDS",
     "SceneStatus",
+    "WorldMonsterHuntReceipt",
+    "WorldMonsterMarchReceipt",
+    "WorldMonsterMarchStatus",
+    "WorldMonsterSearchReceipt",
+    "WorldMonsterStatusSnapshot",
     "build_claim_intel_lua",
     "build_close_expedition_lua",
     "build_commit_march_lua",
+    "build_commit_prepared_march_lua",
     "build_direct_commit_march_lua",
     "build_install_march_capture_hook_lua",
     "build_inspect_battle_intel_lua",
@@ -3078,6 +4319,7 @@ __all__ = [
     "build_intel_status_lua",
     "build_march_ready_lua",
     "build_open_march_lua",
+    "build_prepare_direct_march_lua",
     "build_read_march_capture_hook_lua",
     "build_scene_status_lua",
     "build_start_battle_intel_lua",
@@ -3085,9 +4327,17 @@ __all__ = [
     "build_uninstall_march_capture_hook_lua",
     "build_verify_battle_intel_lua",
     "build_verify_march_lua",
+    "build_world_monster_commit_lua",
+    "build_world_monster_search_lua",
+    "build_world_monster_search_result_lua",
+    "build_world_monster_status_lua",
+    "build_world_monster_verify_lua",
     "normalize_battle_category",
     "normalize_quality",
     "normalize_target_ids",
+    "normalize_world_monster_level",
+    "normalize_world_monster_count",
+    "normalize_world_monster_march_ids",
     "parse_battle_commit_output",
     "parse_battle_intel_output",
     "parse_battle_verify_output",
@@ -3097,10 +4347,16 @@ __all__ = [
     "parse_intel_status_output",
     "parse_march_output",
     "parse_open_output",
+    "parse_prepare_output",
     "parse_ready_output",
     "parse_rescue_commit_output",
     "parse_scene_status_output",
     "parse_verify_output",
+    "parse_world_monster_commit_output",
+    "parse_world_monster_search_output",
+    "parse_world_monster_search_sent_output",
+    "parse_world_monster_status_output",
+    "parse_world_monster_verify_output",
     "select_battle_target",
     "select_march_target",
     "script_sha256",

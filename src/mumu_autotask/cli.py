@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import math
+import signal
 import sys
 import time
 from dataclasses import asdict
@@ -21,15 +22,13 @@ from .business import (
     IntelStatusSnapshot,
     SceneStatus,
     build_claim_intel_lua,
-    build_close_expedition_lua,
-    build_direct_commit_march_lua,
+    build_commit_prepared_march_lua,
     build_install_march_capture_hook_lua,
     build_inspect_battle_intel_lua,
     build_inspect_formation_lua,
     build_inspect_intel_lua,
     build_intel_status_lua,
-    build_march_ready_lua,
-    build_open_march_lua,
+    build_prepare_direct_march_lua,
     build_read_march_capture_hook_lua,
     build_scene_status_lua,
     build_start_battle_intel_lua,
@@ -37,9 +36,17 @@ from .business import (
     build_uninstall_march_capture_hook_lua,
     build_verify_battle_intel_lua,
     build_verify_march_lua,
+    build_world_monster_commit_lua,
+    build_world_monster_search_lua,
+    build_world_monster_search_result_lua,
+    build_world_monster_status_lua,
+    build_world_monster_verify_lua,
     normalize_battle_category,
     normalize_quality,
     normalize_target_ids,
+    normalize_world_monster_level,
+    normalize_world_monster_count,
+    normalize_world_monster_march_ids,
     parse_battle_commit_output,
     parse_battle_intel_output,
     parse_battle_verify_output,
@@ -47,11 +54,15 @@ from .business import (
     parse_commit_output,
     parse_intel_output,
     parse_intel_status_output,
-    parse_open_output,
-    parse_ready_output,
+    parse_prepare_output,
     parse_rescue_commit_output,
     parse_scene_status_output,
     parse_verify_output,
+    parse_world_monster_commit_output,
+    parse_world_monster_search_output,
+    parse_world_monster_search_sent_output,
+    parse_world_monster_status_output,
+    parse_world_monster_verify_output,
     select_battle_target,
     select_march_target,
     script_sha256,
@@ -460,6 +471,95 @@ def build_parser() -> argparse.ArgumentParser:
         help="uninstall the march capture hook after all guards pass",
     )
     unhook_march.set_defaults(dry_run=True)
+
+    hunt_world_monster = subparsers.add_parser(
+        "hunt-world-monster",
+        help="search and attack one normal world monster through native Lua APIs",
+    )
+    hunt_world_monster.add_argument("--serial", required=True)
+    hunt_world_monster.add_argument(
+        "--level",
+        required=True,
+        type=int,
+        help="normal world monster level (1-20)",
+    )
+    hunt_world_monster.add_argument(
+        "--count",
+        type=int,
+        default=1,
+        help="number of monsters to search and dispatch sequentially (1-4; default: 1)",
+    )
+    hunt_world_monster.add_argument(
+        "--timeout",
+        type=float,
+        default=15.0,
+        help="maximum search/march verification time in seconds (default: 15)",
+    )
+    hunt_world_monster.add_argument(
+        "--poll-interval",
+        type=float,
+        default=0.2,
+        help="seconds between native-state verification polls (default: 0.2)",
+    )
+    hunt_world_monster.add_argument(
+        "--execute",
+        dest="dry_run",
+        action="store_false",
+        help="search, average the formation, and dispatch after all guards pass",
+    )
+    hunt_world_monster.set_defaults(dry_run=True)
+
+    world_monster_loop = subparsers.add_parser(
+        "world-monster-loop",
+        help="continuously keep normal world monster marches filled in one Frida session",
+    )
+    world_monster_loop.add_argument("--serial", required=True)
+    world_monster_loop.add_argument(
+        "--level",
+        required=True,
+        type=int,
+        help="normal world monster level (1-20)",
+    )
+    world_monster_loop.add_argument(
+        "--concurrency",
+        type=int,
+        default=4,
+        help="maximum active world monster marches (1-4; default: 4)",
+    )
+    world_monster_loop.add_argument(
+        "--poll-interval",
+        type=float,
+        default=1.5,
+        help="seconds between active-march polls (default: 1.5)",
+    )
+    world_monster_loop.add_argument(
+        "--execute",
+        dest="dry_run",
+        action="store_false",
+        help="hold one Frida session and continuously refill returned marches",
+    )
+    world_monster_loop.set_defaults(dry_run=True)
+
+    world_monster_status = subparsers.add_parser(
+        "world-monster-status",
+        help="read ACTIVE/RETURNED state for verified world monster marches",
+    )
+    world_monster_status.add_argument("--serial", required=True)
+    world_monster_status.add_argument(
+        "--march-id",
+        dest="march_ids",
+        action="append",
+        required=True,
+        type=int,
+        help="verified world monster march ID (repeat for multiple marches)",
+    )
+    world_monster_status.add_argument(
+        "--execute",
+        dest="dry_run",
+        action="store_false",
+        help="read live march and stamina state",
+    )
+    world_monster_status.set_defaults(dry_run=True)
     return parser
 
 
@@ -653,6 +753,7 @@ def _full_target_from_batch_spec(
             "monster_id",
             "level",
             "stamina_cost",
+            "recommended_power",
         }
         if not required.issubset(spec):
             return None
@@ -668,6 +769,7 @@ def _full_target_from_batch_spec(
             monster_id=_spec_integer(spec, "monster_id"),
             level=_spec_integer(spec, "level", allow_zero=True),
             stamina_cost=_spec_integer(spec, "stamina_cost", allow_zero=True),
+            recommended_power=_spec_integer(spec, "recommended_power"),
         )
         return dict(spec), target
     required = {
@@ -1014,20 +1116,6 @@ def _scene_world_ready(status: SceneStatus) -> bool:
 
 def _world_button_tap_coordinates(adb: AdbClient, profile: DeviceProfile) -> tuple[int, int]:
     return _scaled_tap_coordinates(adb, profile, 0.906, 0.948, (652, 1214))
-
-
-def _expedition_average_tap_coordinates(
-    adb: AdbClient,
-    profile: DeviceProfile,
-) -> tuple[int, int]:
-    return _scaled_tap_coordinates(adb, profile, 0.278, 0.947, (200, 1212))
-
-
-def _expedition_go_tap_coordinates(
-    adb: AdbClient,
-    profile: DeviceProfile,
-) -> tuple[int, int]:
-    return _scaled_tap_coordinates(adb, profile, 0.763, 0.947, (550, 1212))
 
 
 def _scaled_tap_coordinates(
@@ -1542,6 +1630,7 @@ def _execute_inspect_tasks(
     result.update(
         {
             "role": monster_snapshot.role,
+            "current_stamina": monster_snapshot.current_stamina,
             "item_count": len(items),
             "items": items,
             "categories": {
@@ -1754,6 +1843,7 @@ def _execute_march(
     accepted = False
     average_tapped = False
     go_tapped = False
+    stamina_receipt = None
     dispatch_mode = "dry-run"
     average_tap_coordinates: tuple[int, int] | None = None
     go_tap_coordinates: tuple[int, int] | None = None
@@ -1795,87 +1885,36 @@ def _execute_march(
             active_roles = (snapshot.role,)
 
             if not dry_run:
+                dispatch_mode = "direct"
                 verify_code = build_verify_march_lua(active_roles, target)
-                if inspect_result.thread_name == "UnityMain":
-                    dispatch_mode = "ui"
-                    open_code = build_open_march_lua(active_roles, target)
-                    ready_code = build_march_ready_lua(active_roles, target)
-                    stage_hashes.update(
-                        {
-                            "open": script_sha256(open_code),
-                            "ready": script_sha256(ready_code),
-                            "verify": script_sha256(verify_code),
-                        }
-                    )
-                    open_result = _execute_lua_when_idle(
-                        adb,
-                        profile,
-                        client,
-                        process,
-                        scanner,
-                        state,
-                        open_code,
-                        output_capacity=output_capacity,
-                        operation="opening expedition view",
-                    )
-                    parse_open_output(open_result.output, active_roles, target)
-                    opened = True
-
-                    ready_deadline = time.monotonic() + ready_timeout_seconds
-                    while True:
-                        ready_result = _execute_lua_when_idle(
-                            adb,
-                            profile,
-                            client,
-                            process,
-                            scanner,
-                            state,
-                            ready_code,
-                            output_capacity=output_capacity,
-                            operation="expedition readiness check",
-                        )
-                        if parse_ready_output(ready_result.output, active_roles, target):
-                            break
-                        if time.monotonic() >= ready_deadline:
-                            raise BusinessError(
-                                "expedition view did not finish initializing before timeout"
-                            )
-                        time.sleep(0.2)
-
-                    average_tap_coordinates = _expedition_average_tap_coordinates(
-                        adb,
-                        profile,
-                    )
-                    adb.input_tap(profile.serial, *average_tap_coordinates)
-                    average_tapped = True
-                    _require_same_foreground_process(
-                        adb,
-                        profile,
-                        process,
-                        "average formation UI tap",
-                    )
-                    time.sleep(0.35)
-                    go_tap_coordinates = _expedition_go_tap_coordinates(adb, profile)
-                    adb.input_tap(profile.serial, *go_tap_coordinates)
-                    go_tapped = True
-                    _require_same_foreground_process(
-                        adb,
-                        profile,
-                        process,
-                        "expedition go UI tap",
-                    )
-                else:
-                    dispatch_mode = "direct"
-                    direct_commit_code = build_direct_commit_march_lua(
-                        active_roles,
-                        target,
-                    )
-                    stage_hashes.update(
-                        {
-                            "direct_commit": script_sha256(direct_commit_code),
-                            "verify": script_sha256(verify_code),
-                        }
-                    )
+                prepare_code = build_prepare_direct_march_lua(active_roles, target)
+                commit_code = build_commit_prepared_march_lua(active_roles, target)
+                stage_hashes.update(
+                    {
+                        "prepare": script_sha256(prepare_code),
+                        "commit": script_sha256(commit_code),
+                        "verify": script_sha256(verify_code),
+                    }
+                )
+                prepare_result = _execute_lua_when_idle(
+                    adb,
+                    profile,
+                    client,
+                    process,
+                    scanner,
+                    state,
+                    prepare_code,
+                    output_capacity=output_capacity,
+                    operation="direct march preparation",
+                )
+                prepare_receipt = parse_prepare_output(
+                    prepare_result.output,
+                    active_roles,
+                    target,
+                )
+                stamina_receipt = prepare_receipt
+                last_result = prepare_result
+                if prepare_receipt.ready_to_commit:
                     commit_result = _execute_lua_when_idle(
                         adb,
                         profile,
@@ -1883,62 +1922,50 @@ def _execute_march(
                         process,
                         scanner,
                         state,
-                        direct_commit_code,
+                        commit_code,
                         output_capacity=output_capacity,
                         operation="direct march request",
                     )
-                    parse_commit_output(commit_result.output, active_roles, target)
-                    last_result = commit_result
-
-                verify_deadline = time.monotonic() + verify_timeout_seconds
-                while True:
-                    verify_result = _execute_lua_when_idle(
-                        adb,
-                        profile,
-                        client,
-                        process,
-                        scanner,
-                        state,
-                        verify_code,
-                        output_capacity=output_capacity,
-                        operation="march result verification",
-                    )
-                    last_result = verify_result
-                    verification_polls += 1
-                    accepted, status_after = parse_verify_output(
-                        verify_result.output,
+                    stamina_receipt = parse_commit_output(
+                        commit_result.output,
                         active_roles,
                         target,
                     )
-                    if accepted:
-                        break
-                    if time.monotonic() >= verify_deadline:
-                        raise BusinessError(
-                            "go action was invoked but no matching server-created "
-                            "self march or quest acceptance appeared before timeout "
-                            f"for target {target.runtime_id}; last quest status was "
-                            f"{status_after} after {verification_polls} polls"
+                    last_result = commit_result
+
+                if stamina_receipt.blocked_reason is not None:
+                    status_after = "insufficient-stamina"
+                else:
+                    verify_deadline = time.monotonic() + verify_timeout_seconds
+                    while True:
+                        verify_result = _execute_lua_when_idle(
+                            adb,
+                            profile,
+                            client,
+                            process,
+                            scanner,
+                            state,
+                            verify_code,
+                            output_capacity=output_capacity,
+                            operation="march result verification",
                         )
-                    time.sleep(verify_poll_interval_seconds)
-        except Exception:
-            if opened and not accepted:
-                try:
-                    close_code = build_close_expedition_lua(active_roles)
-                    stage_hashes["cleanup"] = script_sha256(close_code)
-                    _execute_lua_when_idle(
-                        adb,
-                        profile,
-                        client,
-                        process,
-                        scanner,
-                        state,
-                        close_code,
-                        output_capacity=output_capacity,
-                        operation="expedition cleanup",
-                    )
-                except Exception as cleanup_error:
-                    LOGGER.warning("expedition cleanup failed: %s", cleanup_error)
-            raise
+                        last_result = verify_result
+                        verification_polls += 1
+                        accepted, status_after = parse_verify_output(
+                            verify_result.output,
+                            active_roles,
+                            target,
+                        )
+                        if accepted:
+                            break
+                        if time.monotonic() >= verify_deadline:
+                            raise BusinessError(
+                                "go action was invoked but no matching server-created "
+                                "self march or quest acceptance appeared before timeout "
+                                f"for target {target.runtime_id}; last quest status was "
+                                f"{status_after} after {verification_polls} polls"
+                            )
+                        time.sleep(verify_poll_interval_seconds)
         finally:
             after = _verify_process_after_lua_finally(
                 adb,
@@ -1965,6 +1992,18 @@ def _execute_march(
             "go_tap_coordinates": list(go_tap_coordinates) if go_tap_coordinates else None,
             "quest_status_after": status_after,
             "verification_polls": verification_polls,
+            "blocked_reason": (
+                stamina_receipt.blocked_reason if stamina_receipt is not None else None
+            ),
+            "current_stamina": (
+                stamina_receipt.current_stamina if stamina_receipt is not None else None
+            ),
+            "required_stamina": (
+                stamina_receipt.required_stamina if stamina_receipt is not None else None
+            ),
+            "base_stamina": (
+                stamina_receipt.base_stamina if stamina_receipt is not None else None
+            ),
             "role": snapshot.role,
             "item_count": len(snapshot.items),
             "target": asdict(target),
@@ -2174,17 +2213,60 @@ def _execute_batch_intel(
                 quality = str(spec.get("quality", getattr(target, "quality", "")))
                 try:
                     if category == "monster":
-                        commit_code = build_direct_commit_march_lua(
+                        prepare_code = build_prepare_direct_march_lua(
+                            active_roles,
+                            target,
+                        )
+                        commit_code = build_commit_prepared_march_lua(
                             active_roles,
                             target,
                         )
                         verify_code = build_verify_march_lua(active_roles, target)
+                        stage_hashes[f"target_{runtime_id}_prepare"] = script_sha256(
+                            prepare_code
+                        )
                         stage_hashes[f"target_{runtime_id}_commit"] = script_sha256(
                             commit_code
                         )
                         stage_hashes[f"target_{runtime_id}_verify"] = script_sha256(
                             verify_code
                         )
+                        prepare_result = _execute_lua_when_idle(
+                            adb,
+                            profile,
+                            client,
+                            process,
+                            scanner,
+                            state,
+                            prepare_code,
+                            output_capacity=output_capacity,
+                            operation=f"batch march preparation {runtime_id}",
+                        )
+                        last_result = prepare_result
+                        prepare_receipt = parse_prepare_output(
+                            prepare_result.output,
+                            active_roles,
+                            target,
+                        )
+                        if not prepare_receipt.ready_to_commit:
+                            results.append(
+                                {
+                                    "serial": profile.serial,
+                                    "kingdom": kingdom,
+                                    "role": role,
+                                    "category": "monster",
+                                    "quality": quality,
+                                    "request_dispatched": False,
+                                    "blocked_reason": prepare_receipt.blocked_reason,
+                                    "current_stamina": prepare_receipt.current_stamina,
+                                    "required_stamina": prepare_receipt.required_stamina,
+                                    "base_stamina": prepare_receipt.base_stamina,
+                                    "target": asdict(target),
+                                    "quest_status_after": "insufficient-stamina",
+                                    "verification_polls": 0,
+                                }
+                            )
+                            continue
                         commit_result = _execute_lua_when_idle(
                             adb,
                             profile,
@@ -2197,7 +2279,31 @@ def _execute_batch_intel(
                             operation=f"batch direct march request {runtime_id}",
                         )
                         last_result = commit_result
-                        parse_commit_output(commit_result.output, active_roles, target)
+                        commit_receipt = parse_commit_output(
+                            commit_result.output,
+                            active_roles,
+                            target,
+                        )
+
+                        if not commit_receipt.request_dispatched:
+                            results.append(
+                                {
+                                    "serial": profile.serial,
+                                    "kingdom": kingdom,
+                                    "role": role,
+                                    "category": "monster",
+                                    "quality": quality,
+                                    "request_dispatched": False,
+                                    "blocked_reason": commit_receipt.blocked_reason,
+                                    "current_stamina": commit_receipt.current_stamina,
+                                    "required_stamina": commit_receipt.required_stamina,
+                                    "base_stamina": commit_receipt.base_stamina,
+                                    "target": asdict(target),
+                                    "quest_status_after": "insufficient-stamina",
+                                    "verification_polls": 0,
+                                }
+                            )
+                            continue
 
                         # Wait only until this march is visible locally. The next
                         # formation must be computed after the game has reserved
@@ -2248,6 +2354,10 @@ def _execute_batch_intel(
                                 "target": asdict(target),
                                 "quest_status_after": status_after,
                                 "verification_polls": verification_polls,
+                                "blocked_reason": None,
+                                "current_stamina": commit_receipt.current_stamina,
+                                "required_stamina": commit_receipt.required_stamina,
+                                "base_stamina": commit_receipt.base_stamina,
                             }
                         )
                     else:
@@ -2821,6 +2931,487 @@ def _execute_claim_intel(
     return result
 
 
+def _execute_hunt_world_monster(
+    adb: AdbClient,
+    profile: DeviceProfile,
+    client: FridaLuaClient,
+    process: ProcessInfo,
+    level: int,
+    count: int,
+    *,
+    output_capacity: int,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+) -> dict[str, Any]:
+    requested_level = normalize_world_monster_level(level)
+    requested_count = normalize_world_monster_count(count)
+    search_code = build_world_monster_search_lua(requested_level)
+    search_result_code = build_world_monster_search_result_lua(requested_level)
+    commit_code = build_world_monster_commit_lua(requested_level)
+    verify_code = build_world_monster_verify_lua(requested_level)
+    stage_hashes = {
+        "search": script_sha256(search_code),
+        "search_result": script_sha256(search_result_code),
+        "commit": script_sha256(commit_code),
+        "verify": script_sha256(verify_code),
+    }
+    scanner = _scanner(adb, profile)
+    state = _wait_unique_idle_lua_state(
+        adb, profile, scanner, process, "world monster hunt initialization"
+    )
+    search_polls = 0
+    verification_polls = 0
+    marches: list[dict[str, Any]] = []
+    blocked_reason: str | None = None
+    current_stamina: int | None = None
+    last_search = None
+    last_commit = None
+    with client:
+        initialization = dict(client.initialize_bridge(profile.bridge_remote_path))
+        before = scanner.verify_idle_main(process.pid, state.address)
+        try:
+            for hunt_index in range(requested_count):
+                search_result = _execute_lua_when_idle(
+                    adb, profile, client, process, scanner, state, search_code,
+                    output_capacity=output_capacity,
+                    operation=f"world monster search request {hunt_index + 1}",
+                )
+                parse_world_monster_search_sent_output(
+                    search_result.output, requested_level
+                )
+                last_result = search_result
+                search_deadline = time.monotonic() + timeout_seconds
+                while True:
+                    result = _execute_lua_when_idle(
+                        adb, profile, client, process, scanner, state,
+                        search_result_code,
+                        output_capacity=output_capacity,
+                        operation=f"world monster search result {hunt_index + 1}",
+                    )
+                    last_result = result
+                    search_polls += 1
+                    search = parse_world_monster_search_output(
+                        result.output, requested_level
+                    )
+                    if search.ready:
+                        break
+                    if time.monotonic() >= search_deadline:
+                        raise BusinessError(
+                            "world monster search did not return an actual map object "
+                            "before timeout"
+                        )
+                    time.sleep(poll_interval_seconds)
+                last_search = search
+
+                result = _execute_lua_when_idle(
+                    adb, profile, client, process, scanner, state, commit_code,
+                    output_capacity=output_capacity,
+                    operation=f"world monster formation and dispatch {hunt_index + 1}",
+                )
+                last_result = result
+                commit = parse_world_monster_commit_output(result.output, search)
+                last_commit = commit
+                current_stamina = commit.current_stamina
+                if not commit.request_dispatched:
+                    blocked_reason = commit.blocked_reason
+                    break
+                verify_deadline = time.monotonic() + timeout_seconds
+                while True:
+                    result = _execute_lua_when_idle(
+                        adb, profile, client, process, scanner, state, verify_code,
+                        output_capacity=output_capacity,
+                        operation=f"world monster march verification {hunt_index + 1}",
+                    )
+                    last_result = result
+                    verification_polls += 1
+                    verification = parse_world_monster_verify_output(
+                        result.output, search
+                    )
+                    if verification.march_id is not None:
+                        current_stamina = verification.current_stamina
+                        marches.append(
+                            {
+                                "march_id": verification.march_id,
+                                "verified": True,
+                                "request_dispatched": True,
+                                "status": "ACTIVE",
+                                "state": "ACTIVE",
+                                "level": search.level,
+                                "monster_id": search.monster_id,
+                                "recommended_power": search.recommended_power,
+                                "world_x": search.world_x,
+                                "world_y": search.world_y,
+                                "current_stamina": verification.current_stamina,
+                                "required_stamina": commit.required_stamina,
+                                "base_stamina": commit.base_stamina,
+                            }
+                        )
+                        break
+                    if time.monotonic() >= verify_deadline:
+                        raise BusinessError(
+                            "world monster request was dispatched but no matching "
+                            "server-created self march appeared before timeout"
+                        )
+                    time.sleep(poll_interval_seconds)
+        finally:
+            after = _verify_process_after_lua_finally(
+                adb, profile, scanner, process, state, "world monster hunt"
+            )
+
+    result_payload = _execution_payload(
+        initialization, state, before, after, last_result
+    )
+    status_rows = [
+        {
+            "march_id": march["march_id"],
+            "status": march["state"],
+            "state": march["state"],
+        }
+        for march in marches
+    ]
+    march_ids = [int(march["march_id"]) for march in marches]
+    if last_search is None or last_commit is None:
+        raise BusinessError("world monster hunt produced no search result")
+    result_payload.update(
+        {
+            "role": last_search.role,
+            "level": requested_level,
+            "requested_count": requested_count,
+            "completed_count": len(marches),
+            "monster_id": last_search.monster_id,
+            "recommended_power": last_search.recommended_power,
+            "world_x": last_search.world_x,
+            "world_y": last_search.world_y,
+            "request_dispatched": bool(marches),
+            "verified": len(marches) == requested_count,
+            "march_id": march_ids[-1] if march_ids else None,
+            "march_ids": march_ids,
+            "marches": marches,
+            "statuses": status_rows,
+            "current_stamina": current_stamina,
+            "required_stamina": last_commit.required_stamina,
+            "base_stamina": last_commit.base_stamina,
+            "blocked_reason": blocked_reason,
+            "search_polls": search_polls,
+            "verification_polls": verification_polls,
+            "stage_script_sha256": stage_hashes,
+        }
+    )
+    return result_payload
+
+
+def _execute_world_monster_loop(
+    adb: AdbClient,
+    profile: DeviceProfile,
+    client: FridaLuaClient,
+    process: ProcessInfo,
+    level: int,
+    concurrency: int,
+    *,
+    output_capacity: int,
+    poll_interval_seconds: float,
+    operation_timeout_seconds: float = 30.0,
+) -> int:
+    requested_level = normalize_world_monster_level(level)
+    requested_concurrency = normalize_world_monster_count(concurrency)
+    if (
+        isinstance(poll_interval_seconds, bool)
+        or not isinstance(poll_interval_seconds, (int, float))
+        or not math.isfinite(poll_interval_seconds)
+        or not 0.05 <= poll_interval_seconds <= 60
+    ):
+        raise BusinessError("world monster loop poll interval must be between 0.05 and 60 seconds")
+
+    search_code = build_world_monster_search_lua(requested_level)
+    search_result_code = build_world_monster_search_result_lua(requested_level)
+    commit_code = build_world_monster_commit_lua(requested_level)
+    verify_code = build_world_monster_verify_lua(requested_level)
+    scanner = _scanner(adb, profile)
+    state = _wait_unique_idle_lua_state(
+        adb, profile, scanner, process, "world monster loop initialization"
+    )
+    active: dict[int, dict[str, Any]] = {}
+    current_stamina: int | None = None
+    dispatch_count = 0
+    stop_requested = False
+    previous_status_signature: tuple[tuple[int, str], ...] | None = None
+
+    def emit(event: str, **extra: Any) -> None:
+        payload: dict[str, Any] = {
+            "event": event,
+            "serial": profile.serial,
+            "level": requested_level,
+            "concurrency": requested_concurrency,
+            "current_stamina": current_stamina,
+            "active_march_ids": sorted(active),
+            "marches": [active[march_id] for march_id in sorted(active)],
+        }
+        payload.update(extra)
+        print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+    def check_stop() -> None:
+        if stop_requested:
+            raise KeyboardInterrupt
+
+    def dispatch_one() -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        nonlocal current_stamina, dispatch_count
+        check_stop()
+        search_result = _execute_lua_when_idle(
+            adb,
+            profile,
+            client,
+            process,
+            scanner,
+            state,
+            search_code,
+            output_capacity=output_capacity,
+            operation=f"world monster loop search request {dispatch_count + 1}",
+        )
+        parse_world_monster_search_sent_output(
+            search_result.output, requested_level
+        )
+        search_deadline = time.monotonic() + operation_timeout_seconds
+        while True:
+            check_stop()
+            search_result = _execute_lua_when_idle(
+                adb,
+                profile,
+                client,
+                process,
+                scanner,
+                state,
+                search_result_code,
+                output_capacity=output_capacity,
+                operation=f"world monster loop search result {dispatch_count + 1}",
+            )
+            search = parse_world_monster_search_output(
+                search_result.output, requested_level
+            )
+            current_stamina = search.current_stamina
+            if search.ready:
+                break
+            if time.monotonic() >= search_deadline:
+                raise BusinessError(
+                    "world monster search did not return an actual map object before timeout"
+                )
+            # The search result is delivered by a game-side callback.  Polling
+            # the main Lua state too aggressively can race that callback even
+            # after an idle cframe pre-check, so keep the caller's guarded
+            # interval (1.5 seconds by default).
+            time.sleep(poll_interval_seconds)
+
+        commit_result = _execute_lua_when_idle(
+            adb,
+            profile,
+            client,
+            process,
+            scanner,
+            state,
+            commit_code,
+            output_capacity=output_capacity,
+            operation=f"world monster loop formation and dispatch {dispatch_count + 1}",
+        )
+        commit = parse_world_monster_commit_output(commit_result.output, search)
+        current_stamina = commit.current_stamina
+        if not commit.request_dispatched:
+            return None, {
+                "blocked_reason": commit.blocked_reason,
+                "required_stamina": commit.required_stamina,
+                "base_stamina": commit.base_stamina,
+                "detail": (
+                    f"current stamina {commit.current_stamina} is below required "
+                    f"stamina {commit.required_stamina}"
+                ),
+            }
+
+        verify_deadline = time.monotonic() + operation_timeout_seconds
+        while True:
+            check_stop()
+            verify_result = _execute_lua_when_idle(
+                adb,
+                profile,
+                client,
+                process,
+                scanner,
+                state,
+                verify_code,
+                output_capacity=output_capacity,
+                operation=f"world monster loop march verification {dispatch_count + 1}",
+            )
+            verification = parse_world_monster_verify_output(
+                verify_result.output, search
+            )
+            current_stamina = verification.current_stamina
+            if verification.march_id is not None:
+                dispatch_count += 1
+                march = {
+                    "march_id": verification.march_id,
+                    "status": "ACTIVE",
+                    "state": "ACTIVE",
+                    "level": search.level,
+                    "monster_id": search.monster_id,
+                    "recommended_power": search.recommended_power,
+                    "world_x": search.world_x,
+                    "world_y": search.world_y,
+                    "required_stamina": commit.required_stamina,
+                    "base_stamina": commit.base_stamina,
+                }
+                return march, None
+            if time.monotonic() >= verify_deadline:
+                raise BusinessError(
+                    "world monster request was dispatched but no matching "
+                    "server-created self march appeared before timeout"
+                )
+            time.sleep(poll_interval_seconds)
+
+    def emit_blocked(blocked: Mapping[str, Any]) -> None:
+        emit(
+            "blocked",
+            blocked_reason=blocked.get("blocked_reason"),
+            required_stamina=blocked.get("required_stamina"),
+            base_stamina=blocked.get("base_stamina"),
+            detail=blocked.get("detail"),
+        )
+
+    old_sigterm: Any = None
+    sigterm_installed = False
+
+    def request_stop(_signum: int, _frame: Any) -> None:
+        nonlocal stop_requested
+        stop_requested = True
+
+    terminal_outcome = False
+    try:
+        try:
+            old_sigterm = signal.getsignal(signal.SIGTERM)
+            signal.signal(signal.SIGTERM, request_stop)
+            sigterm_installed = True
+        except (AttributeError, ValueError):
+            pass
+
+        with client:
+            initialization = dict(client.initialize_bridge(profile.bridge_remote_path))
+            scanner.verify_idle_main(process.pid, state.address)
+            emit(
+                "start",
+                bridge_arch=initialization.get("arch"),
+                pid=process.pid,
+            )
+            try:
+                while True:
+                    check_stop()
+                    while len(active) < requested_concurrency:
+                        try:
+                            march, blocked = dispatch_one()
+                        except LuaExecutionError as exc:
+                            if "requested monster level exceeds" not in str(exc):
+                                raise
+                            blocked = {
+                                "blocked_reason": "level_locked",
+                                "detail": str(exc),
+                            }
+                            march = None
+                        if blocked is not None:
+                            emit_blocked(blocked)
+                            emit("stopped", reason=str(blocked.get("blocked_reason")))
+                            terminal_outcome = True
+                            return 0
+                        assert march is not None
+                        march_id = int(march["march_id"])
+                        if march_id in active:
+                            raise BusinessError(
+                                f"world monster loop received duplicate march id {march_id}"
+                            )
+                        active[march_id] = march
+                        emit("dispatch", dispatched_march=march)
+
+                    check_stop()
+                    status_code = build_world_monster_status_lua(tuple(sorted(active)))
+                    status_result = _execute_lua_when_idle(
+                        adb,
+                        profile,
+                        client,
+                        process,
+                        scanner,
+                        state,
+                        status_code,
+                        output_capacity=output_capacity,
+                        operation="world monster loop status",
+                    )
+                    snapshot = parse_world_monster_status_output(
+                        status_result.output, tuple(sorted(active))
+                    )
+                    current_stamina = snapshot.current_stamina
+                    signature = tuple(
+                        (status.march_id, status.state)
+                        for status in snapshot.statuses
+                    )
+                    for status in snapshot.statuses:
+                        if status.march_id in active:
+                            active[status.march_id]["status"] = status.state
+                            active[status.march_id]["state"] = status.state
+                    if signature != previous_status_signature:
+                        emit(
+                            "status",
+                            statuses=[
+                                {
+                                    "march_id": status.march_id,
+                                    "status": status.state,
+                                    "state": status.state,
+                                }
+                                for status in snapshot.statuses
+                            ],
+                        )
+                        previous_status_signature = signature
+                    returned = [
+                        status.march_id
+                        for status in snapshot.statuses
+                        if status.state == "RETURNED"
+                    ]
+                    if returned:
+                        for march_id in returned:
+                            active.pop(march_id, None)
+                        previous_status_signature = None
+                        emit("returned", returned_march_ids=returned)
+                        continue
+                    time.sleep(poll_interval_seconds)
+            except KeyboardInterrupt:
+                emit("stopped", reason="signal")
+                terminal_outcome = True
+                return 0
+            except Exception as exc:
+                emit("error", error=str(exc), error_type=type(exc).__name__)
+                terminal_outcome = True
+                return 2
+            finally:
+                try:
+                    _verify_process_after_lua(
+                        adb,
+                        profile,
+                        scanner,
+                        process,
+                        state,
+                        "world monster loop",
+                    )
+                except Exception as final_error:
+                    if not terminal_outcome:
+                        raise
+                    LOGGER.warning(
+                        "world monster loop post-check failed after terminal event; "
+                        "preserving the terminal result: %s",
+                        final_error,
+                    )
+    except KeyboardInterrupt:
+        emit("stopped", reason="signal")
+        return 0
+    except Exception as exc:
+        emit("error", error=str(exc), error_type=type(exc).__name__)
+        return 2
+    finally:
+        if sigterm_installed:
+            signal.signal(signal.SIGTERM, old_sigterm)
+
+
 def execute(args: argparse.Namespace, settings: Settings) -> int:
     if args.command == "validate":
         for profile in settings.devices:
@@ -2923,6 +3514,10 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
     batch_target_specs: tuple[dict[str, Any], ...] | None = None
     target_runtime_id: int | None = None
     target_ids: tuple[int, ...] | None = None
+    world_monster_level: int | None = None
+    world_monster_count: int | None = None
+    world_monster_loop_concurrency: int | None = None
+    world_monster_march_ids: tuple[int, ...] | None = None
     timeout_seconds: float | None = None
     poll_interval_seconds: float | None = None
     if args.command == "exec-lua":
@@ -2969,6 +3564,29 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
         code = build_install_march_capture_hook_lua(operation_roles)
     elif args.command == "unhook-march-capture":
         code = build_uninstall_march_capture_hook_lua(operation_roles)
+    elif args.command == "hunt-world-monster":
+        world_monster_level = normalize_world_monster_level(args.level)
+        world_monster_count = normalize_world_monster_count(args.count)
+        timeout_seconds, poll_interval_seconds = _polling_options(args)
+        code = build_world_monster_search_lua(world_monster_level)
+    elif args.command == "world-monster-loop":
+        world_monster_level = normalize_world_monster_level(args.level)
+        world_monster_loop_concurrency = normalize_world_monster_count(
+            args.concurrency
+        )
+        poll_interval_seconds = float(args.poll_interval)
+        if (
+            isinstance(args.poll_interval, bool)
+            or not math.isfinite(poll_interval_seconds)
+            or not 0.05 <= poll_interval_seconds <= 60
+        ):
+            raise BusinessError(
+                "world monster loop poll interval must be between 0.05 and 60 seconds"
+            )
+        code = build_world_monster_search_lua(world_monster_level)
+    elif args.command == "world-monster-status":
+        world_monster_march_ids = normalize_world_monster_march_ids(args.march_ids)
+        code = build_world_monster_status_lua(world_monster_march_ids)
     else:
         raise ConfigError(f"unsupported command {args.command!r}")
 
@@ -2997,6 +3615,14 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
         payload["requested_target_id"] = target_runtime_id
     if target_ids is not None:
         payload["requested_target_ids"] = list(target_ids)
+    if world_monster_level is not None:
+        payload["level"] = world_monster_level
+    if world_monster_count is not None:
+        payload["requested_count"] = world_monster_count
+    if world_monster_loop_concurrency is not None:
+        payload["concurrency"] = world_monster_loop_concurrency
+    if world_monster_march_ids is not None:
+        payload["march_ids"] = list(world_monster_march_ids)
     if expected_role is not None:
         payload["expected_role"] = expected_role
 
@@ -3006,6 +3632,8 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
         "batch-intel",
         "claim-intel",
         "ensure-world",
+        "hunt-world-monster",
+        "world-monster-loop",
     }:
         payload.update({"dry_run": True, "lua_executed": False})
         print(json.dumps(payload, ensure_ascii=False))
@@ -3043,6 +3671,72 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
         )
         print(json.dumps(payload, ensure_ascii=False))
         return 0
+
+    if args.command == "hunt-world-monster":
+        assert world_monster_level is not None
+        assert world_monster_count is not None
+        assert timeout_seconds is not None
+        assert poll_interval_seconds is not None
+        if args.dry_run:
+            payload.update(
+                {
+                    "dry_run": True,
+                    "lua_executed": False,
+                    "request_dispatched": False,
+                    "verified": False,
+                    "march_id": None,
+                    "march_ids": [],
+                    "marches": [],
+                    "statuses": [],
+                    "current_stamina": None,
+                    "required_stamina": None,
+                    "base_stamina": None,
+                    "blocked_reason": None,
+                }
+            )
+        else:
+            payload.update(
+                _execute_hunt_world_monster(
+                    adb,
+                    profile,
+                    client,
+                    process,
+                    world_monster_level,
+                    world_monster_count,
+                    output_capacity=settings.frida.output_capacity,
+                    timeout_seconds=timeout_seconds,
+                    poll_interval_seconds=poll_interval_seconds,
+                )
+            )
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+
+    if args.command == "world-monster-loop":
+        assert world_monster_level is not None
+        assert world_monster_loop_concurrency is not None
+        assert poll_interval_seconds is not None
+        if args.dry_run:
+            payload.update(
+                {
+                    "dry_run": True,
+                    "lua_executed": False,
+                    "active_march_ids": [],
+                    "marches": [],
+                    "current_stamina": None,
+                }
+            )
+            print(json.dumps(payload, ensure_ascii=False))
+            return 0
+        return _execute_world_monster_loop(
+            adb,
+            profile,
+            client,
+            process,
+            world_monster_level,
+            world_monster_loop_concurrency,
+            output_capacity=settings.frida.output_capacity,
+            poll_interval_seconds=poll_interval_seconds,
+        )
 
     if args.command == "inspect-tasks":
         payload.update(
@@ -3206,8 +3900,39 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
         payload.update(
             {
                 "role": snapshot.role,
+                "current_stamina": snapshot.current_stamina,
                 "item_count": len(snapshot.items),
                 "items": [asdict(item) for item in snapshot.items],
+            }
+        )
+    elif args.command == "world-monster-status":
+        assert world_monster_march_ids is not None
+        snapshot = parse_world_monster_status_output(
+            result.output, world_monster_march_ids
+        )
+        statuses = [
+            {
+                "march_id": status.march_id,
+                "status": status.state,
+                "state": status.state,
+            }
+            for status in snapshot.statuses
+        ]
+        payload.update(
+            {
+                "role": snapshot.role,
+                "current_stamina": snapshot.current_stamina,
+                "blocked_reason": None,
+                "march_ids": list(world_monster_march_ids),
+                "statuses": statuses,
+                "marches": [
+                    {
+                        "march_id": status.march_id,
+                        "status": status.state,
+                        "state": status.state,
+                    }
+                    for status in snapshot.statuses
+                ],
             }
         )
     else:

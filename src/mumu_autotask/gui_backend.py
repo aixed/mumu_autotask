@@ -9,7 +9,7 @@ import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 class GuiBackendError(RuntimeError):
@@ -29,6 +29,12 @@ DEFAULT_GUI_CATEGORIES = GUI_CATEGORY_ORDER
 MIN_HUNT_CONCURRENCY = 1
 MAX_HUNT_CONCURRENCY = 4
 DEFAULT_HUNT_CONCURRENCY = 3
+MIN_WORLD_MONSTER_LEVEL = 1
+MAX_WORLD_MONSTER_LEVEL = 20
+DEFAULT_WORLD_MONSTER_LEVEL = 16
+MIN_WORLD_MONSTER_CONCURRENCY = 1
+MAX_WORLD_MONSTER_CONCURRENCY = 4
+DEFAULT_WORLD_MONSTER_CONCURRENCY = 4
 GUI_PREFERENCES_FILENAME = "mumu_autotask_gui_preferences.json"
 
 
@@ -141,6 +147,50 @@ class GuiPreferences:
             self._write(updated)
             self._memory_data = updated
 
+    def get_world_monster_level(self, serial: str) -> int:
+        serial = self._validate_serial(serial)
+        with self._lock:
+            data = self._read()
+            section = data["devices"].get(serial)
+            if section is None:
+                return DEFAULT_WORLD_MONSTER_LEVEL
+            return int(section["world_monster_level"])
+
+    def set_world_monster_level(self, serial: str, value: int) -> None:
+        serial = self._validate_serial(serial)
+        level = self._validate_world_monster_level(value)
+        with self._lock:
+            data = self._read()
+            devices = dict(data["devices"])
+            section = dict(devices.get(serial, self._default_device_section()))
+            section["world_monster_level"] = level
+            devices[serial] = section
+            updated = {"version": 1, "devices": devices}
+            self._write(updated)
+            self._memory_data = updated
+
+    def get_world_monster_concurrency(self, serial: str) -> int:
+        serial = self._validate_serial(serial)
+        with self._lock:
+            data = self._read()
+            section = data["devices"].get(serial)
+            if section is None:
+                return DEFAULT_WORLD_MONSTER_CONCURRENCY
+            return int(section["world_monster_concurrency"])
+
+    def set_world_monster_concurrency(self, serial: str, value: int) -> None:
+        serial = self._validate_serial(serial)
+        concurrency = self._validate_world_monster_concurrency(value)
+        with self._lock:
+            data = self._read()
+            devices = dict(data["devices"])
+            section = dict(devices.get(serial, self._default_device_section()))
+            section["world_monster_concurrency"] = concurrency
+            devices[serial] = section
+            updated = {"version": 1, "devices": devices}
+            self._write(updated)
+            self._memory_data = updated
+
     @staticmethod
     def _empty_data() -> dict[str, Any]:
         return {"version": 1, "devices": {}}
@@ -157,6 +207,8 @@ class GuiPreferences:
                 for quality in GUI_QUALITY_ORDER
             },
             "concurrency": DEFAULT_HUNT_CONCURRENCY,
+            "world_monster_level": DEFAULT_WORLD_MONSTER_LEVEL,
+            "world_monster_concurrency": DEFAULT_WORLD_MONSTER_CONCURRENCY,
         }
 
     @staticmethod
@@ -204,6 +256,33 @@ class GuiPreferences:
         ):
             raise GuiBackendError(
                 f"并发出征数必须是 {MIN_HUNT_CONCURRENCY}-{MAX_HUNT_CONCURRENCY} 的整数"
+            )
+        return value
+
+    @staticmethod
+    def _validate_world_monster_level(value: int) -> int:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not MIN_WORLD_MONSTER_LEVEL <= value <= MAX_WORLD_MONSTER_LEVEL
+        ):
+            raise GuiBackendError(
+                f"野兽等级必须是 {MIN_WORLD_MONSTER_LEVEL}-{MAX_WORLD_MONSTER_LEVEL} 的整数"
+            )
+        return value
+
+    @staticmethod
+    def _validate_world_monster_concurrency(value: int) -> int:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not MIN_WORLD_MONSTER_CONCURRENCY
+            <= value
+            <= MAX_WORLD_MONSTER_CONCURRENCY
+        ):
+            raise GuiBackendError(
+                "搜索野兽并发出征数必须是 "
+                f"{MIN_WORLD_MONSTER_CONCURRENCY}-{MAX_WORLD_MONSTER_CONCURRENCY} 的整数"
             )
         return value
 
@@ -284,10 +363,21 @@ class GuiPreferences:
             concurrency = cls._validate_concurrency(
                 section.get("concurrency", DEFAULT_HUNT_CONCURRENCY)
             )
+            world_monster_level = cls._validate_world_monster_level(
+                section.get("world_monster_level", DEFAULT_WORLD_MONSTER_LEVEL)
+            )
+            world_monster_concurrency = cls._validate_world_monster_concurrency(
+                section.get(
+                    "world_monster_concurrency",
+                    DEFAULT_WORLD_MONSTER_CONCURRENCY,
+                )
+            )
             validated[serial] = {
                 "categories": categories,
                 "qualities": normalized,
                 "concurrency": concurrency,
+                "world_monster_level": world_monster_level,
+                "world_monster_concurrency": world_monster_concurrency,
             }
         return {"version": 1, "devices": validated}
 
@@ -519,6 +609,78 @@ class CliRunner:
             )
         return result
 
+    def run_json_stream(
+        self,
+        arguments: Sequence[str],
+        on_payload: Callable[[Mapping[str, Any]], None],
+    ) -> CommandResult:
+        command = self.command(*arguments)
+        environment = os.environ.copy()
+        environment["PYTHONIOENCODING"] = "utf-8"
+        environment["PYTHONUTF8"] = "1"
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=self.config_path.parent,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=creationflags,
+                bufsize=1,
+            )
+        except OSError as exc:
+            raise GuiBackendError(f"无法启动 Python 命令：{exc}") from exc
+        with self._lock:
+            self._processes[process] = command
+        stderr_parts: list[str] = []
+
+        def read_stderr() -> None:
+            if process.stderr is None:
+                return
+            stderr_parts.extend(process.stderr.readlines())
+
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+        stderr_thread.start()
+        stdout_parts: list[str] = []
+        try:
+            if process.stdout is None:
+                raise GuiBackendError("后台命令没有可读取的标准输出")
+            for line in process.stdout:
+                stdout_parts.append(line)
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    payload = json.loads(stripped)
+                except json.JSONDecodeError as exc:
+                    process.kill()
+                    raise GuiBackendError(
+                        f"常驻命令返回了无效 JSON：第 {exc.lineno} 行"
+                    ) from exc
+                if not isinstance(payload, dict):
+                    process.kill()
+                    raise GuiBackendError("常驻命令事件必须是 JSON 对象")
+                on_payload(payload)
+            returncode = process.wait()
+        finally:
+            stderr_thread.join(timeout=2)
+            with self._lock:
+                self._processes.pop(process, None)
+        stdout = "".join(stdout_parts)
+        stderr = "".join(stderr_parts)
+        result = CommandResult(command, returncode, stdout, stderr)
+        if returncode != 0:
+            diagnostic = _command_error_context(stderr, stdout)
+            raise GuiBackendError(
+                diagnostic.splitlines()[0],
+                diagnostic=diagnostic,
+            )
+        return result
+
     def cancel_all(self) -> None:
         with self._lock:
             processes = tuple(self._processes)
@@ -590,6 +752,18 @@ class GuiBackend:
 
     def set_concurrency(self, serial: str, value: int) -> None:
         self.preferences.set_concurrency(serial, value)
+
+    def get_world_monster_level(self, serial: str) -> int:
+        return self.preferences.get_world_monster_level(serial)
+
+    def set_world_monster_level(self, serial: str, value: int) -> None:
+        self.preferences.set_world_monster_level(serial, value)
+
+    def get_world_monster_concurrency(self, serial: str) -> int:
+        return self.preferences.get_world_monster_concurrency(serial)
+
+    def set_world_monster_concurrency(self, serial: str, value: int) -> None:
+        self.preferences.set_world_monster_concurrency(serial, value)
 
     def connect_devices(self) -> str:
         result = self.runner.run(("devices", "--connect"), timeout=30)
@@ -802,6 +976,71 @@ class GuiBackend:
         if len(payloads) != 1:
             raise GuiBackendError("批量情报命令返回了意外的数据条数")
         return payloads[0]
+
+    def hunt_world_monsters(
+        self,
+        serial: str,
+        level: int,
+        count: int,
+    ) -> Mapping[str, Any]:
+        level = GuiPreferences._validate_world_monster_level(level)
+        count = GuiPreferences._validate_world_monster_concurrency(count)
+        result = self.runner.run(
+            (
+                "hunt-world-monster",
+                "--serial",
+                serial,
+                "--level",
+                str(level),
+                "--count",
+                str(count),
+                "--execute",
+            ),
+            timeout=180,
+        )
+        payloads = parse_json_lines(result.stdout)
+        if len(payloads) != 1:
+            raise GuiBackendError("搜索野兽出征命令返回了意外的数据条数")
+        return payloads[0]
+
+    def world_monster_status(
+        self,
+        serial: str,
+        march_ids: Sequence[int],
+    ) -> Mapping[str, Any]:
+        ids = _validate_target_ids(march_ids)
+        arguments = ["world-monster-status", "--serial", serial]
+        for march_id in ids:
+            arguments.extend(("--march-id", str(march_id)))
+        arguments.append("--execute")
+        result = self.runner.run(arguments, timeout=45)
+        payloads = parse_json_lines(result.stdout)
+        if len(payloads) != 1:
+            raise GuiBackendError("世界野兽行军状态命令返回了意外的数据条数")
+        return payloads[0]
+
+    def world_monster_loop(
+        self,
+        serial: str,
+        level: int,
+        concurrency: int,
+        on_event: Callable[[Mapping[str, Any]], None],
+    ) -> None:
+        level = GuiPreferences._validate_world_monster_level(level)
+        concurrency = GuiPreferences._validate_world_monster_concurrency(concurrency)
+        self.runner.run_json_stream(
+            (
+                "world-monster-loop",
+                "--serial",
+                serial,
+                "--level",
+                str(level),
+                "--concurrency",
+                str(concurrency),
+                "--execute",
+            ),
+            on_event,
+        )
 
     def wait_intel(
         self,

@@ -8,6 +8,8 @@ from pathlib import Path
 from mumu_autotask.gui_backend import (
     DEFAULT_GUI_CATEGORIES,
     DEFAULT_HUNT_CONCURRENCY,
+    DEFAULT_WORLD_MONSTER_CONCURRENCY,
+    DEFAULT_WORLD_MONSTER_LEVEL,
     GUI_PREFERENCES_FILENAME,
     GuiBackendError,
     GuiPreferences,
@@ -36,6 +38,14 @@ class GuiPreferencesTests(unittest.TestCase):
             self.assertEqual(
                 preferences.get_concurrency("127.0.0.1:16384"),
                 DEFAULT_HUNT_CONCURRENCY,
+            )
+            self.assertEqual(
+                preferences.get_world_monster_level("127.0.0.1:16384"),
+                DEFAULT_WORLD_MONSTER_LEVEL,
+            )
+            self.assertEqual(
+                preferences.get_world_monster_concurrency("127.0.0.1:16384"),
+                DEFAULT_WORLD_MONSTER_CONCURRENCY,
             )
 
     def test_device_sections_are_saved_immediately_and_independently(self) -> None:
@@ -148,6 +158,46 @@ class GuiPreferencesTests(unittest.TestCase):
                 saved["devices"]["127.0.0.1:16384"]["concurrency"], 2
             )
 
+    def test_world_monster_options_are_saved_per_device_and_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / GUI_PREFERENCES_FILENAME
+            preferences = GuiPreferences(path)
+
+            preferences.set_world_monster_level("127.0.0.1:16384", 12)
+            preferences.set_world_monster_concurrency("127.0.0.1:16384", 2)
+            preferences.set_world_monster_level("127.0.0.1:16480", 19)
+            preferences.set_world_monster_concurrency("127.0.0.1:16480", 4)
+
+            reloaded = GuiPreferences(path)
+            self.assertEqual(reloaded.get_world_monster_level("127.0.0.1:16384"), 12)
+            self.assertEqual(
+                reloaded.get_world_monster_concurrency("127.0.0.1:16384"), 2
+            )
+            self.assertEqual(reloaded.get_world_monster_level("127.0.0.1:16480"), 19)
+            self.assertEqual(
+                reloaded.get_world_monster_concurrency("127.0.0.1:16480"), 4
+            )
+            self.assertEqual(
+                reloaded.get_world_monster_level("unseen-device"),
+                DEFAULT_WORLD_MONSTER_LEVEL,
+            )
+            self.assertEqual(
+                reloaded.get_world_monster_concurrency("unseen-device"),
+                DEFAULT_WORLD_MONSTER_CONCURRENCY,
+            )
+            for invalid in (0, 21, True, 1.5):
+                with self.subTest(level=invalid):
+                    with self.assertRaisesRegex(GuiBackendError, "1-20"):
+                        preferences.set_world_monster_level(  # type: ignore[arg-type]
+                            "127.0.0.1:16384", invalid
+                        )
+            for invalid in (0, 5, True, 1.5):
+                with self.subTest(concurrency=invalid):
+                    with self.assertRaisesRegex(GuiBackendError, "1-4"):
+                        preferences.set_world_monster_concurrency(  # type: ignore[arg-type]
+                            "127.0.0.1:16384", invalid
+                        )
+
     def test_categories_are_saved_per_device_and_allow_multi_select(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / GUI_PREFERENCES_FILENAME
@@ -202,6 +252,12 @@ class GuiPreferencesTests(unittest.TestCase):
             preferences = GuiPreferences(path)
 
             self.assertEqual(preferences.get_concurrency("127.0.0.1:16384"), 3)
+            self.assertEqual(
+                preferences.get_world_monster_level("127.0.0.1:16384"), 16
+            )
+            self.assertEqual(
+                preferences.get_world_monster_concurrency("127.0.0.1:16384"), 4
+            )
             self.assertEqual(
                 preferences.get_selected_categories("127.0.0.1:16384"),
                 DEFAULT_GUI_CATEGORIES,

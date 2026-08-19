@@ -259,6 +259,10 @@ def business_args(
     expected_role: str | None = None,
     output_file=None,
     keep_hook: bool = False,
+    level: int | None = None,
+    count: int = 1,
+    concurrency: int = 4,
+    march_ids: list[int] | None = None,
 ) -> argparse.Namespace:
     return argparse.Namespace(
         command=command,
@@ -274,6 +278,10 @@ def business_args(
         expected_role=expected_role,
         output_file=output_file,
         keep_hook=keep_hook,
+        level=level,
+        count=count,
+        concurrency=concurrency,
+        march_ids=march_ids,
         dry_run=dry_run,
     )
 
@@ -317,7 +325,39 @@ def rescue_commit_protocol(role: str, target_id: int) -> str:
     )
 
 
-def march_commit_protocol(role: str, target_id: int) -> str:
+def march_prepare_protocol(
+    role: str,
+    target_id: int,
+    *,
+    current: int = 49,
+    required: int = 8,
+    base: int = 10,
+    ready: bool = True,
+) -> str:
+    return "\n".join(
+        (
+            "MUMU_AUTOTASK\t1\tPREPARE",
+            f"ROLE\t{role.encode('utf-8').hex()}",
+            "KINGDOM\t4549",
+            f"TARGET\t{target_id}",
+            "AVERAGE\t1",
+            f"STAMINA\t{current}\t{required}\t{base}",
+            f"READY\t{int(ready)}",
+            f"REASON\t{'NONE' if ready else 'INSUFFICIENT_STAMINA'}",
+            "END\t1",
+        )
+    )
+
+
+def march_commit_protocol(
+    role: str,
+    target_id: int,
+    *,
+    current: int = 49,
+    required: int = 8,
+    base: int = 10,
+    dispatched: bool = True,
+) -> str:
     return "\n".join(
         (
             "MUMU_AUTOTASK\t1\tCOMMIT",
@@ -325,7 +365,9 @@ def march_commit_protocol(role: str, target_id: int) -> str:
             "KINGDOM\t4549",
             f"TARGET\t{target_id}",
             "AVERAGE\t1",
-            "GO\t1",
+            f"STAMINA\t{current}\t{required}\t{base}",
+            f"GO\t{int(dispatched)}",
+            f"REASON\t{'NONE' if dispatched else 'INSUFFICIENT_STAMINA'}",
             "END\t1",
         )
     )
@@ -384,6 +426,65 @@ def claim_protocol(role: str, target_ids: tuple[int, ...], *, sent: bool) -> str
             "END\t1",
         )
     )
+
+
+def world_monster_search_sent_protocol(role: str, level: int) -> str:
+    return "\n".join((
+        "MUMU_AUTOTASK\t1\tWORLD_MONSTER_SEARCH_SENT",
+        f"ROLE\t{role.encode('utf-8').hex()}", "KINGDOM\t4549",
+        f"LEVEL\t{level}", "SENT\t1", "END\t1",
+    ))
+
+
+def world_monster_search_protocol(role: str, level: int) -> str:
+    return "\n".join((
+        "MUMU_AUTOTASK\t1\tWORLD_MONSTER_SEARCH",
+        f"ROLE\t{role.encode('utf-8').hex()}", "KINGDOM\t4549",
+        f"LEVEL\t{level}", "READY\t1", "POINT\t833\t749",
+        f"MONSTER\t{7100000 + level}\t177168", "STAMINA\t42", "END\t1",
+    ))
+
+
+def world_monster_commit_protocol(
+    role: str, level: int, *, current: int = 42, required: int = 8, sent: bool = True
+) -> str:
+    return "\n".join((
+        "MUMU_AUTOTASK\t1\tWORLD_MONSTER_COMMIT",
+        f"ROLE\t{role.encode('utf-8').hex()}", "KINGDOM\t4549",
+        f"LEVEL\t{level}", f"MONSTER\t{7100000 + level}",
+        "POINT\t833\t749", "AVERAGE\t1",
+        f"STAMINA\t{current}\t{required}\t10",
+        f"SENT\t{int(sent)}",
+        f"REASON\t{'NONE' if sent else 'INSUFFICIENT_STAMINA'}", "END\t1",
+    ))
+
+
+def world_monster_verify_protocol(
+    role: str, level: int, march_id: int, *, current_stamina: int = 34
+) -> str:
+    return "\n".join((
+        "MUMU_AUTOTASK\t1\tWORLD_MONSTER_VERIFY",
+        f"ROLE\t{role.encode('utf-8').hex()}", "KINGDOM\t4549",
+        f"LEVEL\t{level}", f"MONSTER\t{7100000 + level}",
+        "POINT\t833\t749", f"MARCH\t{march_id}",
+        f"STAMINA\t{current_stamina}", "END\t1",
+    ))
+
+
+def world_monster_status_protocol(
+    role: str,
+    statuses: tuple[tuple[int, str], ...],
+    *,
+    current_stamina: int = 34,
+) -> str:
+    return "\n".join((
+        "MUMU_AUTOTASK\t1\tWORLD_MONSTER_STATUS",
+        f"ROLE\t{role.encode('utf-8').hex()}",
+        "KINGDOM\t4549",
+        f"STAMINA\t{current_stamina}",
+        *(f"MARCH\t{march_id}\t{state}" for march_id, state in statuses),
+        f"END\t{len(statuses)}",
+    ))
 
 
 def capture_records_protocol(role: str) -> str:
@@ -659,7 +760,7 @@ class CliTests(unittest.TestCase):
                 f"ROLE\t{role_hex}",
                 "KINGDOM\t4549",
                 "ITEM\t70\t1700\t1\t759\t774\t1900000000"
-                "\tpurple\t4\t813\t13\t10",
+                "\tpurple\t4\t813\t13\t10\t48200",
                 "END\t1",
             )
         )
@@ -1125,7 +1226,7 @@ class CliTests(unittest.TestCase):
                 "MUMU_AUTOTASK\t1\tINTEL",
                 f"ROLE\t{role_hex}",
                 "KINGDOM\t4549",
-                "ITEM\t70\t1700\t0\t700\t701\t1800000000\tgreen\t2\t808\t8\t10",
+                "ITEM\t70\t1700\t0\t700\t701\t1800000000\tgreen\t2\t808\t8\t10\t10000",
                 "END\t1",
             )
         )
@@ -1163,7 +1264,8 @@ class CliTests(unittest.TestCase):
                     "MUMU_AUTOTASK\t1\tINTEL",
                     f"ROLE\t{role_hex}",
                     "KINGDOM\t4549",
-                    "ITEM\t70\t1700\t0\t700\t701\t1800000000\tpurple\t4\t808\t8\t10",
+                    "STAMINA\t49",
+                    "ITEM\t70\t1700\t0\t700\t701\t1800000000\tpurple\t4\t808\t8\t10\t48200",
                     "END\t1",
                 )
             ),
@@ -1177,6 +1279,7 @@ class CliTests(unittest.TestCase):
                 "ITEM\t900\t1900\t1\t790\t770\t1900000001\trescue\t2\tblue\t3\t1\t1\t0\t0",
             ),
         )
+
         settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
         output = io.StringIO()
         with (
@@ -1196,6 +1299,7 @@ class CliTests(unittest.TestCase):
             )
         result = json.loads(output.getvalue())
         self.assertEqual(result["role"], role)
+        self.assertEqual(result["current_stamina"], 49)
         self.assertEqual(result["categories"], {"monster": 1, "hero": 1, "rescue": 1})
         self.assertEqual(result["item_count"], 3)
         self.assertEqual(
@@ -1204,6 +1308,218 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(events.count("frida-attach"), 1)
         self.assertEqual(events.count("lua-execute"), 3)
+
+    def test_world_monster_parser_defaults_and_level_range(self) -> None:
+        parser = build_parser()
+        hunt = [
+            "hunt-world-monster", "--serial", "device-1", "--level", "16",
+            "--count", "4",
+        ]
+        self.assertTrue(parser.parse_args(hunt).dry_run)
+        self.assertFalse(parser.parse_args([*hunt, "--execute"]).dry_run)
+        status = [
+            "world-monster-status", "--serial", "device-1",
+            "--march-id", "901", "--march-id", "902",
+        ]
+        self.assertTrue(parser.parse_args(status).dry_run)
+        self.assertFalse(parser.parse_args([*status, "--execute"]).dry_run)
+        loop = [
+            "world-monster-loop", "--serial", "device-1", "--level", "16",
+        ]
+        parsed_loop = parser.parse_args(loop)
+        self.assertTrue(parsed_loop.dry_run)
+        self.assertEqual(parsed_loop.concurrency, 4)
+        self.assertEqual(parsed_loop.poll_interval, 1.5)
+        self.assertFalse(parser.parse_args([*loop, "--execute"]).dry_run)
+        with self.assertRaises(BusinessError):
+            execute(
+                business_args("hunt-world-monster", level=21),
+                Settings(devices=(DeviceProfile("device-1"),)),
+            )
+
+    def test_world_monster_hunt_returns_verified_real_march_id(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        level = 16
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        output = io.StringIO()
+        client = FakeClient(events, outputs=(
+            world_monster_search_sent_protocol(role, level),
+            world_monster_search_protocol(role, level),
+            world_monster_commit_protocol(role, level),
+            world_monster_verify_protocol(role, level, 901),
+        ))
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch("mumu_autotask.cli._client", return_value=client),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(execute(business_args(
+                "hunt-world-monster", dry_run=False, level=level,
+                timeout=1.0, poll_interval=0.05,
+            ), settings), 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["march_id"], 901)
+        self.assertEqual(payload["march_ids"], [901])
+        self.assertTrue(payload["marches"][0]["verified"])
+        self.assertEqual(
+            payload["statuses"],
+            [{"march_id": 901, "status": "ACTIVE", "state": "ACTIVE"}],
+        )
+        self.assertTrue(payload["request_dispatched"])
+        self.assertTrue(payload["verified"])
+        self.assertEqual(payload["current_stamina"], 34)
+        self.assertIsNone(payload["blocked_reason"])
+        self.assertEqual(events.count("frida-attach"), 1)
+
+    def test_world_monster_hunt_stamina_block_never_verifies(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        level = 16
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        output = io.StringIO()
+        client = FakeClient(events, outputs=(
+            world_monster_search_sent_protocol(role, level),
+            world_monster_search_protocol(role, level),
+            world_monster_commit_protocol(
+                role, level, current=7, required=8, sent=False
+            ),
+        ))
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch("mumu_autotask.cli._client", return_value=client),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(execute(business_args(
+                "hunt-world-monster", dry_run=False, level=level,
+                timeout=1.0, poll_interval=0.05,
+            ), settings), 0)
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["request_dispatched"])
+        self.assertFalse(payload["verified"])
+        self.assertEqual(payload["blocked_reason"], "insufficient_stamina")
+        self.assertEqual(payload["march_ids"], [])
+        self.assertEqual(events.count("lua-execute"), 3)
+
+    def test_world_monster_count_rebuilds_each_formation_and_keeps_partial_success(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        level = 16
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        output = io.StringIO()
+        client = FakeClient(events, outputs=(
+            world_monster_search_sent_protocol(role, level),
+            world_monster_search_protocol(role, level),
+            world_monster_commit_protocol(role, level),
+            world_monster_verify_protocol(role, level, 901, current_stamina=34),
+            world_monster_search_sent_protocol(role, level),
+            world_monster_search_protocol(role, level),
+            world_monster_commit_protocol(
+                role, level, current=7, required=8, sent=False
+            ),
+        ))
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch("mumu_autotask.cli._client", return_value=client),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(execute(business_args(
+                "hunt-world-monster", dry_run=False, level=level, count=2,
+                timeout=1.0, poll_interval=0.05,
+            ), settings), 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["requested_count"], 2)
+        self.assertEqual(payload["completed_count"], 1)
+        self.assertEqual(payload["march_ids"], [901])
+        self.assertEqual(payload["blocked_reason"], "insufficient_stamina")
+        self.assertEqual(payload["current_stamina"], 7)
+        self.assertEqual(events.count("lua-execute"), 7)
+
+    def test_world_monster_loop_uses_one_session_refills_returned_and_stops_on_stamina(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        level = 16
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        outputs: list[str | Exception] = []
+        for march_id, stamina in ((901, 34), (902, 26), (903, 18), (904, 10)):
+            outputs.extend((
+                world_monster_search_sent_protocol(role, level),
+                world_monster_search_protocol(role, level),
+                world_monster_commit_protocol(role, level),
+                world_monster_verify_protocol(
+                    role, level, march_id, current_stamina=stamina
+                ),
+            ))
+        outputs.append(world_monster_status_protocol(
+            role,
+            ((901, "RETURNED"), (902, "ACTIVE"), (903, "ACTIVE"), (904, "ACTIVE")),
+            current_stamina=10,
+        ))
+        outputs.extend((
+            world_monster_search_sent_protocol(role, level),
+            world_monster_search_protocol(role, level),
+            world_monster_commit_protocol(
+                role, level, current=2, required=8, sent=False
+            ),
+        ))
+        output = io.StringIO()
+        client = FakeClient(events, outputs=tuple(outputs))
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch("mumu_autotask.cli._client", return_value=client),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(execute(business_args(
+                "world-monster-loop",
+                dry_run=False,
+                level=level,
+                concurrency=4,
+                poll_interval=0.05,
+            ), settings), 0)
+
+        payloads = [json.loads(line) for line in output.getvalue().splitlines()]
+        event_names = [payload["event"] for payload in payloads]
+        self.assertEqual(events.count("frida-attach"), 1)
+        self.assertEqual(events.count("frida-detach"), 1)
+        self.assertEqual(events.count("bridge-initialize"), 1)
+        dispatches = [payload for payload in payloads if payload["event"] == "dispatch"]
+        self.assertEqual(len(dispatches), 4)
+        self.assertEqual(dispatches[-1]["active_march_ids"], [901, 902, 903, 904])
+        returned = next(payload for payload in payloads if payload["event"] == "returned")
+        self.assertEqual(returned["returned_march_ids"], [901])
+        self.assertEqual(returned["active_march_ids"], [902, 903, 904])
+        blocked = next(payload for payload in payloads if payload["event"] == "blocked")
+        self.assertEqual(blocked["blocked_reason"], "insufficient_stamina")
+        self.assertEqual(blocked["current_stamina"], 2)
+        self.assertEqual(blocked["required_stamina"], 8)
+        self.assertIn("status", event_names)
+        self.assertEqual(event_names[-1], "stopped")
+
+    def test_world_monster_status_outputs_returned_and_stamina(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        protocol = "\n".join((
+            "MUMU_AUTOTASK\t1\tWORLD_MONSTER_STATUS",
+            f"ROLE\t{role.encode('utf-8').hex()}", "KINGDOM\t4549",
+            "STAMINA\t34", "MARCH\t901\tRETURNED", "END\t1",
+        ))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch("mumu_autotask.cli._client", return_value=FakeClient(events, output=protocol)),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(execute(business_args(
+                "world-monster-status", dry_run=False, march_ids=[901]
+            ), settings), 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["current_stamina"], 34)
+        self.assertEqual(payload["march_ids"], [901])
+        self.assertEqual(
+            payload["statuses"],
+            [{"march_id": 901, "status": "RETURNED", "state": "RETURNED"}],
+        )
 
     def test_inspect_tasks_rescans_when_post_execution_lua_state_moves(self) -> None:
         events: list[str] = []
@@ -1397,7 +1713,7 @@ class CliTests(unittest.TestCase):
                 "MUMU_AUTOTASK\t1\tINTEL",
                 f"ROLE\t{role_hex}",
                 "KINGDOM\t4549",
-                "ITEM\t70\t1700\t1\t700\t701\t1900000000\tyellow\t5\t808\t8\t10",
+                "ITEM\t70\t1700\t1\t700\t701\t1900000000\tyellow\t5\t808\t8\t10\t48200",
                 "END\t1",
             )
         )
@@ -1425,13 +1741,13 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result["target"]["runtime_id"], 70)
         self.assertEqual(events.count("lua-execute"), 1)
 
-    def test_march_execute_accepts_new_self_march_before_status_change(self) -> None:
+    def test_march_execute_uses_bottom_layer_calls_on_unity_main(self) -> None:
         events: list[str] = []
         role = "打工的"
         role_hex = role.encode("utf-8").hex()
         item = (
             "ITEM\t70\t1700\t1\t700\t701\t1900000000"
-            "\tpurple\t4\t808\t8\t10"
+            "\tpurple\t4\t808\t8\t10\t48200"
         )
         target_lines = (
             "\n".join(
@@ -1443,26 +1759,8 @@ class CliTests(unittest.TestCase):
                     "END\t1",
                 )
             ),
-            "\n".join(
-                (
-                    "MUMU_AUTOTASK\t1\tOPEN",
-                    f"ROLE\t{role_hex}",
-                    "KINGDOM\t4549",
-                    "TARGET\t70",
-                    "OPENED\t1",
-                    "END\t1",
-                )
-            ),
-            "\n".join(
-                (
-                    "MUMU_AUTOTASK\t1\tREADY",
-                    f"ROLE\t{role_hex}",
-                    "KINGDOM\t4549",
-                    "TARGET\t70",
-                    "READY\t1",
-                    "END\t1",
-                )
-            ),
+            march_prepare_protocol(role, 70),
+            march_commit_protocol(role, 70),
             "\n".join(
                 (
                     "MUMU_AUTOTASK\t1\tVERIFY",
@@ -1496,8 +1794,10 @@ class CliTests(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertTrue(result["request_dispatched"])
         self.assertEqual(result["quest_status_after"], "1")
-        self.assertTrue(result["average_tapped"])
-        self.assertTrue(result["go_tapped"])
+        self.assertEqual(result["dispatch_mode"], "direct")
+        self.assertFalse(result["average_tapped"])
+        self.assertFalse(result["go_tapped"])
+        self.assertFalse(any(event.startswith("input-tap:") for event in events))
         self.assertEqual(events.count("frida-attach"), 1)
         self.assertEqual(events.count("frida-detach"), 1)
         self.assertEqual(events.count("lua-execute"), 4)
@@ -1514,21 +1814,12 @@ class CliTests(unittest.TestCase):
                     f"ROLE\t{role_hex}",
                     "KINGDOM\t4549",
                     "ITEM\t70\t1700\t1\t700\t701\t1900000000"
-                    "\tpurple\t4\t808\t8\t10",
+                    "\tpurple\t4\t808\t8\t10\t48200",
                     "END\t1",
                 )
             ),
-            "\n".join(
-                (
-                    "MUMU_AUTOTASK\t1\tCOMMIT",
-                    f"ROLE\t{role_hex}",
-                    "KINGDOM\t4549",
-                    "TARGET\t70",
-                    "AVERAGE\t1",
-                    "GO\t1",
-                    "END\t1",
-                )
-            ),
+            march_prepare_protocol(role, 70),
+            march_commit_protocol(role, 70),
             "\n".join(
                 (
                     "MUMU_AUTOTASK\t1\tVERIFY",
@@ -1568,6 +1859,56 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result["dispatch_mode"], "direct")
         self.assertEqual(result["quest_status_after"], "2")
         self.assertFalse(any(event.startswith("input-tap:") for event in events))
+        self.assertEqual(events.count("lua-execute"), 4)
+
+    def test_march_final_stamina_recheck_blocks_without_verification(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        role_hex = role.encode("utf-8").hex()
+        outputs = (
+            "\n".join(
+                (
+                    "MUMU_AUTOTASK\t1\tINTEL",
+                    f"ROLE\t{role_hex}",
+                    "KINGDOM\t4549",
+                    "ITEM\t70\t1700\t1\t700\t701\t1900000000"
+                    "\tpurple\t4\t808\t8\t10\t48200",
+                    "END\t1",
+                )
+            ),
+            march_prepare_protocol(role, 70, current=8, required=8),
+            march_commit_protocol(
+                role,
+                70,
+                current=7,
+                required=8,
+                dispatched=False,
+            ),
+        )
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, outputs=outputs),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args("march", dry_run=False, quality="purple"),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["request_dispatched"])
+        self.assertEqual(result["blocked_reason"], "insufficient_stamina")
+        self.assertEqual(result["current_stamina"], 7)
+        self.assertEqual(result["required_stamina"], 8)
+        self.assertEqual(result["base_stamina"], 10)
+        self.assertEqual(result["verification_polls"], 0)
         self.assertEqual(events.count("lua-execute"), 3)
 
     def test_battle_intel_rescue_execute_uses_world_march_commit(self) -> None:
@@ -1682,6 +2023,7 @@ class CliTests(unittest.TestCase):
             "monster_id": 813,
             "level": 13,
             "stamina_cost": 10,
+            "recommended_power": 48200,
         }
         settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
         output = io.StringIO()
@@ -1692,6 +2034,7 @@ class CliTests(unittest.TestCase):
                 return_value=FakeClient(
                     events,
                     outputs=(
+                        march_prepare_protocol(role, target_id),
                         march_commit_protocol(role, target_id),
                         march_verify_protocol(role, target_id, status="1"),
                     ),
@@ -1716,7 +2059,7 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("inspect_monster", result["stage_script_sha256"])
         self.assertEqual(result["results"][0]["target"]["runtime_id"], target_id)
         self.assertEqual(result["results"][0]["verification_polls"], 1)
-        self.assertEqual(events.count("lua-execute"), 2)
+        self.assertEqual(events.count("lua-execute"), 3)
 
     def test_batch_monsters_are_accepted_before_next_formation_is_built(self) -> None:
         events: list[str] = []
@@ -1735,6 +2078,7 @@ class CliTests(unittest.TestCase):
                 "monster_id": 813,
                 "level": 13,
                 "stamina_cost": 10,
+                "recommended_power": 48200,
             },
             {
                 "category": "monster",
@@ -1749,11 +2093,14 @@ class CliTests(unittest.TestCase):
                 "monster_id": 814,
                 "level": 13,
                 "stamina_cost": 10,
+                "recommended_power": 48200,
             },
         )
         outputs = (
+            march_prepare_protocol(role, 443),
             march_commit_protocol(role, 443),
             march_verify_protocol(role, 443),
+            march_prepare_protocol(role, 444),
             march_commit_protocol(role, 444),
             march_verify_protocol(role, 444),
         )
@@ -1789,9 +2136,87 @@ class CliTests(unittest.TestCase):
             [item["verification_polls"] for item in result["results"]],
             [1, 1],
         )
+        self.assertEqual(events.count("lua-execute"), 6)
+
+    def test_batch_continues_after_one_monster_has_insufficient_stamina(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        targets = (
+            {
+                "category": "monster",
+                "runtime_id": 443,
+                "quest_id": 2443,
+                "status": 1,
+                "world_x": 772,
+                "world_y": 768,
+                "expires_at": 1900000000,
+                "quality": "blue",
+                "quality_id": 3,
+                "monster_id": 813,
+                "level": 13,
+                "stamina_cost": 12,
+                "recommended_power": 48200,
+            },
+            {
+                "category": "monster",
+                "runtime_id": 444,
+                "quest_id": 2444,
+                "status": 1,
+                "world_x": 773,
+                "world_y": 769,
+                "expires_at": 1900000001,
+                "quality": "purple",
+                "quality_id": 4,
+                "monster_id": 814,
+                "level": 13,
+                "stamina_cost": 10,
+                "recommended_power": 48200,
+            },
+        )
+        outputs = (
+            march_prepare_protocol(
+                role,
+                443,
+                current=7,
+                required=10,
+                base=12,
+                ready=False,
+            ),
+            march_prepare_protocol(role, 444, current=8, required=8),
+            march_commit_protocol(role, 444, current=8, required=8),
+            march_verify_protocol(role, 444),
+        )
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, outputs=outputs),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args(
+                        "batch-intel",
+                        dry_run=False,
+                        batch_target_json=[json.dumps(target) for target in targets],
+                        expected_role=role,
+                    ),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["request_dispatched"])
+        self.assertEqual(result["results"][0]["blocked_reason"], "insufficient_stamina")
+        self.assertFalse(result["results"][0]["request_dispatched"])
+        self.assertEqual(result["results"][0]["base_stamina"], 12)
+        self.assertTrue(result["results"][1]["request_dispatched"])
         self.assertEqual(events.count("lua-execute"), 4)
 
-    def test_march_execute_surfaces_open_protocol_errors_without_ui_taps(self) -> None:
+    def test_march_execute_surfaces_prepare_protocol_errors_without_ui_taps(self) -> None:
         events: list[str] = []
         role = "打工的"
         role_hex = role.encode("utf-8").hex()
@@ -1801,7 +2226,7 @@ class CliTests(unittest.TestCase):
                 f"ROLE\t{role_hex}",
                 "KINGDOM\t4549",
                 "ITEM\t70\t1700\t1\t700\t701\t1900000000"
-                "\tpurple\t4\t808\t8\t10",
+                "\tpurple\t4\t808\t8\t10\t48200",
                 "END\t1",
             )
         )
@@ -1816,7 +2241,7 @@ class CliTests(unittest.TestCase):
                 ),
             ),
         ):
-            with self.assertRaisesRegex(BusinessError, "OPEN protocol"):
+            with self.assertRaisesRegex(BusinessError, "PREPARE protocol"):
                 execute(
                     business_args("march", dry_run=False, quality="purple"),
                     settings,
@@ -1849,12 +2274,12 @@ class CliTests(unittest.TestCase):
                     f"ROLE\t{role_hex}",
                     "KINGDOM\t4549",
                     "ITEM\t70\t1700\t1\t700\t701\t1900000000"
-                    "\tpurple\t4\t808\t8\t10",
+                    "\tpurple\t4\t808\t8\t10\t48200",
                     "END\t1",
                 )
             ),
-            stage("OPEN", "OPENED\t1"),
-            stage("READY", "READY\t1"),
+            march_prepare_protocol(role, 70),
+            march_commit_protocol(role, 70),
             stage(
                 "VERIFY",
                 "ACCEPTED\t0\tSTATUS\t1",
@@ -1890,7 +2315,6 @@ class CliTests(unittest.TestCase):
         self.assertTrue(result["request_dispatched"])
         self.assertEqual(result["verification_polls"], 2)
         self.assertEqual(events.count("lua-execute"), 5)
-        sleep.assert_any_call(0.35)
         sleep.assert_any_call(0.2)
 
     def test_march_rejects_role_drift_after_intel_stage(self) -> None:
@@ -1906,17 +2330,20 @@ class CliTests(unittest.TestCase):
                     f"ROLE\t{first_hex}",
                     "KINGDOM\t4549",
                     "ITEM\t70\t1700\t1\t700\t701\t1900000000"
-                    "\tpurple\t4\t808\t8\t10",
+                    "\tpurple\t4\t808\t8\t10\t48200",
                     "END\t1",
                 )
             ),
             "\n".join(
                 (
-                    "MUMU_AUTOTASK\t1\tOPEN",
+                    "MUMU_AUTOTASK\t1\tPREPARE",
                     f"ROLE\t{second_hex}",
                     "KINGDOM\t4549",
                     "TARGET\t70",
-                    "OPENED\t1",
+                    "AVERAGE\t1",
+                    "STAMINA\t49\t8\t10",
+                    "READY\t1",
+                    "REASON\tNONE",
                     "END\t1",
                 )
             ),
@@ -2220,8 +2647,8 @@ class CliTests(unittest.TestCase):
                 "MUMU_AUTOTASK\t1\tINTEL",
                 f"ROLE\t{role_hex}",
                 "KINGDOM\t4549",
-                "ITEM\t71\t1701\t1\t700\t701\t1900000000\tpurple\t4\t808\t8\t10",
-                "ITEM\t72\t1702\t1\t702\t703\t1900000100\tpurple\t4\t809\t9\t10",
+                "ITEM\t71\t1701\t1\t700\t701\t1900000000\tpurple\t4\t808\t8\t10\t48200",
+                "ITEM\t72\t1702\t1\t702\t703\t1900000100\tpurple\t4\t809\t9\t10\t48200",
                 "END\t2",
             )
         )

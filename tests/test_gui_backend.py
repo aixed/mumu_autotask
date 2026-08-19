@@ -402,6 +402,51 @@ class GuiBackendTests(unittest.TestCase):
             ],
         )
 
+    def test_backend_world_monster_commands_bind_level_count_and_march_ids(self) -> None:
+        runner = FakeRunner(
+            [
+                '{"serial":"device-1","marches":[{"march_id":101}]}\n',
+                '{"serial":"device-1","statuses":[{"march_id":101,"status":"ACTIVE"}]}\n',
+            ]
+        )
+        backend = GuiBackend(runner)  # type: ignore[arg-type]
+
+        dispatch = backend.hunt_world_monsters("device-1", 16, 4)
+        status = backend.world_monster_status("device-1", (101, 102))
+
+        self.assertEqual(dispatch["marches"][0]["march_id"], 101)
+        self.assertEqual(status["statuses"][0]["status"], "ACTIVE")
+        self.assertEqual(
+            runner.calls,
+            [
+                (
+                    (
+                        "hunt-world-monster",
+                        "--serial",
+                        "device-1",
+                        "--level",
+                        "16",
+                        "--count",
+                        "4",
+                        "--execute",
+                    ),
+                    180,
+                ),
+                (
+                    (
+                        "world-monster-status",
+                        "--serial",
+                        "device-1",
+                        "--march-id",
+                        "101",
+                        "--march-id",
+                        "102",
+                        "--execute",
+                    ),
+                    45,
+                ),
+            ],
+        )
     def test_backend_wait_and_claim_keep_every_exact_target_id(self) -> None:
         runner = FakeRunner(
             [

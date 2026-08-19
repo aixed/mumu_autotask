@@ -12,6 +12,7 @@ from mumu_autotask.business import (
     IntelSnapshot,
     build_claim_intel_lua,
     build_close_expedition_lua,
+    build_commit_prepared_march_lua,
     build_commit_march_lua,
     build_start_battle_intel_lua,
     build_inspect_formation_lua,
@@ -19,10 +20,18 @@ from mumu_autotask.business import (
     build_intel_status_lua,
     build_march_ready_lua,
     build_open_march_lua,
+    build_prepare_direct_march_lua,
     build_scene_status_lua,
     build_verify_march_lua,
+    build_world_monster_commit_lua,
+    build_world_monster_search_lua,
+    build_world_monster_search_result_lua,
+    build_world_monster_status_lua,
+    build_world_monster_verify_lua,
     normalize_quality,
     normalize_target_ids,
+    normalize_world_monster_level,
+    normalize_world_monster_count,
     parse_claim_intel_output,
     parse_battle_commit_output,
     parse_commit_output,
@@ -30,11 +39,16 @@ from mumu_autotask.business import (
     parse_intel_status_output,
     parse_march_output,
     parse_open_output,
+    parse_prepare_output,
     parse_ready_output,
     build_start_rescue_intel_lua,
     parse_rescue_commit_output,
     parse_scene_status_output,
     parse_verify_output,
+    parse_world_monster_commit_output,
+    parse_world_monster_search_output,
+    parse_world_monster_status_output,
+    parse_world_monster_verify_output,
     select_march_target,
     script_sha256,
     validate_role_whitelist,
@@ -97,8 +111,14 @@ def scene_output(
     )
 
 
-PURPLE_ITEM = "ITEM\t71\t1701\t0\t759\t774\t1900000000\tpurple\t4\t813\t13\t10"
-GREEN_ITEM = "ITEM\t70\t1700\t0\t700\t701\t1800000000\tgreen\t2\t808\t8\t10"
+PURPLE_ITEM = (
+    "ITEM\t71\t1701\t0\t759\t774\t1900000000"
+    "\tpurple\t4\t813\t13\t10\t48200"
+)
+GREEN_ITEM = (
+    "ITEM\t70\t1700\t0\t700\t701\t1800000000"
+    "\tgreen\t2\t808\t8\t10\t10000"
+)
 
 
 def battle_target(category: str = "rescue") -> BattleIntelItem:
@@ -153,6 +173,31 @@ def rescue_commit_output(target: BattleIntelItem) -> str:
     )
 
 
+def stamina_stage_output(
+    kind: str,
+    target_id: int,
+    *,
+    action: str,
+    succeeded: bool = True,
+    current: int = 49,
+    required: int = 8,
+    base: int = 10,
+) -> str:
+    return "\n".join(
+        (
+            f"MUMU_AUTOTASK\t1\t{kind}",
+            f"ROLE\t{ROLE_HEX}",
+            "KINGDOM\t4549",
+            f"TARGET\t{target_id}",
+            "AVERAGE\t1",
+            f"STAMINA\t{current}\t{required}\t{base}",
+            f"{action}\t{int(succeeded)}",
+            f"REASON\t{'NONE' if succeeded else 'INSUFFICIENT_STAMINA'}",
+            "END\t1",
+        )
+    )
+
+
 class BusinessTests(unittest.TestCase):
     def test_quality_alias_and_invalid_values(self) -> None:
         self.assertEqual(normalize_quality(" ORANGE "), "yellow")
@@ -187,6 +232,11 @@ class BusinessTests(unittest.TestCase):
         self.assertIn("IsShowInWorld", code)
         self.assertIn("GetValidTime", code)
         self.assertIn("stamtina_expend", code)
+        self.assertIn("world_map_monster", code)
+        self.assertIn("recommendPower", code)
+        self.assertIn("GetLeftCount", code)
+        self.assertIn("COMMANDER_STAMINA", code)
+        self.assertIn('"STAMINA\\t" .. tostring(current_stamina)', code)
         self.assertNotIn("TimeUtil.GetServerTime", code)
         self.assertNotIn("SendMsg", code)
         self.assertNotIn("RequestMarch", code)
@@ -213,6 +263,8 @@ class BusinessTests(unittest.TestCase):
         open_code = build_open_march_lua((ROLE,), target)
         commit_code = build_commit_march_lua((ROLE,), target)
         formation_code = build_inspect_formation_lua((ROLE,), target)
+        prepare_direct_code = build_prepare_direct_march_lua((ROLE,), target)
+        commit_direct_code = build_commit_prepared_march_lua((ROLE,), target)
         self.assertIn("TARGET_RUNTIME_ID = 71", open_code)
         self.assertIn("TARGET_WORLD_X = 759", open_code)
         self.assertIn("TARGET_MONSTER_ID = 813", open_code)
@@ -234,6 +286,16 @@ class BusinessTests(unittest.TestCase):
         self.assertNotIn("RequestMarchStartOff", formation_code)
         self.assertNotIn("OpenView", formation_code)
         self.assertNotIn("SendMsg", formation_code)
+        self.assertIn("GetRecommendedHeroList", prepare_direct_code)
+        self.assertIn("GetAverageSoldierList", prepare_direct_code)
+        self.assertIn("GetCostStaminaEduce(hero_list)", prepare_direct_code)
+        self.assertIn("math.ceil(TARGET_STAMINA_COST * (1 - stamina_reduction))", prepare_direct_code)
+        self.assertIn("_G.__MUMU_AUTOTASK_DIRECT_MARCH = {", prepare_direct_code)
+        self.assertNotIn("RequestMarchStartOff", prepare_direct_code)
+        self.assertIn("prepared march payload is unavailable", commit_direct_code)
+        self.assertIn("GetLeftCount(ResDefine.COMMANDER_STAMINA)", commit_direct_code)
+        self.assertIn("RequestMarchStartOff", commit_direct_code)
+        self.assertIn("_G.__MUMU_AUTOTASK_DIRECT_MARCH = nil", commit_direct_code)
         verify_code = build_verify_march_lua((ROLE,), target)
         self.assertIn(
             'type(data) == "table" and data.transaction_slg or nil',
@@ -370,6 +432,8 @@ class BusinessTests(unittest.TestCase):
             build_open_march_lua((ROLE,), target),
             build_march_ready_lua((ROLE,), target),
             build_commit_march_lua((ROLE,), target),
+            build_prepare_direct_march_lua((ROLE,), target),
+            build_commit_prepared_march_lua((ROLE,), target),
             build_verify_march_lua((ROLE,), target),
             build_start_rescue_intel_lua((ROLE,), battle_target("rescue")),
             build_close_expedition_lua((ROLE,)),
@@ -485,10 +549,43 @@ class BusinessTests(unittest.TestCase):
             ),
             (True, "2"),
         )
-        commit = stage("COMMIT", "AVERAGE\t1").replace(
-            "AVERAGE\t1\nEND", "AVERAGE\t1\nGO\t1\nEND"
+        prepare = stamina_stage_output(
+            "PREPARE", 71, action="READY"
         )
-        parse_commit_output(commit, (ROLE,), target)
+        prepare_receipt = parse_prepare_output(prepare, (ROLE,), target)
+        self.assertTrue(prepare_receipt.ready_to_commit)
+        self.assertEqual(prepare_receipt.required_stamina, 8)
+        commit = stamina_stage_output("COMMIT", 71, action="GO")
+        commit_receipt = parse_commit_output(commit, (ROLE,), target)
+        self.assertTrue(commit_receipt.request_dispatched)
+        blocked_prepare = parse_prepare_output(
+            stamina_stage_output(
+                "PREPARE",
+                71,
+                action="READY",
+                succeeded=False,
+                current=7,
+                required=8,
+            ),
+            (ROLE,),
+            target,
+        )
+        self.assertFalse(blocked_prepare.ready_to_commit)
+        self.assertEqual(blocked_prepare.blocked_reason, "insufficient_stamina")
+        blocked_commit = parse_commit_output(
+            stamina_stage_output(
+                "COMMIT",
+                71,
+                action="GO",
+                succeeded=False,
+                current=7,
+                required=8,
+            ),
+            (ROLE,),
+            target,
+        )
+        self.assertFalse(blocked_commit.request_dispatched)
+        self.assertEqual(blocked_commit.current_stamina, 7)
         with self.assertRaisesRegex(BusinessError, "role"):
             parse_open_output(
                 stage("OPEN", "OPENED\t1").replace(ROLE_HEX, "626164"),
@@ -566,6 +663,18 @@ class BusinessTests(unittest.TestCase):
         self.assertEqual(snapshot.kingdom, 4549)
         self.assertEqual([item.quality for item in snapshot.items], ["green", "purple"])
         self.assertEqual(snapshot.items[1].world_x, 759)
+        self.assertEqual(snapshot.items[1].recommended_power, 48200)
+        self.assertIsNone(snapshot.current_stamina)
+
+        with_stamina = intel_output(GREEN_ITEM, PURPLE_ITEM).replace(
+            "KINGDOM\t4549\n",
+            "KINGDOM\t4549\nSTAMINA\t49\n",
+            1,
+        )
+        self.assertEqual(
+            parse_intel_output(with_stamina, (ROLE,)).current_stamina,
+            49,
+        )
 
     def test_parse_intel_output_accepts_an_empty_snapshot(self) -> None:
         snapshot = parse_intel_output(intel_output(), (ROLE,))
@@ -602,7 +711,9 @@ class BusinessTests(unittest.TestCase):
             parse_intel_output(intel_output(invalid), (ROLE,))
 
     def test_parse_intel_output_requires_positive_stamina_cost(self) -> None:
-        invalid = PURPLE_ITEM.rsplit("\t", 1)[0] + "\t0"
+        fields = PURPLE_ITEM.split("\t")
+        fields[11] = "0"
+        invalid = "\t".join(fields)
         with self.assertRaisesRegex(BusinessError, "stamina cost must be positive"):
             parse_intel_output(intel_output(invalid), (ROLE,))
 
@@ -629,6 +740,85 @@ class BusinessTests(unittest.TestCase):
     def test_protocol_rejects_trailing_newline(self) -> None:
         with self.assertRaisesRegex(BusinessError, "line endings"):
             parse_intel_output(intel_output() + "\n", (ROLE,))
+
+    def test_world_monster_level_and_native_call_chain(self) -> None:
+        self.assertEqual(normalize_world_monster_level(16), 16)
+        self.assertEqual(normalize_world_monster_count(4), 4)
+        for value in (0, 21, True, "16"):
+            with self.subTest(value=value), self.assertRaises(BusinessError):
+                normalize_world_monster_level(value)  # type: ignore[arg-type]
+        for value in (0, 5, True, "4"):
+            with self.subTest(count=value), self.assertRaises(BusinessError):
+                normalize_world_monster_count(value)  # type: ignore[arg-type]
+        search = build_world_monster_search_lua(16)
+        search_result = build_world_monster_search_result_lua(16)
+        commit = build_world_monster_commit_lua(16)
+        verify = build_world_monster_verify_lua(16)
+        self.assertIn("ReqWorldMapSearch", search)
+        self.assertIn("mapobj_type.map_monster", search)
+        self.assertIn("false, view_id", search)
+        self.assertIn("GetMapDataDic", search_result)
+        self.assertNotIn("ReqWorldMapObjByPos", search_result)
+        self.assertIn("candidate.GetPos", search_result)
+        self.assertIn("GetId", search_result)
+        self.assertIn("GetLevel", search_result)
+        self.assertNotIn("IsNormalMonster", search_result)
+        self.assertNotIn("fallback_id", search_result)
+        self.assertIn("march_type.atk_monster", commit)
+        self.assertIn("extra = { monsterid = state.monster_id }", commit)
+        self.assertIn("GetRecommendedHeroList", commit)
+        self.assertIn("GetAverageSoldierList", commit)
+        self.assertIn("GetLeftCount", commit)
+        self.assertIn("RequestMarchStartOff", commit)
+        self.assertNotIn("transaction_slg", commit)
+        self.assertNotIn("event_id", commit)
+        self.assertIn("found_id", verify)
+        self.assertNotIn("input tap", search + commit + verify)
+
+    def test_world_monster_protocols_block_stamina_and_require_real_march(self) -> None:
+        search_output = "\n".join((
+            "MUMU_AUTOTASK\t1\tWORLD_MONSTER_SEARCH",
+            f"ROLE\t{ROLE_HEX}", "KINGDOM\t4549", "LEVEL\t16",
+            "READY\t1", "POINT\t833\t749", "MONSTER\t7100016\t177168",
+            "STAMINA\t7", "END\t1",
+        ))
+        search = parse_world_monster_search_output(search_output, 16)
+        blocked_output = "\n".join((
+            "MUMU_AUTOTASK\t1\tWORLD_MONSTER_COMMIT",
+            f"ROLE\t{ROLE_HEX}", "KINGDOM\t4549", "LEVEL\t16",
+            "MONSTER\t7100016", "POINT\t833\t749", "AVERAGE\t1",
+            "STAMINA\t7\t8\t10", "SENT\t0",
+            "REASON\tINSUFFICIENT_STAMINA", "END\t1",
+        ))
+        blocked = parse_world_monster_commit_output(blocked_output, search)
+        self.assertFalse(blocked.request_dispatched)
+        self.assertEqual(blocked.blocked_reason, "insufficient_stamina")
+        verify_missing = "\n".join((
+            "MUMU_AUTOTASK\t1\tWORLD_MONSTER_VERIFY",
+            f"ROLE\t{ROLE_HEX}", "KINGDOM\t4549", "LEVEL\t16",
+            "MONSTER\t7100016", "POINT\t833\t749", "MARCH\tmissing",
+            "STAMINA\t7", "END\t1",
+        ))
+        self.assertIsNone(
+            parse_world_monster_verify_output(verify_missing, search).march_id
+        )
+
+    def test_world_monster_status_rejects_unknown_ids(self) -> None:
+        code = build_world_monster_status_lua((901, 902))
+        self.assertIn("ACTIVE", code)
+        self.assertIn("RETURNED", code)
+        output = "\n".join((
+            "MUMU_AUTOTASK\t1\tWORLD_MONSTER_STATUS",
+            f"ROLE\t{ROLE_HEX}", "KINGDOM\t4549", "STAMINA\t32",
+            "MARCH\t901\tACTIVE", "MARCH\t902\tRETURNED", "END\t2",
+        ))
+        snapshot = parse_world_monster_status_output(output, (901, 902))
+        self.assertEqual([item.state for item in snapshot.statuses], ["ACTIVE", "RETURNED"])
+        with self.assertRaisesRegex(BusinessError, "never observed"):
+            parse_world_monster_status_output(
+                output.replace("MARCH\t901\tACTIVE", "MARCH\t901\tUNKNOWN"),
+                (901, 902),
+            )
 
 
 if __name__ == "__main__":

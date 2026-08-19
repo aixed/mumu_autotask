@@ -18,6 +18,7 @@ from mumu_autotask.gui import (
     validate_claim_intel_receipt,
     validate_march_intel_receipt,
     validate_wait_intel_receipt,
+    _format_recommended_power,
     _is_online_status,
 )
 
@@ -41,6 +42,19 @@ def intel_item(
 
 
 class HuntBatchQueueTests(unittest.TestCase):
+    def test_recommended_power_format_only_applies_to_monsters(self) -> None:
+        self.assertEqual(
+            _format_recommended_power(
+                {"category": "monster", "recommended_power": 48200}
+            ),
+            "48,200",
+        )
+        self.assertEqual(
+            _format_recommended_power({"category": "hero", "recommended_power": 48200}),
+            "-",
+        )
+        self.assertEqual(_format_recommended_power({"category": "monster"}), "-")
+
     def test_online_status_requires_foreground_game_activity(self) -> None:
         payload = {
             "adb": "device",
@@ -257,6 +271,175 @@ class LauncherRefreshTests(unittest.TestCase):
 
 
 class HuntWaveBatchTests(unittest.TestCase):
+    def test_world_hunt_start_freezes_level_and_concurrency(self) -> None:
+        manager = object.__new__(DeviceManagerWindow)
+        manager.busy = False
+        manager.world_hunt_running = False
+        manager.world_hunt_generation = 0
+        manager.world_active_march_ids = set()
+        manager.world_seen_march_ids = set()
+        manager.world_dispatch_count = 7
+        manager.world_poll_failures = 0
+        manager.world_level_var = SimpleNamespace(get=lambda: 16)
+        manager.world_concurrency_var = SimpleNamespace(get=lambda: 4)
+        manager.world_hunt_status_text = SimpleNamespace(set=lambda _value: None)
+        manager.world_event_queue = __import__("queue").Queue()
+        manager._update_world_hunt_controls = lambda: None
+        manager._schedule_world_event_drain = lambda _generation: None
+        logs: list[str] = []
+        manager._log = logs.append
+        submissions: list[tuple[object, object]] = []
+        manager.dispatcher = SimpleNamespace(
+            submit=lambda action, callback: submissions.append((action, callback))
+        )
+        manager.backend = SimpleNamespace(world_monster_loop=lambda *_args: None)
+        manager.profile = SimpleNamespace(serial="device-1")
+
+        manager.start_world_hunt()
+
+        self.assertTrue(manager.world_hunt_running)
+        self.assertEqual(manager.world_hunt_level, 16)
+        self.assertEqual(manager.world_hunt_limit, 4)
+        self.assertEqual(manager.world_dispatch_count, 0)
+        self.assertEqual(manager.world_seen_march_ids, set())
+        self.assertEqual(len(submissions), 1)
+        self.assertIn("等级冻结为 Lv.16", logs[0])
+
+    def test_world_hunt_loop_event_updates_active_marches_and_stamina(self) -> None:
+        manager = object.__new__(DeviceManagerWindow)
+        manager.window = SimpleNamespace(winfo_exists=lambda: True)
+        manager.profile = SimpleNamespace(serial="device-1")
+        manager.world_hunt_generation = 4
+        manager.world_hunt_running = True
+        manager.world_hunt_level = 16
+        manager.world_hunt_limit = 4
+        manager.world_dispatch_count = 0
+        manager.world_active_march_ids = set()
+        manager.world_seen_march_ids = set()
+        manager.world_hunt_status_text = SimpleNamespace(set=lambda _value: None)
+        manager._valid_stamina = DeviceManagerWindow._valid_stamina
+        stamina: list[int] = []
+        manager._set_current_stamina = lambda value: stamina.append(value) or True
+        logs: list[str] = []
+        manager._log = logs.append
+
+        manager._apply_world_hunt_loop_event(
+            4,
+            {
+                "event": "dispatch",
+                "serial": "device-1",
+                "current_stamina": 40,
+                "active_march_ids": [101, 102],
+                "marches": [{"march_id": 101}, {"march_id": 102}],
+                "dispatched_march": {
+                    "march_id": 102,
+                    "level": 16,
+                    "monster_id": 7100016,
+                    "world_x": 700,
+                    "world_y": 701,
+                    "required_stamina": 10,
+                },
+            },
+        )
+
+        self.assertEqual(manager.world_active_march_ids, {101, 102})
+        self.assertEqual(manager.world_dispatch_count, 1)
+        self.assertEqual(stamina, [40])
+        self.assertIn("行军 102", logs[0])
+
+        manager._apply_world_hunt_loop_event(
+            4,
+            {
+                "event": "status",
+                "serial": "device-1",
+                "current_stamina": 40,
+                "active_march_ids": [101, 102],
+                "marches": [{"march_id": 101}, {"march_id": 102}],
+                "statuses": [
+                    {"march_id": 101, "status": "ACTIVE"},
+                    {"march_id": 102, "status": "ACTIVE"},
+                ],
+            },
+        )
+
+        self.assertEqual(manager.world_dispatch_count, 1)
+        self.assertEqual(len(logs), 1)
+
+    def test_world_hunt_returned_march_immediately_refills_one_slot(self) -> None:
+        manager = object.__new__(DeviceManagerWindow)
+        manager.window = SimpleNamespace(winfo_exists=lambda: True)
+        manager.profile = SimpleNamespace(serial="device-1")
+        manager.world_hunt_running = True
+        manager.world_hunt_generation = 7
+        manager.world_operation_inflight = True
+        manager.world_active_march_ids = {101, 102, 103, 104}
+        manager.world_hunt_level = 16
+        manager.world_hunt_limit = 4
+        manager.world_dispatch_count = 4
+        manager.world_poll_failures = 0
+        manager.world_hunt_status_text = SimpleNamespace(set=lambda _value: None)
+        manager._valid_stamina = DeviceManagerWindow._valid_stamina
+        manager._set_current_stamina = lambda _value: True
+        manager._log = lambda _message: None
+        fills: list[int] = []
+        manager._fill_world_hunt_slots = fills.append
+        manager._schedule_world_hunt_poll = lambda *_args, **_kwargs: self.fail(
+            "a returned march must trigger an immediate refill"
+        )
+
+        manager._world_hunt_status_received(
+            7,
+            (101, 102, 103, 104),
+            {
+                "serial": "device-1",
+                "statuses": [
+                    {"march_id": 101, "status": "ACTIVE"},
+                    {"march_id": 102, "status": "RETURNED"},
+                    {"march_id": 103, "status": "ACTIVE"},
+                    {"march_id": 104, "status": "ACTIVE"},
+                ],
+                "current_stamina": 40,
+            },
+            None,
+        )
+
+        self.assertEqual(manager.world_active_march_ids, {101, 103, 104})
+        self.assertEqual(fills, [7])
+
+    def test_world_hunt_stop_invalidates_late_dispatch_callback(self) -> None:
+        manager = object.__new__(DeviceManagerWindow)
+        manager.window = SimpleNamespace(
+            winfo_exists=lambda: True,
+            after_cancel=lambda _after_id: None,
+        )
+        manager.profile = SimpleNamespace(serial="device-1")
+        manager.backend = SimpleNamespace(
+            runner=SimpleNamespace(cancel_serial=lambda _serial: None)
+        )
+        manager.world_hunt_running = True
+        manager.world_hunt_generation = 3
+        manager.world_poll_after_id = None
+        manager.world_event_after_id = None
+        manager.world_operation_inflight = False
+        manager.world_active_march_ids = set()
+        manager.world_hunt_status_text = SimpleNamespace(set=lambda _value: None)
+        manager._update_world_hunt_controls = lambda: None
+        manager._log = lambda _message: None
+
+        manager.stop_world_hunt()
+        manager._world_hunt_dispatched(
+            3,
+            {
+                "serial": "device-1",
+                "march_id": 999,
+                "verified": True,
+            },
+            None,
+        )
+
+        self.assertFalse(manager.world_hunt_running)
+        self.assertEqual(manager.world_active_march_ids, set())
+
     def targets(self, count: int = 7):
         return build_hunt_queue(
             [
@@ -703,8 +886,8 @@ class HuntWaveBatchTests(unittest.TestCase):
             events,
             [
                 ("render", ()),
-                ("busy", True, "正在读取当前角色和情报..."),
-                ("log", "开始只读读取当前角色和情报。"),
+                ("busy", True, "正在读取当前角色、领主体力和情报..."),
+                ("log", "开始只读读取当前角色、领主体力和情报。"),
             ],
         )
 
@@ -713,6 +896,66 @@ class HuntWaveBatchTests(unittest.TestCase):
             {"serial": "device-1", "kingdom": 4549, "items": []},
         )
         self.assertIn(("inspect-tasks", "device-1"), events)
+
+    def test_identity_line_displays_current_stamina(self) -> None:
+        manager = object.__new__(DeviceManagerWindow)
+        values: list[str] = []
+        manager.identity_text = SimpleNamespace(set=values.append)
+        manager.current_role = "打工人"
+        manager.current_kingdom = 4549
+        manager.current_pid = 7359
+        manager.current_items = [intel_item(100, "purple", expires_at=1000)]
+        manager.current_stamina = None
+
+        self.assertTrue(manager._set_current_stamina(49))
+
+        self.assertEqual(manager.current_stamina, 49)
+        self.assertIn("领主体力：49", values[-1])
+        self.assertIn("可用情报：1", values[-1])
+
+    def test_successful_monster_dispatch_updates_remaining_stamina(self) -> None:
+        manager = object.__new__(DeviceManagerWindow)
+        targets = build_hunt_queue(
+            [intel_item(100, "purple", expires_at=1000)],
+            ("purple",),
+        )
+        batch = HuntWaveBatch(targets, 1)
+        batch.prepare_current_wave()
+        target = batch.begin_next_dispatch()
+        self.assertIsNotNone(target)
+        values: list[str] = []
+        manager.identity_text = SimpleNamespace(set=values.append)
+        manager.current_role = "打工人"
+        manager.current_kingdom = 4549
+        manager.current_pid = 7359
+        manager.current_items = [intel_item(100, "purple", expires_at=1000)]
+        manager.current_stamina = 49
+        manager.profile = SimpleNamespace(serial="device-1")
+        manager.hunt_role = "打工人"
+        manager.hunt_kingdom = 4549
+        manager._log = lambda _message: None
+        manager._march_reconcile_failed = lambda detail: self.fail(detail)
+
+        manager._record_target_dispatch_result(
+            batch,
+            target,  # type: ignore[arg-type]
+            {
+                "serial": "device-1",
+                "kingdom": 4549,
+                "role": "打工人",
+                "request_dispatched": True,
+                "target": {"runtime_id": 100},
+                "quest_status_after": 1,
+                "current_stamina": 49,
+                "required_stamina": 8,
+                "base_stamina": 10,
+            },
+            None,
+        )
+
+        self.assertEqual(manager.current_stamina, 41)
+        self.assertIn("领主体力：41", values[-1])
+        self.assertEqual(batch.wait_target_ids, (100,))
 
     def test_click_and_keyboard_handler_directly_start_without_second_event(self) -> None:
         manager = object.__new__(DeviceManagerWindow)

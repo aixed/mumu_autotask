@@ -18,8 +18,14 @@ from .config import ConfigError, DeviceProfile, Settings, load_settings
 from .gui_backend import (
     DEFAULT_GUI_CATEGORIES,
     DEFAULT_HUNT_CONCURRENCY,
+    DEFAULT_WORLD_MONSTER_CONCURRENCY,
+    DEFAULT_WORLD_MONSTER_LEVEL,
     MAX_HUNT_CONCURRENCY,
+    MAX_WORLD_MONSTER_CONCURRENCY,
+    MAX_WORLD_MONSTER_LEVEL,
     MIN_HUNT_CONCURRENCY,
+    MIN_WORLD_MONSTER_CONCURRENCY,
+    MIN_WORLD_MONSTER_LEVEL,
     CliRunner,
     GuiBackend,
     GuiBackendError,
@@ -398,6 +404,12 @@ class HuntWaveBatch:
         target = self._require_current_wave_target(runtime_id, "dispatching")
         self._state[target.runtime_id] = "dispatch_error"
         self._dispatch_errors[target.runtime_id] = detail or "出征命令失败"
+
+    def mark_dispatch_blocked(self, runtime_id: int, detail: str) -> HuntBatchOutcome:
+        self._require_phase("dispatching")
+        target = self._require_current_wave_target(runtime_id, "dispatching")
+        self._dispatch_errors.pop(target.runtime_id, None)
+        return self._record(target, "failed", detail or "出征已被安全阻止")
 
     def finish_dispatches(self) -> None:
         self._require_phase("dispatching")
@@ -1005,6 +1017,15 @@ def _format_expiry(value: Any) -> str:
         return str(value)
 
 
+def _format_recommended_power(item: Mapping[str, Any]) -> str:
+    if item.get("category", "monster") != "monster":
+        return "-"
+    value = item.get("recommended_power")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return "-"
+    return f"{value:,}"
+
+
 def validate_march_intel_receipt(
     payload: Mapping[str, Any],
     serial: str,
@@ -1520,9 +1541,23 @@ class DeviceManagerWindow:
         self.current_items: list[dict[str, Any]] = []
         self.current_role: str | None = None
         self.current_kingdom: int | None = None
+        self.current_pid: int | str = initial_status.get("pid", "-")
+        self.current_stamina: int | None = None
         self.hunt_role: str | None = None
         self.hunt_kingdom: int | None = None
         self.hunt_batch: HuntWaveBatch | None = None
+        self.world_hunt_running = False
+        self.world_hunt_level: int | None = None
+        self.world_hunt_limit: int | None = None
+        self.world_active_march_ids: set[int] = set()
+        self.world_seen_march_ids: set[int] = set()
+        self.world_operation_inflight = False
+        self.world_poll_after_id: str | None = None
+        self.world_event_after_id: str | None = None
+        self.world_event_queue: queue.Queue[Mapping[str, Any]] = queue.Queue()
+        self.world_hunt_generation = 0
+        self.world_poll_failures = 0
+        self.world_dispatch_count = 0
 
         self.window = tk.Toplevel(launcher.root)
         self.window.title(f"{APP_TITLE} - {_profile_name(profile)}")
@@ -1575,7 +1610,37 @@ class DeviceManagerWindow:
                 concurrency = DEFAULT_HUNT_CONCURRENCY
         else:
             concurrency = DEFAULT_HUNT_CONCURRENCY
-        self.identity_text = tk.StringVar(value="正在读取当前角色和情报...")
+        load_world_level = getattr(self.backend, "get_world_monster_level", None)
+        try:
+            world_monster_level = (
+                int(load_world_level(self.profile.serial))
+                if callable(load_world_level)
+                else DEFAULT_WORLD_MONSTER_LEVEL
+            )
+            if not MIN_WORLD_MONSTER_LEVEL <= world_monster_level <= MAX_WORLD_MONSTER_LEVEL:
+                raise ValueError("野兽等级超出 1-20")
+        except Exception as exc:
+            preference_errors.append(f"搜索野兽等级：{exc}")
+            world_monster_level = DEFAULT_WORLD_MONSTER_LEVEL
+        load_world_concurrency = getattr(
+            self.backend,
+            "get_world_monster_concurrency",
+            None,
+        )
+        try:
+            world_monster_concurrency = (
+                int(load_world_concurrency(self.profile.serial))
+                if callable(load_world_concurrency)
+                else DEFAULT_WORLD_MONSTER_CONCURRENCY
+            )
+            if not MIN_WORLD_MONSTER_CONCURRENCY <= world_monster_concurrency <= MAX_WORLD_MONSTER_CONCURRENCY:
+                raise ValueError("搜索野兽并发数超出 1-4")
+        except Exception as exc:
+            preference_errors.append(f"搜索野兽并发数：{exc}")
+            world_monster_concurrency = DEFAULT_WORLD_MONSTER_CONCURRENCY
+        self.identity_text = tk.StringVar(
+            value="正在读取当前角色、领主体力和情报...  |  领主体力：读取中"
+        )
         self.action_text = tk.StringVar(value="等待情报检查")
         self.quality_labels: dict[str, ttk.Label] = {}
         self.category_vars = {
@@ -1599,6 +1664,21 @@ class DeviceManagerWindow:
             value=concurrency,
         )
         self.concurrency_text = tk.StringVar(value=f"{concurrency} 队")
+        self.world_level_var = tk.IntVar(
+            master=self.window,
+            value=world_monster_level,
+        )
+        self.world_level_text = tk.StringVar(value=f"Lv.{world_monster_level}")
+        self.world_concurrency_var = tk.IntVar(
+            master=self.window,
+            value=world_monster_concurrency,
+        )
+        self.world_concurrency_text = tk.StringVar(
+            value=f"{world_monster_concurrency} 队"
+        )
+        self.world_hunt_status_text = tk.StringVar(
+            value="未启动  |  选择等级和并发数后开始"
+        )
         self._build()
         self.window.bind("<Control-Return>", self._start_hunt_from_event)
         if preference_errors:
@@ -1629,8 +1709,8 @@ class DeviceManagerWindow:
         self.window.rowconfigure(0, weight=1)
         self.window.columnconfigure(0, weight=1)
         outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(3, weight=1)
-        outer.rowconfigure(5, weight=2)
+        outer.rowconfigure(2, weight=3)
+        outer.rowconfigure(3, weight=2)
 
         title = ttk.Frame(outer)
         title.grid(row=0, column=0, sticky="ew")
@@ -1657,8 +1737,17 @@ class DeviceManagerWindow:
 
         ttk.Separator(outer).grid(row=1, column=0, sticky="ew", pady=(14, 12))
 
-        quality_frame = ttk.LabelFrame(outer, text="情报设置", padding=(14, 10))
-        quality_frame.grid(row=2, column=0, sticky="ew")
+        self.notebook = ttk.Notebook(outer)
+        self.notebook.grid(row=2, column=0, sticky="nsew")
+        intel_tab = ttk.Frame(self.notebook, padding=(8, 10, 8, 8))
+        world_tab = ttk.Frame(self.notebook, padding=(18, 16, 18, 14))
+        self.notebook.add(intel_tab, text="情报任务")
+        self.notebook.add(world_tab, text="搜索野兽")
+        intel_tab.columnconfigure(0, weight=1)
+        intel_tab.rowconfigure(1, weight=1)
+
+        quality_frame = ttk.LabelFrame(intel_tab, text="情报设置", padding=(14, 10))
+        quality_frame.grid(row=0, column=0, sticky="ew")
         for column in range(len(QUALITY_META)):
             quality_frame.columnconfigure(column, weight=1, uniform="quality")
         category_frame = ttk.Frame(quality_frame)
@@ -1753,11 +1842,19 @@ class DeviceManagerWindow:
             anchor="e",
         ).grid(row=0, column=2, sticky="e", padx=(12, 0))
 
-        intel_frame = ttk.LabelFrame(outer, text="当前可用情报", padding=(10, 8))
-        intel_frame.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
+        intel_frame = ttk.LabelFrame(intel_tab, text="当前可用情报", padding=(10, 8))
+        intel_frame.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
         intel_frame.rowconfigure(0, weight=1)
         intel_frame.columnconfigure(0, weight=1)
-        columns = ("category", "quality", "level", "position", "expires", "runtime")
+        columns = (
+            "category",
+            "quality",
+            "level",
+            "recommended_power",
+            "position",
+            "expires",
+            "runtime",
+        )
         self.intel_tree = ttk.Treeview(
             intel_frame,
             columns=columns,
@@ -1768,6 +1865,7 @@ class DeviceManagerWindow:
             "category": "类别",
             "quality": "品质",
             "level": "等级",
+            "recommended_power": "推荐实力",
             "position": "坐标",
             "expires": "过期时间",
             "runtime": "目标 ID",
@@ -1776,6 +1874,7 @@ class DeviceManagerWindow:
             "category": 120,
             "quality": 90,
             "level": 70,
+            "recommended_power": 105,
             "position": 130,
             "expires": 150,
             "runtime": 110,
@@ -1788,8 +1887,8 @@ class DeviceManagerWindow:
         scroll.grid(row=0, column=1, sticky="ns")
         self.intel_tree.configure(yscrollcommand=scroll.set)
 
-        action_bar = ttk.Frame(outer)
-        action_bar.grid(row=4, column=0, sticky="ew", pady=(14, 12))
+        action_bar = ttk.Frame(intel_tab)
+        action_bar.grid(row=2, column=0, sticky="ew", pady=(14, 4))
         action_bar.columnconfigure(0, weight=1)
         ttk.Label(action_bar, textvariable=self.action_text, style="Subtle.TLabel").grid(
             row=0, column=0, sticky="w"
@@ -1804,8 +1903,88 @@ class DeviceManagerWindow:
         self.hunt_button.grid(row=0, column=1, sticky="e")
         self.hunt_button.bind("<Return>", self._start_hunt_from_event)
 
+        world_tab.columnconfigure(0, weight=1)
+        world_settings = ttk.LabelFrame(
+            world_tab,
+            text="连续搜索与攻击",
+            padding=(16, 14),
+        )
+        world_settings.grid(row=0, column=0, sticky="ew")
+        world_settings.columnconfigure(1, weight=1)
+        ttk.Label(world_settings, text="野兽等级").grid(
+            row=0, column=0, sticky="w", padx=(0, 12)
+        )
+        self.world_level_scale = tk.Scale(
+            world_settings,
+            from_=MIN_WORLD_MONSTER_LEVEL,
+            to=MAX_WORLD_MONSTER_LEVEL,
+            resolution=1,
+            orient="horizontal",
+            showvalue=False,
+            variable=self.world_level_var,
+            command=self._world_level_changed,
+            length=300,
+            sliderlength=18,
+            borderwidth=0,
+            highlightthickness=0,
+            background="#F4F6F8",
+            activebackground="#1769AA",
+            troughcolor="#CFD6DD",
+        )
+        self.world_level_scale.grid(row=0, column=1, sticky="ew")
+        ttk.Label(
+            world_settings,
+            textvariable=self.world_level_text,
+            width=7,
+            anchor="e",
+        ).grid(row=0, column=2, sticky="e", padx=(12, 0))
+
+        ttk.Label(world_settings, text="同时出征").grid(
+            row=1, column=0, sticky="w", padx=(0, 12), pady=(14, 0)
+        )
+        self.world_concurrency_scale = tk.Scale(
+            world_settings,
+            from_=MIN_WORLD_MONSTER_CONCURRENCY,
+            to=MAX_WORLD_MONSTER_CONCURRENCY,
+            resolution=1,
+            orient="horizontal",
+            showvalue=False,
+            variable=self.world_concurrency_var,
+            command=self._world_concurrency_changed,
+            length=300,
+            sliderlength=18,
+            borderwidth=0,
+            highlightthickness=0,
+            background="#F4F6F8",
+            activebackground="#1769AA",
+            troughcolor="#CFD6DD",
+        )
+        self.world_concurrency_scale.grid(row=1, column=1, sticky="ew", pady=(14, 0))
+        ttk.Label(
+            world_settings,
+            textvariable=self.world_concurrency_text,
+            width=7,
+            anchor="e",
+        ).grid(row=1, column=2, sticky="e", padx=(12, 0), pady=(14, 0))
+
+        world_state = ttk.LabelFrame(world_tab, text="运行状态", padding=(16, 14))
+        world_state.grid(row=1, column=0, sticky="ew", pady=(14, 0))
+        world_state.columnconfigure(0, weight=1)
+        ttk.Label(
+            world_state,
+            textvariable=self.world_hunt_status_text,
+            style="Status.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        self.world_hunt_button = ttk.Button(
+            world_state,
+            text="开始搜索并攻击",
+            style="Primary.TButton",
+            command=self._toggle_world_hunt,
+        )
+        self.world_hunt_button.grid(row=0, column=1, sticky="e", padx=(16, 0))
+
         log_frame = ttk.LabelFrame(outer, text="运行记录", padding=(8, 8))
-        log_frame.grid(row=5, column=0, sticky="nsew")
+        log_frame.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
         log_frame.rowconfigure(0, weight=1)
         log_frame.columnconfigure(0, weight=1)
         self.log_text = tk.Text(
@@ -1835,6 +2014,34 @@ class DeviceManagerWindow:
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
+    @staticmethod
+    def _valid_stamina(value: Any) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+
+    def _refresh_identity_text(self) -> None:
+        role = getattr(self, "current_role", None)
+        kingdom = getattr(self, "current_kingdom", None)
+        pid = getattr(self, "current_pid", "-")
+        stamina = getattr(self, "current_stamina", None)
+        stamina_text = str(stamina) if stamina is not None else "读取中"
+        if role is None or kingdom is None:
+            self.identity_text.set(f"正在读取当前角色和情报...  |  领主体力：{stamina_text}")
+            return
+        self.identity_text.set(
+            f"当前角色：{role}  |  区域：{kingdom}  |  PID：{pid}  |  "
+            f"领主体力：{stamina_text}  |  可用情报：{len(self.current_items)}"
+        )
+
+    def _set_current_stamina(self, value: Any) -> bool:
+        stamina = self._valid_stamina(value)
+        if stamina is None:
+            return False
+        self.current_stamina = stamina
+        self._refresh_identity_text()
+        return True
+
     def _set_busy(self, busy: bool, message: str) -> None:
         self.busy = busy
         self.action_text.set(message)
@@ -1845,6 +2052,7 @@ class DeviceManagerWindow:
             check.configure(state="disabled" if busy else "normal")
         self.concurrency_scale.configure(state="disabled" if busy else "normal")
         self._update_hunt_button()
+        self._update_world_hunt_controls()
 
     def _update_hunt_button(self) -> None:
         categories = self._selected_categories()
@@ -1968,13 +2176,566 @@ class DeviceManagerWindow:
                     parent=self.window,
                 )
 
-    def refresh_intel(self) -> None:
+    def _world_level_changed(self, value: str) -> None:
+        level = max(
+            MIN_WORLD_MONSTER_LEVEL,
+            min(MAX_WORLD_MONSTER_LEVEL, int(round(float(value)))),
+        )
+        if self.world_level_var.get() != level:
+            self.world_level_var.set(level)
+        self.world_level_text.set(f"Lv.{level}")
+        save_level = getattr(self.backend, "set_world_monster_level", None)
+        if callable(save_level):
+            try:
+                save_level(self.profile.serial, level)
+            except Exception as exc:
+                self._log(f"搜索野兽等级保存失败：{exc}")
+
+    def _world_concurrency_changed(self, value: str) -> None:
+        concurrency = max(
+            MIN_WORLD_MONSTER_CONCURRENCY,
+            min(MAX_WORLD_MONSTER_CONCURRENCY, int(round(float(value)))),
+        )
+        if self.world_concurrency_var.get() != concurrency:
+            self.world_concurrency_var.set(concurrency)
+        self.world_concurrency_text.set(f"{concurrency} 队")
+        save_concurrency = getattr(
+            self.backend,
+            "set_world_monster_concurrency",
+            None,
+        )
+        if callable(save_concurrency):
+            try:
+                save_concurrency(self.profile.serial, concurrency)
+            except Exception as exc:
+                self._log(f"搜索野兽并发数保存失败：{exc}")
+
+    def _update_world_hunt_controls(self) -> None:
+        if not hasattr(self, "world_hunt_button"):
+            return
+        running = bool(getattr(self, "world_hunt_running", False))
+        locked = running or bool(getattr(self, "busy", False))
+        self.world_level_scale.configure(state="disabled" if locked else "normal")
+        self.world_concurrency_scale.configure(
+            state="disabled" if locked else "normal"
+        )
+        self.world_hunt_button.configure(
+            text="停止补充出征" if running else "开始搜索并攻击",
+            state=(
+                "normal"
+                if running or not bool(getattr(self, "busy", False))
+                else "disabled"
+            ),
+        )
+        if running:
+            self.refresh_intel_button.configure(state="disabled")
+            self.hunt_button.configure(state="disabled")
+            for check in self.category_checks.values():
+                check.configure(state="disabled")
+            for check in self.quality_checks.values():
+                check.configure(state="disabled")
+            self.concurrency_scale.configure(state="disabled")
+        elif not self.busy:
+            self.refresh_intel_button.configure(state="normal")
+            for check in self.category_checks.values():
+                check.configure(state="normal")
+            for check in self.quality_checks.values():
+                check.configure(state="normal")
+            self.concurrency_scale.configure(state="normal")
+            self._update_hunt_button()
+
+    def _toggle_world_hunt(self) -> None:
+        if self.world_hunt_running:
+            self.stop_world_hunt("用户已停止自动补充出征")
+        else:
+            self.start_world_hunt()
+
+    def start_world_hunt(self) -> None:
         if self.busy:
+            messagebox.showwarning(
+                "暂时无法开始",
+                "当前正在处理情报任务，请等待该操作完成。",
+                parent=self.window,
+            )
+            return
+        if self.world_hunt_running:
+            return
+        level = int(self.world_level_var.get())
+        limit = int(self.world_concurrency_var.get())
+        if not MIN_WORLD_MONSTER_LEVEL <= level <= MAX_WORLD_MONSTER_LEVEL:
+            messagebox.showwarning("等级无效", "野兽等级必须是 1-20。", parent=self.window)
+            return
+        if not MIN_WORLD_MONSTER_CONCURRENCY <= limit <= MAX_WORLD_MONSTER_CONCURRENCY:
+            messagebox.showwarning("并发无效", "同时出征必须是 1-4 队。", parent=self.window)
+            return
+        self.world_hunt_generation += 1
+        generation = self.world_hunt_generation
+        # Each persistent CLI session owns its event queue.  A late event from
+        # a stopped subprocess must never be consumed by a later run.
+        self.world_event_queue = queue.Queue()
+        self.world_seen_march_ids = set()
+        self.world_dispatch_count = 0
+        self.world_hunt_running = True
+        self.world_hunt_level = level
+        self.world_hunt_limit = limit
+        self.world_poll_failures = 0
+        self._update_world_hunt_controls()
+        self._log(
+            f"搜索野兽已启动：等级冻结为 Lv.{level}，并发上限冻结为 {limit} 队；"
+            "队伍成功返回后立即补充新的出征。"
+        )
+        self.world_operation_inflight = True
+        self.world_hunt_status_text.set(
+            f"正在启动常驻会话  |  Lv.{level}  |  并发 {limit} 队"
+        )
+        self._schedule_world_event_drain(generation)
+        self.dispatcher.submit(
+            lambda: self.backend.world_monster_loop(
+                self.profile.serial,
+                level,
+                limit,
+                self.world_event_queue.put,
+            ),
+            lambda value, error, generation=generation: self._world_hunt_loop_finished(
+                generation,
+                value,
+                error,
+            ),
+        )
+
+    def stop_world_hunt(
+        self,
+        reason: str = "自动搜索野兽已停止",
+        *,
+        cancel_inflight: bool = True,
+    ) -> None:
+        was_running = bool(getattr(self, "world_hunt_running", False))
+        self.world_hunt_running = False
+        self.world_hunt_generation += 1
+        after_id = getattr(self, "world_poll_after_id", None)
+        if after_id is not None:
+            try:
+                self.window.after_cancel(after_id)
+            except tk.TclError:
+                pass
+        self.world_poll_after_id = None
+        event_after_id = getattr(self, "world_event_after_id", None)
+        if event_after_id is not None:
+            try:
+                self.window.after_cancel(event_after_id)
+            except tk.TclError:
+                pass
+        self.world_event_after_id = None
+        if cancel_inflight and getattr(self, "world_operation_inflight", False):
+            cancel_serial = getattr(self.backend.runner, "cancel_serial", None)
+            if callable(cancel_serial):
+                cancel_serial(self.profile.serial)
+        self.world_operation_inflight = False
+        active_count = len(getattr(self, "world_active_march_ids", ()))
+        self.world_hunt_status_text.set(
+            f"已停止  |  已出征队伍仍正常行军：{active_count} 队"
+        )
+        self._update_world_hunt_controls()
+        if was_running:
+            self._log(f"{reason}；不会召回已出征的 {active_count} 队。")
+
+    def _schedule_world_event_drain(self, generation: int) -> None:
+        if (
+            not self.exists
+            or not self.world_hunt_running
+            or generation != self.world_hunt_generation
+        ):
+            return
+        self.world_event_after_id = self.window.after(
+            100,
+            lambda generation=generation: self._drain_world_hunt_events(generation),
+        )
+
+    def _drain_world_hunt_events(self, generation: int) -> None:
+        self.world_event_after_id = None
+        if generation != self.world_hunt_generation or not self.exists:
+            return
+        while True:
+            try:
+                payload = self.world_event_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._apply_world_hunt_loop_event(generation, payload)
+            if generation != self.world_hunt_generation:
+                return
+        self._schedule_world_event_drain(generation)
+
+    def _apply_world_hunt_loop_event(
+        self,
+        generation: int,
+        payload: Mapping[str, Any],
+    ) -> None:
+        if payload.get("serial") != self.profile.serial:
+            self.stop_world_hunt("常驻会话事件的设备不匹配")
+            return
+        event = str(payload.get("event", payload.get("type", "status"))).lower()
+        stamina = self._valid_stamina(payload.get("current_stamina"))
+        if stamina is not None:
+            self._set_current_stamina(stamina)
+        raw_active = payload.get("active_march_ids")
+        if isinstance(raw_active, list):
+            self.world_active_march_ids = {
+                int(value)
+                for value in raw_active
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0
+            }
+        # ``marches`` is a full active-set snapshot included in every event.
+        # Only a dispatch event's explicit row represents a newly created
+        # server march and may advance the counter or produce a success log.
+        raw_dispatch = payload.get("dispatched_march")
+        if event == "dispatch" and isinstance(raw_dispatch, Mapping):
+            march_id = raw_dispatch.get("march_id")
+            if (
+                isinstance(march_id, int)
+                and not isinstance(march_id, bool)
+                and march_id > 0
+                and march_id not in self.world_seen_march_ids
+            ):
+                self.world_seen_march_ids.add(march_id)
+                self.world_active_march_ids.add(march_id)
+                self.world_dispatch_count += 1
+                self._log(
+                    f"世界野兽出征成功：行军 {march_id}，"
+                    f"Lv.{raw_dispatch.get('level', self.world_hunt_level)}，"
+                    f"目标 {raw_dispatch.get('monster_id', '-')} @ "
+                    f"({raw_dispatch.get('world_x', '-')}, {raw_dispatch.get('world_y', '-')})，"
+                    f"所需体力 {raw_dispatch.get('required_stamina', '-')}。"
+                )
+        returned = payload.get("returned_march_ids")
+        if isinstance(returned, list) and returned:
+            returned_ids = {
+                int(value)
+                for value in returned
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0
+            }
+            self.world_active_march_ids.difference_update(returned_ids)
+            self._log(
+                f"检测到 {len(returned_ids)} 队已返回：{sorted(returned_ids)}；"
+                "常驻会话正在立即补充空位。"
+            )
+        if event in {"blocked", "error"}:
+            reason = str(
+                payload.get("detail")
+                or payload.get("message")
+                or payload.get("blocked_reason")
+                or "常驻搜索野兽已停止"
+            )
+            self.stop_world_hunt(reason, cancel_inflight=False)
+            return
+        limit = self.world_hunt_limit or 0
+        self.world_hunt_status_text.set(
+            f"运行中  |  Lv.{self.world_hunt_level}  |  "
+            f"当前行军 {len(self.world_active_march_ids)}/{limit}  |  "
+            f"累计出征 {self.world_dispatch_count}"
+        )
+
+    def _world_hunt_loop_finished(
+        self,
+        generation: int,
+        _value: Any | None,
+        error: Exception | None,
+    ) -> None:
+        if generation != self.world_hunt_generation or not self.exists:
+            return
+        self._drain_world_hunt_events(generation)
+        if generation != self.world_hunt_generation:
+            return
+        self.world_operation_inflight = False
+        if error is not None:
+            self.stop_world_hunt(
+                f"常驻搜索野兽命令结束：{error}",
+                cancel_inflight=False,
+            )
+            return
+        self.stop_world_hunt("常驻搜索野兽已结束", cancel_inflight=False)
+
+    def _fill_world_hunt_slots(self, generation: int) -> None:
+        if (
+            not self.exists
+            or not self.world_hunt_running
+            or generation != self.world_hunt_generation
+            or self.world_operation_inflight
+        ):
+            return
+        limit = self.world_hunt_limit
+        level = self.world_hunt_level
+        if limit is None or level is None:
+            self.stop_world_hunt("搜索野兽冻结参数丢失", cancel_inflight=False)
+            return
+        available = limit - len(self.world_active_march_ids)
+        if available <= 0:
+            self._schedule_world_hunt_poll(generation)
+            return
+        self.world_operation_inflight = True
+        self.world_hunt_status_text.set(
+            f"正在搜索 Lv.{level} 野兽并补充 {available} 队  |  "
+            f"当前行军 {len(self.world_active_march_ids)}/{limit}"
+        )
+        self._log(
+            f"搜索 Lv.{level} 野兽，当前 {len(self.world_active_march_ids)}/{limit} 队；"
+            f"本次最多补充 {available} 队。"
+        )
+        self.dispatcher.submit(
+            lambda level=level, available=available: self.backend.hunt_world_monsters(
+                self.profile.serial,
+                level,
+                available,
+            ),
+            lambda value, error, generation=generation: self._world_hunt_dispatched(
+                generation,
+                value,
+                error,
+            ),
+        )
+
+    def _world_hunt_dispatched(
+        self,
+        generation: int,
+        value: Any | None,
+        error: Exception | None,
+    ) -> None:
+        if generation != self.world_hunt_generation or not self.exists:
+            return
+        self.world_operation_inflight = False
+        if not self.world_hunt_running:
+            return
+        if error is not None:
+            self.stop_world_hunt(
+                f"搜索野兽出征失败：{error}",
+                cancel_inflight=False,
+            )
+            return
+        payload = value if isinstance(value, Mapping) else {}
+        if payload.get("serial") != self.profile.serial:
+            self.stop_world_hunt("搜索野兽回执设备不匹配", cancel_inflight=False)
+            return
+        stamina = self._valid_stamina(payload.get("current_stamina"))
+        raw_marches = payload.get("marches")
+        if not isinstance(raw_marches, list):
+            raw_marches = [payload] if isinstance(payload.get("march_id"), int) else []
+        added = 0
+        blocked: Mapping[str, Any] | None = None
+        for raw in raw_marches:
+            if not isinstance(raw, Mapping):
+                continue
+            item_stamina = self._valid_stamina(raw.get("current_stamina"))
+            if item_stamina is not None:
+                self._set_current_stamina(item_stamina)
+            if raw.get("blocked_reason"):
+                blocked = raw
+                continue
+            march_id = raw.get("march_id")
+            if (
+                isinstance(march_id, bool)
+                or not isinstance(march_id, int)
+                or march_id <= 0
+                or raw.get("verified") is not True
+            ):
+                continue
+            if march_id in self.world_active_march_ids:
+                continue
+            self.world_active_march_ids.add(march_id)
+            self.world_dispatch_count += 1
+            added += 1
+            required = raw.get("required_stamina", "-")
+            actual_power = raw.get("actual_power", raw.get("formation_power", "-"))
+            self._log(
+                f"世界野兽出征成功：行军 {march_id}，Lv.{raw.get('level', self.world_hunt_level)}，"
+                f"目标 {raw.get('monster_id', '-')} @ "
+                f"({raw.get('world_x', '-')}, {raw.get('world_y', '-')})，"
+                f"所需体力 {required}，出征实力 {actual_power}。"
+            )
+        if stamina is not None:
+            self._set_current_stamina(stamina)
+        if blocked is None and payload.get("blocked_reason"):
+            blocked = payload
+        if blocked is not None:
+            reason = str(blocked.get("blocked_reason"))
+            if reason == "insufficient_stamina":
+                detail = (
+                    f"领主体力不足：当前 {blocked.get('current_stamina', '-')}，"
+                    f"本次需要 {blocked.get('required_stamina', '-')}"
+                )
+            elif reason == "level_locked":
+                detail = (
+                    f"当前账号尚未解锁 Lv.{self.world_hunt_level} 野兽，"
+                    f"最高可攻击 Lv.{blocked.get('max_level', '-')}"
+                )
+            else:
+                detail = str(blocked.get("detail") or reason)
+            self.stop_world_hunt(detail, cancel_inflight=False)
+            return
+        completed_count = payload.get("completed_count")
+        requested_count = payload.get("requested_count")
+        if (
+            isinstance(completed_count, int)
+            and isinstance(requested_count, int)
+            and completed_count < requested_count
+        ):
+            self.stop_world_hunt(
+                str(
+                    payload.get("detail")
+                    or f"本次请求 {requested_count} 队，仅确认 {completed_count} 队，已停止补队"
+                ),
+                cancel_inflight=False,
+            )
+            return
+        if added == 0:
+            self.stop_world_hunt(
+                "搜索野兽命令未返回经过服务端行军验证的新队伍",
+                cancel_inflight=False,
+            )
+            return
+        limit = self.world_hunt_limit or 0
+        self.world_hunt_status_text.set(
+            f"运行中  |  Lv.{self.world_hunt_level}  |  "
+            f"当前行军 {len(self.world_active_march_ids)}/{limit}  |  "
+            f"累计出征 {self.world_dispatch_count}"
+        )
+        if len(self.world_active_march_ids) < limit:
+            self._fill_world_hunt_slots(generation)
+        else:
+            self._schedule_world_hunt_poll(generation)
+
+    def _schedule_world_hunt_poll(
+        self,
+        generation: int,
+        *,
+        delay_ms: int = 1500,
+    ) -> None:
+        if (
+            not self.exists
+            or not self.world_hunt_running
+            or generation != self.world_hunt_generation
+        ):
+            return
+        after_id = self.world_poll_after_id
+        if after_id is not None:
+            try:
+                self.window.after_cancel(after_id)
+            except tk.TclError:
+                pass
+        self.world_poll_after_id = self.window.after(
+            delay_ms,
+            lambda generation=generation: self._poll_world_hunt(generation),
+        )
+
+    def _poll_world_hunt(self, generation: int) -> None:
+        self.world_poll_after_id = None
+        if (
+            not self.exists
+            or not self.world_hunt_running
+            or generation != self.world_hunt_generation
+            or self.world_operation_inflight
+        ):
+            return
+        if not self.world_active_march_ids:
+            self._fill_world_hunt_slots(generation)
+            return
+        march_ids = tuple(sorted(self.world_active_march_ids))
+        self.world_operation_inflight = True
+        self.dispatcher.submit(
+            lambda march_ids=march_ids: self.backend.world_monster_status(
+                self.profile.serial,
+                march_ids,
+            ),
+            lambda value, error, generation=generation, march_ids=march_ids: (
+                self._world_hunt_status_received(
+                    generation,
+                    march_ids,
+                    value,
+                    error,
+                )
+            ),
+        )
+
+    def _world_hunt_status_received(
+        self,
+        generation: int,
+        requested_ids: Sequence[int],
+        value: Any | None,
+        error: Exception | None,
+    ) -> None:
+        if generation != self.world_hunt_generation or not self.exists:
+            return
+        self.world_operation_inflight = False
+        if not self.world_hunt_running:
+            return
+        if error is not None:
+            self.world_poll_failures += 1
+            if self.world_poll_failures >= 3:
+                self.stop_world_hunt(
+                    f"行军状态连续读取失败：{error}",
+                    cancel_inflight=False,
+                )
+                return
+            self._log(
+                f"行军状态读取失败（{self.world_poll_failures}/3）：{error}；稍后重试。"
+            )
+            self._schedule_world_hunt_poll(generation, delay_ms=2500)
+            return
+        payload = value if isinstance(value, Mapping) else {}
+        if payload.get("serial") != self.profile.serial:
+            self.stop_world_hunt("行军状态回执设备不匹配", cancel_inflight=False)
+            return
+        stamina = self._valid_stamina(payload.get("current_stamina"))
+        statuses = payload.get("statuses")
+        if not isinstance(statuses, list):
+            statuses = [payload] if len(requested_ids) == 1 else []
+        parsed: dict[int, str] = {}
+        for status in statuses:
+            if not isinstance(status, Mapping):
+                continue
+            march_id = status.get("march_id")
+            state = status.get("status", status.get("state"))
+            if (
+                isinstance(march_id, int)
+                and not isinstance(march_id, bool)
+                and isinstance(state, str)
+            ):
+                parsed[march_id] = state.upper()
+        if set(parsed) != set(requested_ids):
+            self.stop_world_hunt(
+                "行军状态回执未精确覆盖当前跟踪的行军 ID",
+                cancel_inflight=False,
+            )
+            return
+        self.world_poll_failures = 0
+        if stamina is not None:
+            self._set_current_stamina(stamina)
+        returned = {
+            march_id
+            for march_id, state in parsed.items()
+            if state not in {"ACTIVE", "MARCHING", "RETURNING"}
+        }
+        if returned:
+            self.world_active_march_ids.difference_update(returned)
+            self._log(
+                f"检测到 {len(returned)} 队已成功返回：{sorted(returned)}；立即补充空位。"
+            )
+        limit = self.world_hunt_limit or 0
+        self.world_hunt_status_text.set(
+            f"运行中  |  Lv.{self.world_hunt_level}  |  "
+            f"当前行军 {len(self.world_active_march_ids)}/{limit}  |  "
+            f"累计出征 {self.world_dispatch_count}"
+        )
+        if returned or len(self.world_active_march_ids) < limit:
+            self._fill_world_hunt_slots(generation)
+        else:
+            self._schedule_world_hunt_poll(generation)
+
+    def refresh_intel(self) -> None:
+        if self.busy or getattr(self, "world_hunt_running", False):
             return
         self.current_items = []
         self._render_items()
-        self._set_busy(True, "正在读取当前角色和情报...")
-        self._log("开始只读读取当前角色和情报。")
+        self._set_busy(True, "正在读取当前角色、领主体力和情报...")
+        self._log("开始只读读取当前角色、领主体力和情报。")
         self.dispatcher.submit(
             self._inspect_current_tasks,
             self._intel_refreshed,
@@ -2012,14 +2773,18 @@ class DeviceManagerWindow:
         role = str(payload.get("role", "未知"))
         self.current_role = role
         self.current_kingdom = kingdom
-        pid = payload.get("pid", "-")
-        self.identity_text.set(
-            f"当前角色：{role}  |  区域：{kingdom}  |  PID：{pid}  |  可用情报：{len(self.current_items)}"
-        )
+        self.current_pid = payload.get("pid", "-")
+        stamina = self._valid_stamina(payload.get("current_stamina"))
+        self.current_stamina = stamina
+        self._refresh_identity_text()
         self._render_items()
         self._set_busy(False, "情报检查完成")
         self.hunt_button.focus_set()
-        self._log(f"情报检查完成：角色 {role}，发现 {len(self.current_items)} 个可用目标。")
+        stamina_text = str(stamina) if stamina is not None else "读取失败"
+        self._log(
+            f"情报检查完成：角色 {role}，领主体力 {stamina_text}，"
+            f"发现 {len(self.current_items)} 个可用目标。"
+        )
 
     def _render_items(self) -> None:
         for row in self.intel_tree.get_children():
@@ -2039,6 +2804,7 @@ class DeviceManagerWindow:
                     category_label,
                     quality_label,
                     f"Lv.{item.get('level', '-')}",
+                    _format_recommended_power(item),
                     f"{item.get('world_x', '-')}, {item.get('world_y', '-')}",
                     _format_expiry(item.get("expires_at")),
                     item.get("runtime_id", "-"),
@@ -2053,7 +2819,7 @@ class DeviceManagerWindow:
         return "break"
 
     def start_hunt(self) -> None:
-        if self.busy:
+        if self.busy or getattr(self, "world_hunt_running", False):
             return
         categories = self._selected_categories()
         selected_qualities = self._selected_qualities()
@@ -2361,6 +3127,34 @@ class DeviceManagerWindow:
             batch.mark_attempt_error(target.runtime_id, "批次开始角色未冻结")
             self._log("批次开始角色未冻结；等待本波其余回执后统一刷新核对。")
             return
+        if payload.get("blocked_reason") == "insufficient_stamina":
+            current = payload.get("current_stamina")
+            required = payload.get("required_stamina")
+            base = payload.get("base_stamina")
+            if any(
+                isinstance(item, bool) or not isinstance(item, int) or item < 0
+                for item in (current, required, base)
+            ) or required <= current:
+                detail = "体力不足回执中的体力数据无效"
+                batch.mark_attempt_error(target.runtime_id, detail)
+                self._log(
+                    f"{target.label} 回执验证失败：{detail}；"
+                    "等待本波其余回执后统一刷新核对。"
+                )
+                return
+            detail = (
+                f"领主当前体力 {current}，本次平均配置实际需要 {required}"
+                f"（任务基础消耗 {base}），体力不足，未出征"
+            )
+            self._set_current_stamina(current)
+            try:
+                outcome = batch.mark_dispatch_blocked(target.runtime_id, detail)
+            except HuntBatchError as exc:
+                self._log(f"体力不足回执状态异常：{exc}。")
+                self._march_reconcile_failed(str(exc))
+                return
+            self._log_batch_outcome(outcome)
+            return
         try:
             runtime_id = validate_march_intel_receipt(
                 payload,
@@ -2378,6 +3172,10 @@ class DeviceManagerWindow:
             )
             return
 
+        current = self._valid_stamina(payload.get("current_stamina"))
+        required = self._valid_stamina(payload.get("required_stamina"))
+        if current is not None and required is not None and current >= required:
+            self._set_current_stamina(current - required)
         status = str(payload.get("quest_status_after", "-"))
         try:
             batch.mark_dispatched(runtime_id, f"任务状态 {status}")
@@ -2747,11 +3545,11 @@ class DeviceManagerWindow:
         ]
         self.current_role = role
         self.current_kingdom = kingdom
-        pid = payload.get("pid", "-")
-        self.identity_text.set(
-            f"当前角色：{role}  |  区域：{kingdom}  |  "
-            f"PID：{pid}  |  可用情报：{len(self.current_items)}"
-        )
+        self.current_pid = payload.get("pid", getattr(self, "current_pid", "-"))
+        stamina = self._valid_stamina(payload.get("current_stamina"))
+        if stamina is not None:
+            self.current_stamina = stamina
+        self._refresh_identity_text()
         self._render_items()
         return self._available_runtime_ids()
 
@@ -2852,16 +3650,20 @@ class DeviceManagerWindow:
     def close(self) -> None:
         if self._closing:
             return
-        if self.busy and self.hunt_batch is not None:
+        world_running = bool(getattr(self, "world_hunt_running", False))
+        if (self.busy and self.hunt_batch is not None) or world_running:
             should_close = messagebox.askyesno(
                 "任务正在执行",
-                "当前正在处理出征或领取流程。是否取消该设备后台命令并关闭管理窗口？",
+                "当前正在处理出征、领取或连续搜索野兽。"
+                "是否取消该设备后台命令并关闭管理窗口？",
                 parent=self.window,
             )
             if not should_close:
                 return
         self._closing = True
-        if self.busy:
+        if world_running:
+            self.stop_world_hunt("管理窗口已关闭")
+        if self.busy or world_running:
             cancel_serial = getattr(self.backend.runner, "cancel_serial", None)
             if callable(cancel_serial):
                 cancel_serial(self.profile.serial)
