@@ -384,6 +384,7 @@ class GuiBackendTests(unittest.TestCase):
                 "--target-json",
             ),
         )
+
         self.assertEqual(
             arguments[-3:],
             ("--expected-role", "打工人", "--execute"),
@@ -400,6 +401,23 @@ class GuiBackendTests(unittest.TestCase):
                 {"category": "hero", "runtime_id": 501, "quality": "blue"},
                 {"category": "rescue", "runtime_id": 601, "quality": "green"},
             ],
+        )
+
+    def test_backend_toggle_world_uses_native_event_command(self) -> None:
+        runner = FakeRunner(
+            ['{"serial":"device-1","toggle_invoked":true}\n']
+        )
+        backend = GuiBackend(runner)  # type: ignore[arg-type]
+
+        payload = backend.toggle_world("device-1")
+
+        self.assertTrue(payload["toggle_invoked"])
+        self.assertEqual(
+            runner.calls[0],
+            (
+                ("toggle-world", "--serial", "device-1", "--execute"),
+                45,
+            ),
         )
 
     def test_backend_world_monster_commands_bind_level_count_and_march_ids(self) -> None:

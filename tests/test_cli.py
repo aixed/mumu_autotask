@@ -581,6 +581,18 @@ def scene_protocol(
     )
 
 
+def toggle_world_protocol(role: str) -> str:
+    return "\n".join(
+        (
+            "MUMU_AUTOTASK\t1\tTOGGLE_WORLD",
+            f"ROLE\t{role.encode('utf-8').hex()}",
+            "KINGDOM\t4549",
+            "INVOKED\t1",
+            "END\t1",
+        )
+    )
+
+
 class CliTests(unittest.TestCase):
     def setUp(self) -> None:
         scanner_patch = patch(
@@ -605,6 +617,7 @@ class CliTests(unittest.TestCase):
             "inspect-intel",
             "inspect-tasks",
             "ensure-world",
+            "toggle-world",
             "wait-intel",
             "claim-intel",
             "march",
@@ -1693,6 +1706,7 @@ class CliTests(unittest.TestCase):
                 is_world=False,
                 is_city=True,
             ),
+            toggle_world_protocol(role),
             scene_protocol(role, loading="true", transition="true"),
             scene_protocol(role),
         )
@@ -1716,10 +1730,11 @@ class CliTests(unittest.TestCase):
             )
         result = json.loads(output.getvalue())
         self.assertTrue(result["world_ready"])
-        self.assertTrue(result["tap_invoked"])
-        self.assertEqual(result["tap_coordinates"], [652, 1213])
+        self.assertTrue(result["toggle_invoked"])
+        self.assertFalse(result["tap_invoked"])
+        self.assertIsNone(result["tap_coordinates"])
         self.assertEqual(result["poll_count"], 2)
-        self.assertIn("input-tap:652,1213", events)
+        self.assertNotIn("input-tap:652,1213", events)
 
     def test_ensure_world_execute_waits_for_scene_modules_after_cold_start(self) -> None:
         events: list[str] = []

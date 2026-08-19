@@ -33,6 +33,7 @@ from .business import (
     build_scene_status_lua,
     build_start_battle_intel_lua,
     build_start_rescue_intel_lua,
+    build_toggle_world_lua,
     build_uninstall_march_capture_hook_lua,
     build_verify_battle_intel_lua,
     build_verify_march_lua,
@@ -57,6 +58,7 @@ from .business import (
     parse_prepare_output,
     parse_rescue_commit_output,
     parse_scene_status_output,
+    parse_toggle_world_output,
     parse_verify_output,
     parse_world_monster_commit_output,
     parse_world_monster_search_output,
@@ -214,6 +216,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="tap the lower-right world button when the current scene is not WorldScene",
     )
     ensure_world.set_defaults(dry_run=True)
+
+    toggle_world = subparsers.add_parser(
+        "toggle-world",
+        help="switch between the city and outdoor world through the native UI event",
+    )
+    toggle_world.add_argument("--serial", required=True)
+    toggle_world.add_argument(
+        "--expected-role",
+        help="require this exact active role before invoking the entrance event",
+    )
+    toggle_world.add_argument(
+        "--execute",
+        dest="dry_run",
+        action="store_false",
+        help="invoke MAIN_FRAME:GetHomeEntrance().onClick:Invoke()",
+    )
+    toggle_world.set_defaults(dry_run=True)
 
     wait_intel = subparsers.add_parser(
         "wait-intel",
@@ -1153,30 +1172,6 @@ def _scene_world_ready(status: SceneStatus) -> bool:
     return status.is_world and status.loading is not True and status.transition is not True
 
 
-def _world_button_tap_coordinates(adb: AdbClient, profile: DeviceProfile) -> tuple[int, int]:
-    return _scaled_tap_coordinates(adb, profile, 0.906, 0.948, (652, 1214))
-
-
-def _scaled_tap_coordinates(
-    adb: AdbClient,
-    profile: DeviceProfile,
-    x_ratio: float,
-    y_ratio: float,
-    fallback: tuple[int, int],
-) -> tuple[int, int]:
-    try:
-        size = adb.window_size(profile.serial)
-        x = int(size.width * x_ratio)
-        y = int(size.height * y_ratio)
-        return (
-            max(0, min(size.width - 1, x)),
-            max(0, min(size.height - 1, y)),
-        )
-    except Exception as exc:
-        LOGGER.warning("could not read window size for %s: %s", profile.serial, exc)
-        return fallback
-
-
 def _require_same_foreground_process(
     adb: AdbClient,
     profile: DeviceProfile,
@@ -1291,7 +1286,11 @@ def _execute_ensure_world(
 ) -> dict[str, Any]:
     locked_initial_roles = validate_role_whitelist(initial_roles)
     code = build_scene_status_lua(locked_initial_roles)
-    stage_hashes = {"scene": script_sha256(code)}
+    toggle_code = build_toggle_world_lua(locked_initial_roles)
+    stage_hashes = {
+        "scene": script_sha256(code),
+        "toggle_world": script_sha256(toggle_code),
+    }
     scanner = _scanner(adb, profile)
     state = _wait_unique_idle_lua_state(
         adb,
@@ -1304,8 +1303,7 @@ def _execute_ensure_world(
     )
     final_status: SceneStatus | None = None
     initial_status: SceneStatus | None = None
-    tapped = False
-    tap_coordinates: tuple[int, int] | None = None
+    toggle_invoked = False
     poll_count = 0
 
     with client:
@@ -1352,9 +1350,34 @@ def _execute_ensure_world(
             active_roles = (initial_status.role,)
             if not dry_run and not _scene_world_ready(initial_status):
                 if not initial_status.is_world:
-                    tap_coordinates = _world_button_tap_coordinates(adb, profile)
-                    adb.input_tap(profile.serial, *tap_coordinates)
-                    tapped = True
+                    toggle_code = build_toggle_world_lua(active_roles)
+                    stage_hashes["toggle_world"] = script_sha256(toggle_code)
+                    toggle_result = _execute_lua_when_idle(
+                        adb,
+                        profile,
+                        client,
+                        process,
+                        scanner,
+                        state,
+                        toggle_code,
+                        output_capacity=output_capacity,
+                        operation="city/world entrance invocation",
+                    )
+                    last_result = toggle_result
+                    parse_toggle_world_output(toggle_result.output, active_roles)
+                    toggle_invoked = True
+                    # Invoking the Unity Button event can move the embedded Lua
+                    # state while the scene transition starts. Rebind before
+                    # polling the new scene so no stale state address is used.
+                    state = _wait_unique_idle_lua_state(
+                        adb,
+                        profile,
+                        scanner,
+                        process,
+                        "world scene transition",
+                        timeout_seconds=timeout_seconds,
+                        poll_interval_seconds=poll_interval_seconds,
+                    )
                 deadline = time.monotonic() + timeout_seconds
                 while True:
                     time.sleep(poll_interval_seconds)
@@ -1416,8 +1439,11 @@ def _execute_ensure_world(
         {
             "dry_run": dry_run,
             "world_ready": _scene_world_ready(final_status),
-            "tap_invoked": tapped,
-            "tap_coordinates": list(tap_coordinates) if tap_coordinates else None,
+            "toggle_invoked": toggle_invoked,
+            # Kept as explicit nulls for callers of the old coordinate-based
+            # result schema. No ADB input tap is issued anymore.
+            "tap_invoked": False,
+            "tap_coordinates": None,
             "poll_count": poll_count,
             "scene_before": _scene_status_payload(initial_status)["scene"],
             "scene_after": _scene_status_payload(final_status)["scene"],
@@ -3598,6 +3624,7 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
             "inspect-tasks",
             "inspect-battle-intel",
             "ensure-world",
+            "toggle-world",
             "wait-intel",
             "claim-intel",
             "march",
@@ -3633,6 +3660,8 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
     elif args.command == "ensure-world":
         timeout_seconds, poll_interval_seconds = _polling_options(args)
         code = build_scene_status_lua(operation_roles)
+    elif args.command == "toggle-world":
+        code = build_toggle_world_lua(operation_roles)
     elif args.command in {"wait-intel", "claim-intel"}:
         target_ids = normalize_target_ids(args.target_ids)
         timeout_seconds, poll_interval_seconds = _polling_options(args)
@@ -3922,6 +3951,34 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
                 timeout_seconds=timeout_seconds,
                 poll_interval_seconds=poll_interval_seconds,
             )
+        )
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+
+    if args.command == "toggle-world":
+        result, initialization, state, before, after = _execute_lua(
+            adb,
+            profile,
+            client,
+            process,
+            code,
+            output_capacity=settings.frida.output_capacity,
+        )
+        role, kingdom = parse_toggle_world_output(
+            result.output,
+            operation_roles,
+        )
+        payload.update(
+            _execution_payload(initialization, state, before, after, result)
+        )
+        payload.update(
+            {
+                "dry_run": False,
+                "role": role,
+                "kingdom": kingdom,
+                "toggle_invoked": True,
+                "output": result.output,
+            }
         )
         print(json.dumps(payload, ensure_ascii=False))
         return 0

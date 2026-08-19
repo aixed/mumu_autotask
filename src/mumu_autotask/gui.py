@@ -2144,13 +2144,19 @@ class DeviceManagerWindow:
             command=self.refresh_intel,
         )
         self.refresh_intel_button.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.toggle_world_button = ttk.Button(
+            title,
+            text="野外/城镇",
+            command=self.toggle_world,
+        )
+        self.toggle_world_button.grid(row=2, column=1, sticky="e", pady=(6, 0))
         ttk.Label(
             title,
             textvariable=self.identity_text,
             style="Status.TLabel",
             wraplength=380,
         ).grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(6, 0)
+            row=2, column=0, sticky="w", pady=(6, 0)
         )
 
         ttk.Separator(outer).grid(row=1, column=0, sticky="ew", pady=(7, 6))
@@ -2478,6 +2484,8 @@ class DeviceManagerWindow:
         self.busy = busy
         self.action_text.set(message)
         self.refresh_intel_button.configure(state="disabled" if busy else "normal")
+        if hasattr(self, "toggle_world_button"):
+            self.toggle_world_button.configure(state="disabled" if busy else "normal")
         for check in self.category_checks.values():
             check.configure(state="disabled" if busy else "normal")
         for check in self.quality_checks.values():
@@ -2647,6 +2655,8 @@ class DeviceManagerWindow:
             return
         running = bool(getattr(self, "world_hunt_running", False))
         locked = running or bool(getattr(self, "busy", False))
+        if hasattr(self, "toggle_world_button"):
+            self.toggle_world_button.configure(state="disabled" if locked else "normal")
         self.world_level_scale.configure(state="disabled" if locked else "normal")
         self.world_concurrency_scale.configure(
             state="disabled" if locked else "normal"
@@ -3179,6 +3189,38 @@ class DeviceManagerWindow:
             self._inspect_current_tasks,
             self._intel_refreshed,
         )
+
+    def toggle_world(self) -> None:
+        """Switch city/world by invoking the native entrance Button event."""
+
+        if self.busy or getattr(self, "world_hunt_running", False):
+            self._log("当前任务执行中，暂不能切换野外/城镇。")
+            return
+        self._set_busy(True, "正在调用野外/城镇切换事件...")
+        self._log("调用 MAIN_FRAME 野外/城镇按钮事件。")
+        self.dispatcher.submit(
+            lambda: self.backend.toggle_world(self.profile.serial),
+            self._world_toggled,
+        )
+
+    def _world_toggled(self, value: Any | None, error: Exception | None) -> None:
+        if not self.exists:
+            return
+        if error is not None:
+            self._set_busy(False, f"野外/城镇切换失败：{error}")
+            self._log(f"野外/城镇切换失败：{error}")
+            return
+        payload = value if isinstance(value, Mapping) else {}
+        if payload.get("serial") != self.profile.serial:
+            self._set_busy(False, "野外/城镇切换回执设备不匹配")
+            self._log("野外/城镇切换失败：回执设备不匹配。")
+            return
+        if payload.get("toggle_invoked") is not True:
+            self._set_busy(False, "野外/城镇切换未确认")
+            self._log("野外/城镇切换失败：底层按钮事件未确认。")
+            return
+        self._set_busy(False, "野外/城镇切换事件已调用")
+        self._log("已调用野外/城镇按钮事件，游戏正在切换场景。")
 
     def _intel_refreshed(self, value: Any | None, error: Exception | None) -> None:
         if not self.exists:

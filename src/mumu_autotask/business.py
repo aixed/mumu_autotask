@@ -2919,9 +2919,52 @@ end
 '''
 
 
+_TOGGLE_WORLD_BODY = r'''
+local role_hex, kingdom = checked_identity()
+if type(GModule) ~= "table" or type(GModule.UIModule) ~= "table" then
+    fail("UIModule is unavailable")
+end
+if type(GViewId) ~= "table" or GViewId.MAIN_FRAME == nil then
+    fail("MAIN_FRAME view id is unavailable")
+end
+local main = GModule.UIModule:FindOpenedView(GViewId.MAIN_FRAME)
+if main == nil then
+    fail("MAIN_FRAME is not open")
+end
+local get_entrance = main.GetHomeEntrance
+if type(get_entrance) ~= "function" then
+    fail("HomeEntrance method is unavailable")
+end
+local button_ok, button = pcall(get_entrance, main)
+if not button_ok or button == nil then
+    fail("HomeEntrance button is unavailable")
+end
+local on_click = button.onClick
+if on_click == nil or type(on_click.Invoke) ~= "function" then
+    fail("HomeEntrance onClick event is unavailable")
+end
+local invoke_ok, invoke_error = pcall(on_click.Invoke, on_click)
+if not invoke_ok then
+    fail("HomeEntrance onClick invocation failed: " .. tostring(invoke_error))
+end
+return table.concat({
+    "MUMU_AUTOTASK\t1\tTOGGLE_WORLD",
+    "ROLE\t" .. role_hex,
+    "KINGDOM\t" .. tostring(kingdom),
+    "INVOKED\t1",
+    "END\t1",
+}, "\n")
+'''
+
+
 _WORLD_MONSTER_SEARCH_BODY = r'''
 local LEVEL = __LEVEL__
 local role_hex, kingdom = identity()
+local previous = _G.__MUMU_AUTOTASK_WORLD_MONSTER_SEARCH
+if type(previous) == "table" and type(GameMsg) == "table"
+    and type(GameMsg.RemoveMessageByTarget) == "function" then
+    pcall(GameMsg.RemoveMessageByTarget, previous)
+end
 local max_level = integer(call(GCtrl.WorldPlayerCtrl,
     "GetPlayerCanKillMonsterMaxLv", "maximum monster level"),
     "maximum monster level", true)
@@ -2930,44 +2973,56 @@ if LEVEL > max_level then
 end
 local view_id = 207
 local state = { level = LEVEL, view_id = view_id }
+state.search_callback = function(_, point, response_view_id)
+    if response_view_id ~= state.view_id or type(point) ~= "table"
+        or type(point.x) ~= "number" or type(point.y) ~= "number" then
+        return
+    end
+    state.world_x = point.x
+    state.world_y = point.y
+    state.callback_received = true
+    if type(GCtrl) == "table" and type(GCtrl.WorldMapCtrl) == "table"
+        and type(GCtrl.WorldMapCtrl.ReqWorldMapObjByPos) == "function" then
+        pcall(
+            GCtrl.WorldMapCtrl.ReqWorldMapObjByPos,
+            GCtrl.WorldMapCtrl,
+            kingdom,
+            point.x,
+            point.y
+        )
+    end
+end
 state.start = function()
-    if type(GModule) ~= "table" or type(GModule.UIModule) ~= "table" then
-        state.search_error = "UIModule is unavailable"
+    if type(GameMsg) ~= "table" or type(GameMsg.AddMessage) ~= "function"
+        or type(GameMsgId) ~= "table"
+        or GameMsgId.REQ_WORLD_SEARCH_BACK == nil then
+        state.search_error = "world search callback API is unavailable"
         return false
     end
-    local ui = GModule.UIModule
-    local view = ui:FindOpenedView(GViewId.WORLD_SEARCH_OBJ)
-    if type(view) ~= "table" then
-        local ok, open_error = pcall(ui.OpenView, ui,
-            GViewId.WORLD_SEARCH_OBJ)
-        if not ok then
-            state.search_error = tostring(open_error)
-        end
+    local add_ok, add_error = pcall(
+        GameMsg.AddMessage,
+        state,
+        GameMsgId.REQ_WORLD_SEARCH_BACK,
+        state.search_callback
+    )
+    if not add_ok then
+        state.search_error = tostring(add_error)
         return false
     end
-    if type(view.IsLoaded) == "function" and view:IsLoaded() ~= true then
-        return false
-    end
-    if type(view.OnBtnSearchClick) ~= "function"
-        or type(view.objLvMap) ~= "table" then
-        state.search_error = "world search view is not ready"
-        return false
-    end
-    view._selectedObjType = 1
-    view.objLvMap[1] = LEVEL
-    if type(view._commonSlider) == "table"
-        and type(view._commonSlider.SetSliderValue) == "function" then
-        view._commonSlider:SetSliderValue(LEVEL)
-    end
-    if type(view._prePoint) == "table" then
-        view._prePoint.x = -1
-        view._prePoint.y = -1
-    else
-        view._prePoint = { x = -1, y = -1 }
-    end
-    local ok, search_error = pcall(view.OnBtnSearchClick, view)
-    if not ok then
-        state.search_error = tostring(search_error)
+    local request_ok, request_error = pcall(
+        GCtrl.WorldPlayerCtrl.ReqWorldMapSearch,
+        GCtrl.WorldPlayerCtrl,
+        WorldMapDefine.mapobj_type.map_monster,
+        LEVEL,
+        LEVEL,
+        nil,
+        nil,
+        false,
+        view_id
+    )
+    if not request_ok then
+        pcall(GameMsg.RemoveMessageByTarget, state)
+        state.search_error = tostring(request_error)
         return false
     end
     state.request_started = true
@@ -3002,14 +3057,6 @@ if state.request_started ~= true then
     if state.search_error ~= nil then
         fail("world monster search failed: " .. tostring(state.search_error))
     end
-end
-local view = GModule.UIModule:FindOpenedView(GViewId.WORLD_SEARCH_OBJ)
-local point = type(view) == "table" and view._prePoint or nil
-if state.request_started == true and type(point) == "table"
-    and type(point.x) == "number" and point.x >= 0
-    and type(point.y) == "number" and point.y >= 0 then
-    state.world_x = point.x
-    state.world_y = point.y
 end
 if type(state.world_x) ~= "number" or type(state.world_y) ~= "number" then
     return table.concat({
@@ -3351,6 +3398,11 @@ def build_close_expedition_lua(roles: Sequence[str]) -> str:
 def build_scene_status_lua(roles: Sequence[str]) -> str:
     common = _LUA_COMMON.replace("__ROLE_TABLE__", _lua_role_table(roles))
     return _finalize_lua(textwrap.dedent(common + _SCENE_STATUS_BODY))
+
+
+def build_toggle_world_lua(roles: Sequence[str]) -> str:
+    common = _LUA_COMMON.replace("__ROLE_TABLE__", _lua_role_table(roles))
+    return _finalize_lua(textwrap.dedent(common + _TOGGLE_WORLD_BODY))
 
 
 def build_install_march_capture_hook_lua(roles: Sequence[str]) -> str:
@@ -3797,6 +3849,26 @@ def parse_scene_status_output(
         loading=_parse_missing_bool(busy_line[2], "SCENE loading"),
         transition=_parse_missing_bool(busy_line[4], "SCENE transition"),
     )
+
+
+def parse_toggle_world_output(
+    output: str,
+    allowed_roles: Sequence[str],
+) -> tuple[str, int]:
+    """Validate the native city/world entrance invocation response."""
+
+    lines = _protocol_lines(output, "TOGGLE_WORLD")
+    if len(lines) != 5:
+        raise BusinessError("TOGGLE_WORLD output must contain exactly 5 lines")
+    if len(lines[1]) != 2 or lines[1][0] != "ROLE":
+        raise BusinessError("TOGGLE_WORLD output is missing ROLE")
+    role = _parse_role(lines[1][1], allowed_roles)
+    kingdom = _parse_kingdom_line(lines[2], "TOGGLE_WORLD")
+    if lines[3] != ["INVOKED", "1"]:
+        raise BusinessError("TOGGLE_WORLD output did not confirm invocation")
+    if lines[4] != ["END", "1"]:
+        raise BusinessError("TOGGLE_WORLD output has an invalid terminator")
+    return role, kingdom
 
 
 def _parse_target_stage(
@@ -4363,6 +4435,7 @@ __all__ = [
     "build_scene_status_lua",
     "build_start_battle_intel_lua",
     "build_start_rescue_intel_lua",
+    "build_toggle_world_lua",
     "build_uninstall_march_capture_hook_lua",
     "build_verify_battle_intel_lua",
     "build_verify_march_lua",
@@ -4390,6 +4463,7 @@ __all__ = [
     "parse_ready_output",
     "parse_rescue_commit_output",
     "parse_scene_status_output",
+    "parse_toggle_world_output",
     "parse_verify_output",
     "parse_world_monster_commit_output",
     "parse_world_monster_search_output",

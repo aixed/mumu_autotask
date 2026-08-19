@@ -836,6 +836,18 @@ class GuiBackend:
             raise GuiBackendError("返回野外命令返回了意外的数据条数")
         return payloads[0]
 
+    def toggle_world(self, serial: str) -> Mapping[str, Any]:
+        """Invoke the game's native city/world entrance Button event."""
+
+        result = self.runner.run(
+            ("toggle-world", "--serial", serial, "--execute"),
+            timeout=45,
+        )
+        payloads = parse_json_lines(result.stdout)
+        if len(payloads) != 1:
+            raise GuiBackendError("野外/城镇切换命令返回了意外的数据条数")
+        return payloads[0]
+
     def march(
         self,
         serial: str,
