@@ -6,6 +6,7 @@ __pycache__/
 node_modules/
 recon/live/
 recon/*.png
+recon/runtime/*.png
 recon/captures/
 config.json
 mumu_autotask_gui_preferences.json
