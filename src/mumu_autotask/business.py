@@ -2930,19 +2930,6 @@ if LEVEL > max_level then
 end
 local view_id = 207
 local state = { level = LEVEL, view_id = view_id }
-state.map_callback = function(...)
-    state.map_callback_called = true
-    for index = 1, select("#", ...) do
-        local candidate = select(index, ...)
-        if (type(candidate) == "table" or type(candidate) == "userdata")
-            and type(candidate.GetPos) == "function" then
-            local pos_ok, x, y = pcall(candidate.GetPos, candidate)
-            if pos_ok and x == state.world_x and y == state.world_y then
-                state.map_object = candidate
-            end
-        end
-    end
-end
 state.start = function()
     if type(GModule) ~= "table" or type(GModule.UIModule) ~= "table" then
         state.search_error = "UIModule is unavailable"
@@ -3042,8 +3029,7 @@ state.world_y = integer(state.world_y, "monster world y", true)
 local map_data = call(GCtrl.WorldMapCtrl, "GetMapDataDic",
     "world map data", kingdom)
 if type(map_data) ~= "table" then fail("world map data is unavailable") end
-local map_object = state.map_object
-    or map_data[state.world_x * 10000 + state.world_y]
+local map_object = map_data[state.world_x * 10000 + state.world_y]
 if map_object == nil then
     for _, candidate in pairs(map_data) do
         if type(candidate) == "table" or type(candidate) == "userdata" then
@@ -3061,24 +3047,6 @@ if map_object == nil then
     end
 end
 if map_object == nil then
-    if state.map_error ~= nil then
-        fail("world map object request failed: " .. tostring(state.map_error))
-    end
-    if state.map_requested ~= true then
-        local helper = GHelper and GHelper.WorldHelper
-        if type(helper) ~= "table"
-            or type(helper.SearchToMapObj) ~= "function" then
-            fail("WorldHelper.SearchToMapObj is unavailable")
-        end
-        local map_ok, map_error = pcall(helper.SearchToMapObj,
-            state.world_x, state.world_y, kingdom, 1, 1, true,
-            state.map_callback, false)
-        if not map_ok then
-            state.map_error = tostring(map_error)
-            fail("world map object request failed: " .. state.map_error)
-        end
-        state.map_requested = true
-    end
     return table.concat({
         "MUMU_AUTOTASK\t1\tWORLD_MONSTER_SEARCH",
         "ROLE\t" .. role_hex,
@@ -3139,9 +3107,8 @@ if type(state) ~= "table" or state.level ~= LEVEL
 end
 local map_data = call(GCtrl.WorldMapCtrl, "GetMapDataDic",
     "world map data", kingdom)
-local map_object = state.map_object or (type(map_data) == "table"
+local map_object = type(map_data) == "table"
     and map_data[state.world_x * 10000 + state.world_y] or nil
-)
 if map_object == nil and type(map_data) == "table" then
     for _, candidate in pairs(map_data) do
         if type(candidate) == "table" or type(candidate) == "userdata" then
