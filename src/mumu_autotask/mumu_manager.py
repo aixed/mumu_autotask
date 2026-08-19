@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,8 @@ class MumuInstance:
     is_process_started: bool
     player_state: str | None
     pid: int | None
+    main_wnd: int | None = None
+    render_wnd: int | None = None
 
     @property
     def running(self) -> bool:
@@ -69,6 +72,12 @@ class MumuManagerClient:
     def _run(self, args: Sequence[str]) -> str:
         command = [self.executable, *args]
         try:
+            run_options: dict[str, Any] = {}
+            if os.name == "nt":
+                # MuMuManager is a console-subsystem executable.  Without
+                # CREATE_NO_WINDOW every periodic discovery briefly creates a
+                # black console and steals focus from the emulator.
+                run_options["creationflags"] = subprocess.CREATE_NO_WINDOW
             completed = subprocess.run(
                 command,
                 capture_output=True,
@@ -77,6 +86,7 @@ class MumuManagerClient:
                 errors="replace",
                 timeout=self.timeout_seconds,
                 check=False,
+                **run_options,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise MumuManagerError(
@@ -112,6 +122,19 @@ class MumuManagerClient:
             pid = raw_item.get("pid")
             if isinstance(pid, bool) or not isinstance(pid, int):
                 pid = None
+
+            def parse_hwnd(value: Any) -> int | None:
+                if isinstance(value, bool):
+                    return None
+                if isinstance(value, int) and value > 0:
+                    return value
+                if isinstance(value, str) and value.strip():
+                    try:
+                        return int(value.strip(), 16)
+                    except ValueError:
+                        return None
+                return None
+
             instances.append(
                 MumuInstance(
                     index=index,
@@ -131,6 +154,8 @@ class MumuManagerClient:
                         else None
                     ),
                     pid=pid,
+                    main_wnd=parse_hwnd(raw_item.get("main_wnd")),
+                    render_wnd=parse_hwnd(raw_item.get("render_wnd")),
                 )
             )
         return tuple(sorted(instances, key=lambda item: item.index))
@@ -170,6 +195,8 @@ def _profile_from_instance(
         playerprefs_path=base.playerprefs_path if base else None,
         instance_name=f"#{instance.index} {instance.name}".strip(),
         roles=(),
+        mumu_hwnd=instance.main_wnd,
+        mumu_pid=instance.pid,
         base_url=base.base_url if base else None,
         headers=base.headers if base else {},
     )

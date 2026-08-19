@@ -183,6 +183,10 @@ class DeviceProfile:
     playerprefs_path: str | None = None
     instance_name: str | None = None
     roles: tuple[str, ...] = ()
+    # Populated by MuMuManager discovery.  These are deliberately optional so
+    # hand-written config files and existing callers remain compatible.
+    mumu_hwnd: int | None = None
+    mumu_pid: int | None = None
 
     @classmethod
     def from_dict(cls, value: Any, index: int) -> "DeviceProfile":

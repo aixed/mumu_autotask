@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+from ctypes import wintypes
 import logging
 import queue
 import sys
@@ -1227,6 +1229,56 @@ def _profile_name(profile: DeviceProfile) -> str:
     return profile.instance_name or profile.serial
 
 
+def _mumu_window_rect(profile: DeviceProfile) -> tuple[int, int, int, int] | None:
+    """Return the live MuMu outer window rectangle for a discovered profile.
+
+    MuMuManager exposes ``main_wnd`` directly.  The PID fallback is useful
+    during a short manager refresh race and keeps hand-written profiles
+    usable.  This helper is intentionally read-only; all positioning remains
+    in Tk so it cannot resize or reparent the emulator itself.
+    """
+
+    if sys.platform != "win32":
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = int(profile.mumu_hwnd or 0)
+        if hwnd <= 0 or not user32.IsWindow(hwnd):
+            hwnd = 0
+        if not hwnd and profile.mumu_pid:
+            target_pid = int(profile.mumu_pid)
+            found = ctypes.c_void_p(0)
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            def enum_callback(
+                candidate: ctypes.c_void_p,
+                _lparam: ctypes.c_void_p,
+            ) -> bool:
+                pid = ctypes.c_ulong(0)
+                user32.GetWindowThreadProcessId(candidate, ctypes.byref(pid))
+                if pid.value == target_pid and user32.IsWindowVisible(candidate):
+                    found.value = int(candidate)
+                    return False
+                return True
+
+            user32.EnumWindows(enum_callback, 0)
+            hwnd = int(found.value or 0)
+        if not hwnd or not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+            return None
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+        left = int(rect.left)
+        top = int(rect.top)
+        right = int(rect.right)
+        bottom = int(rect.bottom)
+        if right <= left or bottom <= top:
+            return None
+        return left, top, right, bottom
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
 def _is_online_status(payload: Mapping[str, Any]) -> bool:
     kingdom = _positive_kingdom(payload.get("kingdom"))
     playerprefs = _positive_kingdom(payload.get("playerprefs_kingdom"))
@@ -1433,11 +1485,12 @@ class LauncherApp:
         self.status_by_serial: dict[str, Mapping[str, Any]] = {}
         self.row_serials: dict[str, str] = {}
         self.managers: dict[str, DeviceManagerWindow] = {}
+        self.suppressed_serials: set[str] = set()
         self.busy = False
 
         self.root.title(APP_TITLE)
-        self.root.geometry("1020x570")
-        self.root.minsize(840, 500)
+        self.root.geometry("720x410")
+        self.root.minsize(640, 320)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         self._configure_style()
         self._build()
@@ -1453,10 +1506,10 @@ class LauncherApp:
         base_font = ("Microsoft YaHei UI", 10)
         style.configure("TFrame", background="#F4F6F8")
         style.configure("TLabel", background="#F4F6F8", font=base_font, foreground="#20262E")
-        style.configure("Title.TLabel", font=("Microsoft YaHei UI", 18, "bold"))
+        style.configure("Title.TLabel", font=("Microsoft YaHei UI", 15, "bold"))
         style.configure("Subtle.TLabel", foreground="#59636E")
         style.configure("Status.TLabel", font=("Microsoft YaHei UI", 9))
-        style.configure("TButton", font=base_font, padding=(14, 8))
+        style.configure("TButton", font=base_font, padding=(9, 5))
         style.configure(
             "Primary.TButton",
             font=("Microsoft YaHei UI", 10, "bold"),
@@ -1492,7 +1545,7 @@ class LauncherApp:
         )
 
     def _build(self) -> None:
-        outer = ttk.Frame(self.root, padding=(24, 20, 24, 18))
+        outer = ttk.Frame(self.root, padding=(14, 12, 14, 10))
         outer.grid(row=0, column=0, sticky="nsew")
         self.root.rowconfigure(0, weight=1)
         self.root.columnconfigure(0, weight=1)
@@ -1517,7 +1570,7 @@ class LauncherApp:
             style="Subtle.TLabel",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        ttk.Separator(outer).grid(row=1, column=0, sticky="ew", pady=(16, 14))
+        ttk.Separator(outer).grid(row=1, column=0, sticky="ew", pady=(10, 8))
 
         table_frame = ttk.Frame(outer)
         table_frame.grid(row=2, column=0, sticky="nsew")
@@ -1529,7 +1582,7 @@ class LauncherApp:
             columns=columns,
             show="headings",
             selectmode="browse",
-            height=8,
+            height=6,
         )
         headings = {
             "state": "状态",
@@ -1540,12 +1593,12 @@ class LauncherApp:
             "frida": "Frida",
         }
         widths = {
-            "state": 82,
-            "instance": 210,
-            "serial": 170,
-            "kingdom": 70,
-            "process": 170,
-            "frida": 150,
+            "state": 62,
+            "instance": 170,
+            "serial": 145,
+            "kingdom": 62,
+            "process": 150,
+            "frida": 125,
         }
         for column in columns:
             self.tree.heading(column, text=headings[column])
@@ -1564,11 +1617,12 @@ class LauncherApp:
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.bind("<<TreeviewSelect>>", self._selection_changed)
+        self.tree.bind("<Button-3>", self._show_device_menu)
         self.tree.bind("<Double-1>", lambda _event: self.open_selected())
         self.tree.bind("<Return>", lambda _event: self.open_selected())
 
         footer = ttk.Frame(outer)
-        footer.grid(row=3, column=0, sticky="ew", pady=(16, 0))
+        footer.grid(row=3, column=0, sticky="ew", pady=(9, 0))
         footer.columnconfigure(0, weight=1)
         self.selection_text = tk.StringVar(value="请选择一台在线模拟器")
         ttk.Label(footer, textvariable=self.selection_text, style="Subtle.TLabel").grid(
@@ -1576,7 +1630,7 @@ class LauncherApp:
         )
         self.start_button = ttk.Button(
             footer,
-            text="启动管理",
+            text="打开操作程序",
             style="Primary.TButton",
             command=self.open_selected,
             state="disabled",
@@ -1584,8 +1638,13 @@ class LauncherApp:
         self.start_button.grid(row=0, column=1, sticky="e")
         self.summary_text = tk.StringVar(value="正在准备连接检查...")
         ttk.Label(outer, textvariable=self.summary_text, style="Status.TLabel").grid(
-            row=4, column=0, sticky="w", pady=(12, 0)
+            row=4, column=0, sticky="w", pady=(8, 0)
         )
+
+        self.device_menu = tk.Menu(self.root, tearoff=False)
+        self.device_menu.add_command(label="打开操作程序", command=self.open_selected)
+        self.device_menu.add_command(label="关闭操作程序", command=self.close_selected_manager)
+        self.device_menu.add_command(label="重新启动操作程序", command=self.restart_selected_manager)
 
     def _populate_profiles(self) -> None:
         for row_id in self.tree.get_children():
@@ -1628,7 +1687,9 @@ class LauncherApp:
             self.tree.item(row_id, values=values, tags=("checking",))
 
         def action() -> tuple[tuple[DeviceProfile, ...], dict[str, Mapping[str, Any]], dict[str, str]]:
-            statuses: dict[str, Mapping[str, Any]] = {}
+            statuses: dict[str, Mapping[str, Any]] = dict(
+                getattr(self, "status_by_serial", {})
+            )
             errors: dict[str, str] = {}
             try:
                 profiles = discover_running_mumu_profiles(self.settings, connect_adb=True)
@@ -1714,6 +1775,7 @@ class LauncherApp:
         self._selection_changed()
         if self.tree.selection():
             self.tree.focus_set()
+        self._sync_managers()
 
     def _selected_profile(self) -> DeviceProfile | None:
         selection = self.tree.selection()
@@ -1738,7 +1800,7 @@ class LauncherApp:
         else:
             self.selection_text.set(f"{_profile_name(profile)} 当前不可用，请刷新设备状态")
         self.start_button.configure(
-            state="normal" if online and not self.busy else "disabled"
+            state="normal" if profile is not None and not self.busy else "disabled"
         )
 
     def open_selected(self) -> None:
@@ -1746,17 +1808,11 @@ class LauncherApp:
         if profile is None:
             return
         status = self.status_by_serial.get(profile.serial, {})
-        if not _is_online_status(status):
-            messagebox.showwarning(
-                "设备不可用",
-                "所选模拟器未通过 ADB、Frida、区域一致性或游戏前台检查，请先刷新设备。",
-                parent=self.root,
-            )
-            return
         existing = self.managers.get(profile.serial)
         if existing is not None and existing.exists:
             existing.focus()
             return
+        self.suppressed_serials.discard(profile.serial)
         manager = DeviceManagerWindow(
             self,
             profile,
@@ -1764,8 +1820,62 @@ class LauncherApp:
         )
         self.managers[profile.serial] = manager
 
-    def manager_closed(self, serial: str) -> None:
+    def _sync_managers(self) -> None:
+        """Create one side panel per running emulator after discovery."""
+
+        running_serials = {profile.serial for profile in self.settings.devices}
+        for serial, manager in tuple(self.managers.items()):
+            if serial not in running_serials and manager.exists:
+                manager.close(confirm=False, suppress_auto=False)
+        for profile in self.settings.devices:
+            serial = profile.serial
+            if serial in self.suppressed_serials:
+                continue
+            status = self.status_by_serial.get(serial, {})
+            existing = self.managers.get(serial)
+            if existing is not None and existing.exists:
+                existing.update_profile(profile)
+                continue
+            self.managers[serial] = DeviceManagerWindow(self, profile, status)
+
+    def _show_device_menu(self, event: tk.Event) -> str:
+        row_id = self.tree.identify_row(event.y)
+        if not row_id:
+            return "break"
+        self.tree.selection_set(row_id)
+        self.tree.focus(row_id)
+        try:
+            self.device_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.device_menu.grab_release()
+        return "break"
+
+    def close_selected_manager(self) -> None:
+        profile = self._selected_profile()
+        if profile is None:
+            return
+        self.suppressed_serials.add(profile.serial)
+        manager = self.managers.get(profile.serial)
+        if manager is not None and manager.exists:
+            manager.close()
+
+    def restart_selected_manager(self) -> None:
+        profile = self._selected_profile()
+        if profile is None:
+            return
+        manager = self.managers.get(profile.serial)
+        if manager is not None and manager.exists:
+            manager.close()
+            if manager.exists:
+                return
+        self.suppressed_serials.discard(profile.serial)
+        status = self.status_by_serial.get(profile.serial, {})
+        self.managers[profile.serial] = DeviceManagerWindow(self, profile, status)
+
+    def manager_closed(self, serial: str, *, suppress_auto: bool = True) -> None:
         self.managers.pop(serial, None)
+        if suppress_auto:
+            self.suppressed_serials.add(serial)
 
     def _close(self) -> None:
         if self.dispatcher.active_count:
@@ -1778,6 +1888,10 @@ class LauncherApp:
                 return
         self.dispatcher.close()
         self.backend.runner.cancel_all()
+        for manager in tuple(self.managers.values()):
+            if manager.exists:
+                manager._closing = True
+                manager.window.destroy()
         self.root.destroy()
 
 
@@ -1815,11 +1929,15 @@ class DeviceManagerWindow:
         self.world_hunt_generation = 0
         self.world_poll_failures = 0
         self.world_dispatch_count = 0
+        self._follow_after_id: str | None = None
+        self._last_follow_geometry: str | None = None
+        self._emulator_visible = False
 
         self.window = tk.Toplevel(launcher.root)
+        self.window.withdraw()
         self.window.title(f"{APP_TITLE} - {_profile_name(profile)}")
-        self.window.geometry("900x780")
-        self.window.minsize(780, 700)
+        self.window.geometry("410x680")
+        self.window.minsize(380, 480)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.window.configure(background="#F4F6F8")
         preference_errors: list[str] = []
@@ -1948,6 +2066,7 @@ class DeviceManagerWindow:
             )
         # Intelligence is intentionally loaded only from the Refresh button.
         # Opening a controller must leave Search Monsters immediately usable.
+        self._follow_emulator()
 
     @property
     def exists(self) -> bool:
@@ -1961,8 +2080,44 @@ class DeviceManagerWindow:
         self.window.lift()
         self.window.focus_force()
 
+    def update_profile(self, profile: DeviceProfile) -> None:
+        """Refresh MuMu's current HWND/PID without rebuilding device state."""
+
+        self.profile = profile
+        self.window.title(f"{APP_TITLE} - {_profile_name(profile)}")
+
+    def _follow_emulator(self) -> None:
+        if not self.exists or self._closing:
+            return
+        rect = _mumu_window_rect(self.profile)
+        if rect is None:
+            if self._emulator_visible:
+                self.window.withdraw()
+                self._emulator_visible = False
+        else:
+            left, top, right, bottom = rect
+            emulator_width = right - left
+            panel_width = max(380, min(430, int(emulator_width * 0.32)))
+            # Tk's requested geometry is the client area, while MuMuManager's
+            # rectangle is the outer frame.  Use conservative fixed insets so
+            # the panel remains flush when the OS theme changes its borders.
+            frame_width, frame_height = 20, 40
+            panel_height = max(440, bottom - top - frame_height)
+            panel_x = left - panel_width - frame_width
+            geometry = (
+                f"{panel_width}x{panel_height}"
+                f"{panel_x:+d}{top + 2:+d}"
+            )
+            if geometry != self._last_follow_geometry:
+                self.window.geometry(geometry)
+                self._last_follow_geometry = geometry
+            if not self._emulator_visible:
+                self.window.deiconify()
+                self._emulator_visible = True
+        self._follow_after_id = self.window.after(150, self._follow_emulator)
+
     def _build(self) -> None:
-        outer = ttk.Frame(self.window, padding=(22, 18, 22, 18))
+        outer = ttk.Frame(self.window, padding=(10, 8, 10, 8))
         outer.grid(row=0, column=0, sticky="nsew")
         self.window.rowconfigure(0, weight=1)
         self.window.columnconfigure(0, weight=1)
@@ -1982,29 +2137,34 @@ class DeviceManagerWindow:
             title,
             text=f"{self.profile.serial}  |  {self.profile.frida_host}",
             style="Subtle.TLabel",
-        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(2, 0))
         self.refresh_intel_button = ttk.Button(
             title,
             text="刷新情报",
             command=self.refresh_intel,
         )
         self.refresh_intel_button.grid(row=0, column=1, rowspan=2, sticky="e")
-        ttk.Label(title, textvariable=self.identity_text, style="Status.TLabel").grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(10, 0)
+        ttk.Label(
+            title,
+            textvariable=self.identity_text,
+            style="Status.TLabel",
+            wraplength=380,
+        ).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(6, 0)
         )
 
-        ttk.Separator(outer).grid(row=1, column=0, sticky="ew", pady=(14, 12))
+        ttk.Separator(outer).grid(row=1, column=0, sticky="ew", pady=(7, 6))
 
         self.notebook = ttk.Notebook(outer)
         self.notebook.grid(row=2, column=0, sticky="nsew")
-        intel_tab = ttk.Frame(self.notebook, padding=(8, 10, 8, 8))
-        world_tab = ttk.Frame(self.notebook, padding=(18, 16, 18, 14))
+        intel_tab = ttk.Frame(self.notebook, padding=(5, 6, 5, 5))
+        world_tab = ttk.Frame(self.notebook, padding=(8, 8, 8, 7))
         self.notebook.add(intel_tab, text="情报任务")
         self.notebook.add(world_tab, text="搜索野兽")
         intel_tab.columnconfigure(0, weight=1)
         intel_tab.rowconfigure(1, weight=1)
 
-        quality_frame = ttk.LabelFrame(intel_tab, text="情报设置", padding=(14, 10))
+        quality_frame = ttk.LabelFrame(intel_tab, text="情报设置", padding=(8, 6))
         quality_frame.grid(row=0, column=0, sticky="ew")
         for column in range(len(QUALITY_META)):
             quality_frame.columnconfigure(column, weight=1, uniform="quality")
@@ -2014,17 +2174,17 @@ class DeviceManagerWindow:
             column=0,
             columnspan=len(QUALITY_META),
             sticky="ew",
-            pady=(0, 8),
+            pady=(0, 5),
         )
         ttk.Label(category_frame, text="类别").grid(row=0, column=0, sticky="w")
         for column, (category, label) in enumerate(CATEGORY_META.items(), start=1):
             check = ttk.Checkbutton(
                 category_frame,
-                text=label,
+                text={"monster": "野兽", "hero": "英雄", "rescue": "营救"}[category],
                 variable=self.category_vars[category],
                 command=self._category_changed,
             )
-            check.grid(row=0, column=column, sticky="w", padx=(14, 0))
+            check.grid(row=0, column=column, sticky="w", padx=(8, 0))
             self.category_checks[category] = check
 
         ttk.Separator(quality_frame).grid(
@@ -2032,20 +2192,20 @@ class DeviceManagerWindow:
             column=0,
             columnspan=len(QUALITY_META),
             sticky="ew",
-            pady=(0, 8),
+            pady=(0, 5),
         )
         for column, (quality, (label, color)) in enumerate(QUALITY_META.items()):
             cell = ttk.Frame(quality_frame)
-            cell.grid(row=2, column=column, sticky="w", padx=(0, 18))
+            cell.grid(row=2, column=column, sticky="w", padx=(0, 4))
             swatch = tk.Canvas(
                 cell,
-                width=16,
-                height=16,
+                width=12,
+                height=12,
                 background=color,
                 highlightthickness=1,
                 highlightbackground="#707982",
             )
-            swatch.grid(row=0, column=0, padx=(0, 7))
+            swatch.grid(row=0, column=0, padx=(0, 3))
             check = ttk.Checkbutton(
                 cell,
                 variable=self.quality_vars[quality],
@@ -2053,7 +2213,7 @@ class DeviceManagerWindow:
             )
             check.grid(row=0, column=1)
             text = ttk.Label(cell, text=f"{label} (0)")
-            text.grid(row=0, column=2, padx=(3, 0))
+            text.grid(row=0, column=2, padx=(1, 0))
             self.quality_checks[quality] = check
             self.quality_labels[quality] = text
 
@@ -2062,7 +2222,7 @@ class DeviceManagerWindow:
             column=0,
             columnspan=len(QUALITY_META),
             sticky="ew",
-            pady=(10, 8),
+            pady=(6, 5),
         )
         concurrency_frame = ttk.Frame(quality_frame)
         concurrency_frame.grid(
@@ -2084,7 +2244,7 @@ class DeviceManagerWindow:
             showvalue=False,
             variable=self.concurrency_var,
             command=self._concurrency_changed,
-            length=240,
+            length=130,
             sliderlength=18,
             borderwidth=0,
             highlightthickness=0,
@@ -2100,8 +2260,8 @@ class DeviceManagerWindow:
             anchor="e",
         ).grid(row=0, column=2, sticky="e", padx=(12, 0))
 
-        intel_frame = ttk.LabelFrame(intel_tab, text="当前可用情报", padding=(10, 8))
-        intel_frame.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        intel_frame = ttk.LabelFrame(intel_tab, text="当前可用情报", padding=(5, 4))
+        intel_frame.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
         intel_frame.rowconfigure(0, weight=1)
         intel_frame.columnconfigure(0, weight=1)
         columns = (
@@ -2117,7 +2277,7 @@ class DeviceManagerWindow:
             intel_frame,
             columns=columns,
             show="headings",
-            height=7,
+            height=5,
         )
         headings = {
             "category": "类别",
@@ -2143,13 +2303,27 @@ class DeviceManagerWindow:
         self.intel_tree.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(intel_frame, orient="vertical", command=self.intel_tree.yview)
         scroll.grid(row=0, column=1, sticky="ns")
-        self.intel_tree.configure(yscrollcommand=scroll.set)
+        horizontal_scroll = ttk.Scrollbar(
+            intel_frame,
+            orient="horizontal",
+            command=self.intel_tree.xview,
+        )
+        horizontal_scroll.grid(row=1, column=0, sticky="ew")
+        self.intel_tree.configure(
+            yscrollcommand=scroll.set,
+            xscrollcommand=horizontal_scroll.set,
+        )
 
         action_bar = ttk.Frame(intel_tab)
-        action_bar.grid(row=2, column=0, sticky="ew", pady=(14, 4))
+        action_bar.grid(row=2, column=0, sticky="ew", pady=(6, 2))
         action_bar.columnconfigure(0, weight=1)
-        ttk.Label(action_bar, textvariable=self.action_text, style="Subtle.TLabel").grid(
-            row=0, column=0, sticky="w"
+        ttk.Label(
+            action_bar,
+            textvariable=self.action_text,
+            style="Subtle.TLabel",
+            wraplength=390,
+        ).grid(
+            row=0, column=0, columnspan=2, sticky="ew"
         )
         self.hunt_button = ttk.Button(
             action_bar,
@@ -2158,14 +2332,14 @@ class DeviceManagerWindow:
             command=self._start_hunt_from_event,
             state="disabled",
         )
-        self.hunt_button.grid(row=0, column=1, sticky="e")
+        self.hunt_button.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(5, 0))
         self.hunt_button.bind("<Return>", self._start_hunt_from_event)
 
         world_tab.columnconfigure(0, weight=1)
         world_settings = ttk.LabelFrame(
             world_tab,
             text="连续搜索与攻击",
-            padding=(16, 14),
+            padding=(8, 8),
         )
         world_settings.grid(row=0, column=0, sticky="ew")
         world_settings.columnconfigure(1, weight=1)
@@ -2181,7 +2355,7 @@ class DeviceManagerWindow:
             showvalue=False,
             variable=self.world_level_var,
             command=self._world_level_changed,
-            length=300,
+            length=140,
             sliderlength=18,
             borderwidth=0,
             highlightthickness=0,
@@ -2209,7 +2383,7 @@ class DeviceManagerWindow:
             showvalue=False,
             variable=self.world_concurrency_var,
             command=self._world_concurrency_changed,
-            length=300,
+            length=140,
             sliderlength=18,
             borderwidth=0,
             highlightthickness=0,
@@ -2225,8 +2399,8 @@ class DeviceManagerWindow:
             anchor="e",
         ).grid(row=1, column=2, sticky="e", padx=(12, 0), pady=(14, 0))
 
-        world_state = ttk.LabelFrame(world_tab, text="运行状态", padding=(16, 14))
-        world_state.grid(row=1, column=0, sticky="ew", pady=(14, 0))
+        world_state = ttk.LabelFrame(world_tab, text="运行状态", padding=(8, 8))
+        world_state.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         world_state.columnconfigure(0, weight=1)
         ttk.Label(
             world_state,
@@ -2239,22 +2413,22 @@ class DeviceManagerWindow:
             style="Primary.TButton",
             command=self._toggle_world_hunt,
         )
-        self.world_hunt_button.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        self.world_hunt_button.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(7, 0))
 
-        log_frame = ttk.LabelFrame(outer, text="运行记录", padding=(8, 8))
-        log_frame.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
+        log_frame = ttk.LabelFrame(outer, text="运行记录", padding=(5, 5))
+        log_frame.grid(row=3, column=0, sticky="nsew", pady=(7, 0))
         log_frame.rowconfigure(0, weight=1)
         log_frame.columnconfigure(0, weight=1)
         self.log_text = tk.Text(
             log_frame,
-            height=13,
+            height=7,
             wrap="word",
             font=("Consolas", 9),
             background="#FFFFFF",
             foreground="#26313B",
             borderwidth=0,
-            padx=8,
-            pady=6,
+            padx=5,
+            pady=4,
             state="disabled",
         )
         self.log_text.grid(row=0, column=0, sticky="nsew")
@@ -4093,11 +4267,11 @@ class DeviceManagerWindow:
             return
         self._finish_hunt_batch()
 
-    def close(self) -> None:
+    def close(self, *, confirm: bool = True, suppress_auto: bool = True) -> None:
         if self._closing:
             return
         world_running = bool(getattr(self, "world_hunt_running", False))
-        if (self.busy and self.hunt_batch is not None) or world_running:
+        if confirm and ((self.busy and self.hunt_batch is not None) or world_running):
             should_close = messagebox.askyesno(
                 "任务正在执行",
                 "当前正在处理出征、领取或连续搜索野兽。"
@@ -4119,7 +4293,20 @@ class DeviceManagerWindow:
         self.hunt_batch = None
         self._slot_wait_running = False
         self.hunt_role = None
-        self.launcher.manager_closed(self.profile.serial)
+        follow_after_id = getattr(self, "_follow_after_id", None)
+        if follow_after_id is not None:
+            try:
+                self.window.after_cancel(follow_after_id)
+            except tk.TclError:
+                pass
+            self._follow_after_id = None
+        if suppress_auto:
+            self.launcher.manager_closed(self.profile.serial)
+        else:
+            self.launcher.manager_closed(
+                self.profile.serial,
+                suppress_auto=False,
+            )
         self.window.destroy()
 
 
