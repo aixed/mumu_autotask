@@ -331,6 +331,27 @@ def march_commit_protocol(role: str, target_id: int) -> str:
     )
 
 
+def march_verify_protocol(
+    role: str,
+    target_id: int,
+    *,
+    accepted: bool = True,
+    status: str = "1",
+) -> str:
+    return "\n".join(
+        (
+            "MUMU_AUTOTASK\t1\tVERIFY",
+            f"ROLE\t{role.encode('utf-8').hex()}",
+            "KINGDOM\t4549",
+            f"TARGET\t{target_id}",
+            f"ACCEPTED\t{int(accepted)}\tSTATUS\t{status}",
+            f"MARCH\t{int(accepted)}\tEVENT\tmissing",
+            f"PROOF\t{'MARCH_FIELDS' if accepted else 'NONE'}",
+            "END\t1",
+        )
+    )
+
+
 def battle_verify_protocol(
     role: str,
     target_id: int,
@@ -1644,7 +1665,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rescue_result["verification_polls"], 0)
         self.assertEqual(events.count("lua-execute"), 2)
 
-    def test_batch_intel_full_json_skips_reinspect_and_verify(self) -> None:
+    def test_batch_intel_full_json_skips_reinspect_but_waits_for_acceptance(self) -> None:
         events: list[str] = []
         role = "打工的"
         target_id = 443
@@ -1670,7 +1691,10 @@ class CliTests(unittest.TestCase):
                 "mumu_autotask.cli._client",
                 return_value=FakeClient(
                     events,
-                    outputs=(march_commit_protocol(role, target_id),),
+                    outputs=(
+                        march_commit_protocol(role, target_id),
+                        march_verify_protocol(role, target_id, status="1"),
+                    ),
                 ),
             ),
             redirect_stdout(output),
@@ -1691,8 +1715,81 @@ class CliTests(unittest.TestCase):
         self.assertTrue(result["request_dispatched"])
         self.assertNotIn("inspect_monster", result["stage_script_sha256"])
         self.assertEqual(result["results"][0]["target"]["runtime_id"], target_id)
-        self.assertEqual(result["results"][0]["verification_polls"], 0)
-        self.assertEqual(events.count("lua-execute"), 1)
+        self.assertEqual(result["results"][0]["verification_polls"], 1)
+        self.assertEqual(events.count("lua-execute"), 2)
+
+    def test_batch_monsters_are_accepted_before_next_formation_is_built(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        targets = (
+            {
+                "category": "monster",
+                "runtime_id": 443,
+                "quest_id": 2443,
+                "status": 1,
+                "world_x": 772,
+                "world_y": 768,
+                "expires_at": 1900000000,
+                "quality": "blue",
+                "quality_id": 3,
+                "monster_id": 813,
+                "level": 13,
+                "stamina_cost": 10,
+            },
+            {
+                "category": "monster",
+                "runtime_id": 444,
+                "quest_id": 2444,
+                "status": 1,
+                "world_x": 773,
+                "world_y": 769,
+                "expires_at": 1900000001,
+                "quality": "purple",
+                "quality_id": 4,
+                "monster_id": 814,
+                "level": 13,
+                "stamina_cost": 10,
+            },
+        )
+        outputs = (
+            march_commit_protocol(role, 443),
+            march_verify_protocol(role, 443),
+            march_commit_protocol(role, 444),
+            march_verify_protocol(role, 444),
+        )
+        settings = Settings(devices=(DeviceProfile("device-1", roles=(role,)),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, outputs=outputs),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                execute(
+                    business_args(
+                        "batch-intel",
+                        dry_run=False,
+                        batch_target_json=[json.dumps(target) for target in targets],
+                        expected_role=role,
+                    ),
+                    settings,
+                ),
+                0,
+            )
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["request_dispatched"])
+        self.assertEqual(
+            [item["target"]["runtime_id"] for item in result["results"]],
+            [443, 444],
+        )
+        self.assertEqual(
+            [item["verification_polls"] for item in result["results"]],
+            [1, 1],
+        )
+        self.assertEqual(events.count("lua-execute"), 4)
 
     def test_march_execute_surfaces_open_protocol_errors_without_ui_taps(self) -> None:
         events: list[str] = []

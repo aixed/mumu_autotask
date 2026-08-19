@@ -2178,8 +2178,12 @@ def _execute_batch_intel(
                             active_roles,
                             target,
                         )
+                        verify_code = build_verify_march_lua(active_roles, target)
                         stage_hashes[f"target_{runtime_id}_commit"] = script_sha256(
                             commit_code
+                        )
+                        stage_hashes[f"target_{runtime_id}_verify"] = script_sha256(
+                            verify_code
                         )
                         commit_result = _execute_lua_when_idle(
                             adb,
@@ -2194,6 +2198,45 @@ def _execute_batch_intel(
                         )
                         last_result = commit_result
                         parse_commit_output(commit_result.output, active_roles, target)
+
+                        # Wait only until this march is visible locally. The next
+                        # formation must be computed after the game has reserved
+                        # this march's heroes and soldiers, otherwise a rapid batch
+                        # can reuse the same stale availability snapshot.
+                        verify_deadline = time.monotonic() + verify_timeout_seconds
+                        verification_polls = 0
+                        accepted = False
+                        status_after = "not-sent"
+                        while True:
+                            verify_result = _execute_lua_when_idle(
+                                adb,
+                                profile,
+                                client,
+                                process,
+                                scanner,
+                                state,
+                                verify_code,
+                                output_capacity=output_capacity,
+                                operation=f"batch march acceptance {runtime_id}",
+                            )
+                            last_result = verify_result
+                            verification_polls += 1
+                            accepted, status_after = parse_verify_output(
+                                verify_result.output,
+                                active_roles,
+                                target,
+                            )
+                            if accepted:
+                                break
+                            if time.monotonic() >= verify_deadline:
+                                raise BusinessError(
+                                    "batch march request was invoked but no matching "
+                                    "server-created self march or quest acceptance "
+                                    f"appeared before timeout for target {runtime_id}; "
+                                    f"last quest status was {status_after} after "
+                                    f"{verification_polls} polls"
+                                )
+                            time.sleep(verify_poll_interval_seconds)
                         results.append(
                             {
                                 "serial": profile.serial,
@@ -2203,8 +2246,8 @@ def _execute_batch_intel(
                                 "quality": quality,
                                 "request_dispatched": True,
                                 "target": asdict(target),
-                                "quest_status_after": "1",
-                                "verification_polls": 0,
+                                "quest_status_after": status_after,
+                                "verification_polls": verification_polls,
                             }
                         )
                     else:
