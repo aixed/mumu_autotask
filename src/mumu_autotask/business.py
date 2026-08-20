@@ -2972,7 +2972,34 @@ if LEVEL > max_level then
     fail("requested monster level exceeds the player's attack limit")
 end
 local view_id = 207
-local state = { level = LEVEL, view_id = view_id }
+-- The UI sends an explicit zero resource id for monster searches.  Passing
+-- nil here looks harmless in Lua, but the game's request handler treats it as
+-- a different overload and does not dispatch the normal search callback.
+local state = { level = LEVEL, view_id = view_id, resource_id = 0 }
+state.map_callback = function(first, second, third)
+    state.map_called = (state.map_called or 0) + 1
+    state.map_arg1 = first
+    state.map_arg2 = second
+    state.map_arg3 = third
+    -- SearchToMapObj completion callbacks differ by client build: a map object
+    -- may be supplied as the first, second, or third callback argument. Keep
+    -- all table-shaped candidates and let the result stage validate them.
+    for _, candidate in ipairs({ first, second, third }) do
+        if (type(candidate) == "table" or type(candidate) == "userdata")
+            and candidate ~= state then
+            local ok, x, y = pcall(function()
+                if type(candidate.GetPos) == "function" then
+                    return candidate:GetPos()
+                end
+            end)
+            if ok and type(x) == "number" and type(y) == "number" then
+                state.mapobj = candidate
+                state.mapobj_x = x
+                state.mapobj_y = y
+            end
+        end
+    end
+end
 state.search_callback = function(_, point, response_view_id)
     if response_view_id ~= state.view_id or type(point) ~= "table"
         or type(point.x) ~= "number" or type(point.y) ~= "number" then
@@ -2981,15 +3008,38 @@ state.search_callback = function(_, point, response_view_id)
     state.world_x = point.x
     state.world_y = point.y
     state.callback_received = true
-    if type(GCtrl) == "table" and type(GCtrl.WorldMapCtrl) == "table"
+    -- This is the same second-stage call made by WorldSearchObjView after
+    -- OnSearchBack. ReqWorldMapObjByPos is a different map-cache request and
+    -- does not populate the monster object used by the expedition flow.
+    if type(GHelper) == "table" and type(GHelper.WorldHelper) == "table"
+        and type(GHelper.WorldHelper.SearchToMapObj) == "function" then
+        local ok, request_error = pcall(
+            GHelper.WorldHelper.SearchToMapObj,
+            point.x,
+            point.y,
+            kingdom,
+            1,
+            1,
+            true,
+            state.map_callback,
+            false
+        )
+        state.map_object_requested = ok
+        if not ok then state.map_object_error = tostring(request_error) end
+    elseif type(GCtrl) == "table" and type(GCtrl.WorldMapCtrl) == "table"
         and type(GCtrl.WorldMapCtrl.ReqWorldMapObjByPos) == "function" then
-        pcall(
+        -- Compatibility fallback for older clients without WorldHelper.
+        local ok, request_error = pcall(
             GCtrl.WorldMapCtrl.ReqWorldMapObjByPos,
             GCtrl.WorldMapCtrl,
             kingdom,
             point.x,
             point.y
         )
+        state.map_object_requested = ok
+        if not ok then state.map_object_error = tostring(request_error) end
+    else
+        state.map_object_error = "world map object lookup API is unavailable"
     end
 end
 state.start = function()
@@ -3015,7 +3065,7 @@ state.start = function()
         WorldMapDefine.mapobj_type.map_monster,
         LEVEL,
         LEVEL,
-        nil,
+        state.resource_id,
         nil,
         false,
         view_id
@@ -3073,10 +3123,26 @@ if type(state.world_x) ~= "number" or type(state.world_y) ~= "number" then
 end
 state.world_x = integer(state.world_x, "monster world x", true)
 state.world_y = integer(state.world_y, "monster world y", true)
+-- The map-object response is delivered separately from the search response.
+-- Prefer that exact callback object; on some builds it is not inserted into
+-- GetMapDataDic until the map view is rendered.
+local map_object = state.mapobj
+if map_object ~= nil then
+    local ok, x, y = pcall(function()
+        if type(map_object.GetPos) == "function" then
+            return map_object:GetPos()
+        end
+    end)
+    if not ok or x ~= state.world_x or y ~= state.world_y then
+        map_object = nil
+    end
+end
 local map_data = call(GCtrl.WorldMapCtrl, "GetMapDataDic",
     "world map data", kingdom)
 if type(map_data) ~= "table" then fail("world map data is unavailable") end
-local map_object = map_data[state.world_x * 10000 + state.world_y]
+if map_object == nil then
+    map_object = map_data[state.world_x * 10000 + state.world_y]
+end
 if map_object == nil then
     for _, candidate in pairs(map_data) do
         if type(candidate) == "table" or type(candidate) == "userdata" then
@@ -3127,8 +3193,10 @@ local base_stamina = integer(call(map_object, "GetAttackCostEnergy",
 state.monster_id = monster_id
 state.recommended_power = recommended_power
 state.base_stamina = base_stamina
-pcall(GameMsg.RemoveMessageByTargetAndMsgId, state,
-    GameMsgId.REQ_WORLD_SEARCH_BACK)
+if type(GameMsg.RemoveMessageByTargetAndMsgId) == "function" then
+    pcall(GameMsg.RemoveMessageByTargetAndMsgId, state,
+        GameMsgId.REQ_WORLD_SEARCH_BACK)
+end
 return table.concat({
     "MUMU_AUTOTASK\t1\tWORLD_MONSTER_SEARCH",
     "ROLE\t" .. role_hex,
@@ -3154,8 +3222,11 @@ if type(state) ~= "table" or state.level ~= LEVEL
 end
 local map_data = call(GCtrl.WorldMapCtrl, "GetMapDataDic",
     "world map data", kingdom)
-local map_object = type(map_data) == "table"
-    and map_data[state.world_x * 10000 + state.world_y] or nil
+local map_object = state.mapobj
+if map_object == nil then
+    map_object = type(map_data) == "table"
+        and map_data[state.world_x * 10000 + state.world_y] or nil
+end
 if map_object == nil and type(map_data) == "table" then
     for _, candidate in pairs(map_data) do
         if type(candidate) == "table" or type(candidate) == "userdata" then

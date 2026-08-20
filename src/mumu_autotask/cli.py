@@ -3424,7 +3424,18 @@ def _execute_world_monster_loop(
 
         with client:
             initialization = dict(client.initialize_bridge(profile.bridge_remote_path))
-            scanner.verify_idle_main(process.pid, state.address)
+            # Bridge setup can reload the embedded Lua state (and its cframe),
+            # especially after a game restart or a temporary Frida hook. The
+            # pre-bridge candidate must not be reused for the first search.
+            state = _wait_unique_idle_lua_state(
+                adb,
+                profile,
+                scanner,
+                process,
+                "world monster loop post-bridge initialization",
+                timeout_seconds=30.0,
+                poll_interval_seconds=poll_interval_seconds,
+            )
             emit(
                 "start",
                 bridge_arch=initialization.get("arch"),

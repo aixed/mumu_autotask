@@ -760,7 +760,9 @@ class BusinessTests(unittest.TestCase):
         self.assertIn("false", search)
         self.assertNotIn("OnBtnSearchClick", search)
         self.assertNotIn("OpenView", search)
-        self.assertIn("ReqWorldMapObjByPos", search)
+        self.assertIn("resource_id = 0", search)
+        self.assertIn("SearchToMapObj", search)
+        self.assertIn("ReqWorldMapObjByPos", search)  # legacy-client fallback
         self.assertNotIn("SearchToMapObj", search_result)
         self.assertIn("GetMapDataDic", search_result)
         self.assertNotIn("ReqWorldMapObjByPos", search_result)
