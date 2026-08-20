@@ -325,7 +325,7 @@ class HuntSlotBatchTests(unittest.TestCase):
 
 
 class HuntWaveBatchTests(unittest.TestCase):
-    def test_world_hunt_start_freezes_level_and_concurrency(self) -> None:
+    def test_world_hunt_start_freezes_level_and_reads_capacity_automatically(self) -> None:
         manager = object.__new__(DeviceManagerWindow)
         manager.busy = False
         manager.world_hunt_running = False
@@ -335,7 +335,6 @@ class HuntWaveBatchTests(unittest.TestCase):
         manager.world_dispatch_count = 7
         manager.world_poll_failures = 0
         manager.world_level_var = SimpleNamespace(get=lambda: 16)
-        manager.world_concurrency_var = SimpleNamespace(get=lambda: 4)
         manager.world_hunt_status_text = SimpleNamespace(set=lambda _value: None)
         manager.world_event_queue = __import__("queue").Queue()
         manager._update_world_hunt_controls = lambda: None
@@ -353,7 +352,8 @@ class HuntWaveBatchTests(unittest.TestCase):
 
         self.assertTrue(manager.world_hunt_running)
         self.assertEqual(manager.world_hunt_level, 16)
-        self.assertEqual(manager.world_hunt_limit, 4)
+        self.assertIsNone(manager.world_hunt_limit)
+        self.assertEqual(manager.world_current_march_count, 0)
         self.assertEqual(manager.world_dispatch_count, 0)
         self.assertEqual(manager.world_seen_march_ids, set())
         self.assertEqual(len(submissions), 1)
@@ -367,10 +367,12 @@ class HuntWaveBatchTests(unittest.TestCase):
         manager.world_hunt_running = True
         manager.world_hunt_level = 16
         manager.world_hunt_limit = 4
+        manager.world_current_march_count = 0
         manager.world_dispatch_count = 0
         manager.world_active_march_ids = set()
         manager.world_seen_march_ids = set()
         manager.world_hunt_status_text = SimpleNamespace(set=lambda _value: None)
+        manager.world_concurrency_text = SimpleNamespace(set=lambda _value: None)
         manager._valid_stamina = DeviceManagerWindow._valid_stamina
         stamina: list[int] = []
         manager._set_current_stamina = lambda value: stamina.append(value) or True
@@ -383,6 +385,8 @@ class HuntWaveBatchTests(unittest.TestCase):
                 "event": "dispatch",
                 "serial": "device-1",
                 "current_stamina": 40,
+                "current_march_count": 2,
+                "max_march_count": 4,
                 "active_march_ids": [101, 102],
                 "marches": [{"march_id": 101}, {"march_id": 102}],
                 "dispatched_march": {
@@ -397,6 +401,7 @@ class HuntWaveBatchTests(unittest.TestCase):
         )
 
         self.assertEqual(manager.world_active_march_ids, {101, 102})
+        self.assertEqual(manager.world_current_march_count, 2)
         self.assertEqual(manager.world_dispatch_count, 1)
         self.assertEqual(stamina, [40])
         self.assertIn("行军 102", logs[0])

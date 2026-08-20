@@ -1920,6 +1920,7 @@ class DeviceManagerWindow:
         self.world_hunt_running = False
         self.world_hunt_level: int | None = None
         self.world_hunt_limit: int | None = None
+        self.world_current_march_count = 0
         self.world_active_march_ids: set[int] = set()
         self.world_seen_march_ids: set[int] = set()
         self.world_operation_inflight = False
@@ -1997,22 +1998,6 @@ class DeviceManagerWindow:
         except Exception as exc:
             preference_errors.append(f"搜索野兽等级：{exc}")
             world_monster_level = DEFAULT_WORLD_MONSTER_LEVEL
-        load_world_concurrency = getattr(
-            self.backend,
-            "get_world_monster_concurrency",
-            None,
-        )
-        try:
-            world_monster_concurrency = (
-                int(load_world_concurrency(self.profile.serial))
-                if callable(load_world_concurrency)
-                else DEFAULT_WORLD_MONSTER_CONCURRENCY
-            )
-            if not MIN_WORLD_MONSTER_CONCURRENCY <= world_monster_concurrency <= MAX_WORLD_MONSTER_CONCURRENCY:
-                raise ValueError("搜索野兽并发数超出 1-4")
-        except Exception as exc:
-            preference_errors.append(f"搜索野兽并发数：{exc}")
-            world_monster_concurrency = DEFAULT_WORLD_MONSTER_CONCURRENCY
         self.identity_text = tk.StringVar(
             value="尚未读取情报  |  领主体力：未读取"
         )
@@ -2044,15 +2029,9 @@ class DeviceManagerWindow:
             value=world_monster_level,
         )
         self.world_level_text = tk.StringVar(value=f"Lv.{world_monster_level}")
-        self.world_concurrency_var = tk.IntVar(
-            master=self.window,
-            value=world_monster_concurrency,
-        )
-        self.world_concurrency_text = tk.StringVar(
-            value=f"{world_monster_concurrency} 队"
-        )
+        self.world_concurrency_text = tk.StringVar(value="自动读取")
         self.world_hunt_status_text = tk.StringVar(
-            value="未启动  |  选择等级和并发数后开始"
+            value="未启动  |  选择等级后开始"
         )
         self._build()
         self.window.bind("<Control-Return>", self._start_hunt_from_event)
@@ -2386,33 +2365,20 @@ class DeviceManagerWindow:
             anchor="e",
         ).grid(row=0, column=2, sticky="e", padx=(12, 0))
 
-        ttk.Label(world_settings, text="同时出征").grid(
+        ttk.Label(world_settings, text="行军队列").grid(
             row=1, column=0, sticky="w", padx=(0, 12), pady=(14, 0)
         )
-        self.world_concurrency_scale = tk.Scale(
-            world_settings,
-            from_=MIN_WORLD_MONSTER_CONCURRENCY,
-            to=MAX_WORLD_MONSTER_CONCURRENCY,
-            resolution=1,
-            orient="horizontal",
-            showvalue=False,
-            variable=self.world_concurrency_var,
-            command=self._world_concurrency_changed,
-            length=140,
-            sliderlength=18,
-            borderwidth=0,
-            highlightthickness=0,
-            background="#F4F6F8",
-            activebackground="#1769AA",
-            troughcolor="#CFD6DD",
-        )
-        self.world_concurrency_scale.grid(row=1, column=1, sticky="ew", pady=(14, 0))
         ttk.Label(
             world_settings,
             textvariable=self.world_concurrency_text,
-            width=7,
-            anchor="e",
-        ).grid(row=1, column=2, sticky="e", padx=(12, 0), pady=(14, 0))
+            anchor="w",
+        ).grid(
+            row=1,
+            column=1,
+            columnspan=2,
+            sticky="ew",
+            pady=(14, 0),
+        )
 
         world_state = ttk.LabelFrame(world_tab, text="运行状态", padding=(8, 8))
         world_state.grid(row=1, column=0, sticky="ew", pady=(8, 0))
@@ -2642,25 +2608,6 @@ class DeviceManagerWindow:
             except Exception as exc:
                 self._log(f"搜索野兽等级保存失败：{exc}")
 
-    def _world_concurrency_changed(self, value: str) -> None:
-        concurrency = max(
-            MIN_WORLD_MONSTER_CONCURRENCY,
-            min(MAX_WORLD_MONSTER_CONCURRENCY, int(round(float(value)))),
-        )
-        if self.world_concurrency_var.get() != concurrency:
-            self.world_concurrency_var.set(concurrency)
-        self.world_concurrency_text.set(f"{concurrency} 队")
-        save_concurrency = getattr(
-            self.backend,
-            "set_world_monster_concurrency",
-            None,
-        )
-        if callable(save_concurrency):
-            try:
-                save_concurrency(self.profile.serial, concurrency)
-            except Exception as exc:
-                self._log(f"搜索野兽并发数保存失败：{exc}")
-
     def _update_world_hunt_controls(self) -> None:
         if not hasattr(self, "world_hunt_button"):
             return
@@ -2671,9 +2618,6 @@ class DeviceManagerWindow:
         if hasattr(self, "restart_game_button"):
             self.restart_game_button.configure(state="disabled" if locked else "normal")
         self.world_level_scale.configure(state="disabled" if locked else "normal")
-        self.world_concurrency_scale.configure(
-            state="disabled" if locked else "normal"
-        )
         self.world_hunt_button.configure(
             text="停止补充出征" if running else "开始搜索并攻击",
             state=(
@@ -2716,12 +2660,8 @@ class DeviceManagerWindow:
         if self.world_hunt_running:
             return
         level = int(self.world_level_var.get())
-        limit = int(self.world_concurrency_var.get())
         if not MIN_WORLD_MONSTER_LEVEL <= level <= MAX_WORLD_MONSTER_LEVEL:
             messagebox.showwarning("等级无效", "野兽等级必须是 1-20。", parent=self.window)
-            return
-        if not MIN_WORLD_MONSTER_CONCURRENCY <= limit <= MAX_WORLD_MONSTER_CONCURRENCY:
-            messagebox.showwarning("并发无效", "同时出征必须是 1-4 队。", parent=self.window)
             return
         self.world_hunt_generation += 1
         generation = self.world_hunt_generation
@@ -2732,23 +2672,23 @@ class DeviceManagerWindow:
         self.world_dispatch_count = 0
         self.world_hunt_running = True
         self.world_hunt_level = level
-        self.world_hunt_limit = limit
+        self.world_hunt_limit = None
+        self.world_current_march_count = 0
         self.world_poll_failures = 0
         self._update_world_hunt_controls()
         self._log(
-            f"搜索野兽已启动：等级冻结为 Lv.{level}，并发上限冻结为 {limit} 队；"
-            "队伍成功返回后立即补充新的出征。"
+            f"搜索野兽已启动：等级冻结为 Lv.{level}；"
+            "程序将读取游戏当前/最大行军数量，出现空位时立即补充。"
         )
         self.world_operation_inflight = True
         self.world_hunt_status_text.set(
-            f"正在启动常驻会话  |  Lv.{level}  |  并发 {limit} 队"
+            f"正在读取行军容量  |  Lv.{level}"
         )
         self._schedule_world_event_drain(generation)
         self.dispatcher.submit(
             lambda: self.backend.world_monster_loop(
                 self.profile.serial,
                 level,
-                limit,
                 self.world_event_queue.put,
             ),
             lambda value, error, generation=generation: self._world_hunt_loop_finished(
@@ -2786,7 +2726,7 @@ class DeviceManagerWindow:
             if callable(cancel_serial):
                 cancel_serial(self.profile.serial)
         self.world_operation_inflight = False
-        active_count = len(getattr(self, "world_active_march_ids", ()))
+        active_count = int(getattr(self, "world_current_march_count", 0))
         self.world_hunt_status_text.set(
             f"已停止  |  已出征队伍仍正常行军：{active_count} 队"
         )
@@ -2832,6 +2772,22 @@ class DeviceManagerWindow:
         stamina = self._valid_stamina(payload.get("current_stamina"))
         if stamina is not None:
             self._set_current_stamina(stamina)
+        raw_current_marches = payload.get("current_march_count")
+        raw_max_marches = payload.get("max_march_count")
+        if (
+            isinstance(raw_current_marches, int)
+            and not isinstance(raw_current_marches, bool)
+            and raw_current_marches >= 0
+            and isinstance(raw_max_marches, int)
+            and not isinstance(raw_max_marches, bool)
+            and raw_max_marches > 0
+            and raw_current_marches <= raw_max_marches
+        ):
+            self.world_current_march_count = raw_current_marches
+            self.world_hunt_limit = raw_max_marches
+            self.world_concurrency_text.set(
+                f"当前 {raw_current_marches} 队 / 最大 {raw_max_marches} 队（自动）"
+            )
         raw_active = payload.get("active_march_ids")
         if isinstance(raw_active, list):
             self.world_active_march_ids = {
@@ -2889,10 +2845,22 @@ class DeviceManagerWindow:
         elif event == "recover":
             detail = str(payload.get("detail") or "Lua 状态已重新绑定，任务继续运行。")
             self._log(detail)
+        elif event == "capacity":
+            self._log(
+                f"行军容量已更新：当前 {self.world_current_march_count} 队，"
+                f"最大 {self.world_hunt_limit or '-'} 队；将按空位自动补充。"
+            )
+        elif event == "capacity_wait":
+            self._log(
+                str(
+                    payload.get("detail")
+                    or "行军队列已满，等待任意队伍返回后自动补充。"
+                )
+            )
         limit = self.world_hunt_limit or 0
         self.world_hunt_status_text.set(
             f"运行中  |  Lv.{self.world_hunt_level}  |  "
-            f"当前行军 {len(self.world_active_march_ids)}/{limit}  |  "
+            f"当前行军 {self.world_current_march_count}/{limit}  |  "
             f"累计出征 {self.world_dispatch_count}"
         )
 

@@ -265,7 +265,7 @@ def business_args(
     keep_hook: bool = False,
     level: int | None = None,
     count: int = 1,
-    concurrency: int = 4,
+    concurrency: int | None = 4,
     march_ids: list[int] | None = None,
     return_on_any: bool = False,
 ) -> argparse.Namespace:
@@ -452,7 +452,9 @@ def world_monster_search_protocol(role: str, level: int) -> str:
 
 
 def world_monster_commit_protocol(
-    role: str, level: int, *, current: int = 42, required: int = 8, sent: bool = True
+    role: str, level: int, *, current: int = 42, required: int = 8,
+    sent: bool = True, current_marches: int = 0, max_marches: int = 4,
+    blocked_reason: str = "INSUFFICIENT_STAMINA",
 ) -> str:
     return "\n".join((
         "MUMU_AUTOTASK\t1\tWORLD_MONSTER_COMMIT",
@@ -460,8 +462,9 @@ def world_monster_commit_protocol(
         f"LEVEL\t{level}", f"MONSTER\t{7100000 + level}",
         "POINT\t833\t749", "AVERAGE\t1",
         f"STAMINA\t{current}\t{required}\t10",
+        f"QUEUE\t{current_marches}\t{max_marches}",
         f"SENT\t{int(sent)}",
-        f"REASON\t{'NONE' if sent else 'INSUFFICIENT_STAMINA'}", "END\t1",
+        f"REASON\t{'NONE' if sent else blocked_reason}", "END\t1",
     ))
 
 
@@ -482,14 +485,33 @@ def world_monster_status_protocol(
     statuses: tuple[tuple[int, str], ...],
     *,
     current_stamina: int = 34,
+    current_marches: int | None = None,
+    max_marches: int = 4,
 ) -> str:
+    if current_marches is None:
+        current_marches = sum(state == "ACTIVE" for _, state in statuses)
     return "\n".join((
         "MUMU_AUTOTASK\t1\tWORLD_MONSTER_STATUS",
         f"ROLE\t{role.encode('utf-8').hex()}",
         "KINGDOM\t4549",
+        f"QUEUE\t{current_marches}\t{max_marches}",
         f"STAMINA\t{current_stamina}",
         *(f"MARCH\t{march_id}\t{state}" for march_id, state in statuses),
         f"END\t{len(statuses)}",
+    ))
+
+
+def world_march_capacity_protocol(
+    role: str, *, current_marches: int = 0, max_marches: int = 4,
+    current_stamina: int = 42,
+) -> str:
+    return "\n".join((
+        "MUMU_AUTOTASK\t1\tWORLD_MARCH_CAPACITY",
+        f"ROLE\t{role.encode('utf-8').hex()}",
+        "KINGDOM\t4549",
+        f"QUEUE\t{current_marches}\t{max_marches}",
+        f"STAMINA\t{current_stamina}",
+        "END\t1",
     ))
 
 
@@ -1370,7 +1392,7 @@ class CliTests(unittest.TestCase):
         ]
         parsed_loop = parser.parse_args(loop)
         self.assertTrue(parsed_loop.dry_run)
-        self.assertEqual(parsed_loop.concurrency, 4)
+        self.assertIsNone(parsed_loop.concurrency)
         self.assertEqual(parsed_loop.poll_interval, 1.5)
         self.assertFalse(parser.parse_args([*loop, "--execute"]).dry_run)
         with self.assertRaises(BusinessError):
@@ -1482,7 +1504,7 @@ class CliTests(unittest.TestCase):
         role = "打工的"
         level = 16
         settings = Settings(devices=(DeviceProfile("device-1"),))
-        outputs: list[str | Exception] = []
+        outputs: list[str | Exception] = [world_march_capacity_protocol(role)]
         for march_id, stamina in ((901, 34), (902, 26), (903, 18), (904, 10)):
             outputs.extend((
                 world_monster_search_sent_protocol(role, level),
@@ -1554,6 +1576,7 @@ class CliTests(unittest.TestCase):
             "END\t1",
         ))
         outputs = (
+            world_march_capacity_protocol(role),
             world_monster_search_sent_protocol(role, level),
             pending,
             world_monster_search_protocol(role, level),
@@ -1562,7 +1585,7 @@ class CliTests(unittest.TestCase):
             ),
         )
         output = io.StringIO()
-        monotonic_values = iter((0.0,) * 5 + (31.0,) * 20)
+        monotonic_values = iter((0.0,) * 9 + (31.0,) * 20)
         with (
             patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
             patch(
@@ -1590,6 +1613,196 @@ class CliTests(unittest.TestCase):
         self.assertIn("retry", event_names)
         self.assertIn("blocked", event_names)
         self.assertNotIn("error", event_names)
+        self.assertEqual(events.count("lua-execute"), 5)
+
+    def test_world_monster_loop_with_three_of_four_marches_dispatches_one(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        level = 16
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        outputs = (
+            world_march_capacity_protocol(
+                role, current_marches=3, max_marches=4
+            ),
+            world_monster_search_sent_protocol(role, level),
+            world_monster_search_protocol(role, level),
+            world_monster_commit_protocol(
+                role, level, current_marches=3, max_marches=4
+            ),
+            world_monster_verify_protocol(role, level, 901),
+            world_monster_status_protocol(
+                role,
+                ((901, "ACTIVE"),),
+                current_marches=4,
+                max_marches=4,
+            ),
+        )
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, outputs=outputs),
+            ),
+            patch(
+                "mumu_autotask.cli.time.sleep",
+                side_effect=KeyboardInterrupt,
+            ),
+            redirect_stdout(output),
+        ):
+            result_code = execute(
+                business_args(
+                    "world-monster-loop",
+                    dry_run=False,
+                    level=level,
+                    concurrency=None,
+                    poll_interval=0.05,
+                ),
+                settings,
+            )
+
+        self.assertEqual(result_code, 0, output.getvalue())
+        payloads = [json.loads(line) for line in output.getvalue().splitlines()]
+        dispatches = [item for item in payloads if item["event"] == "dispatch"]
+        self.assertEqual(len(dispatches), 1)
+        self.assertEqual(dispatches[0]["current_march_count"], 4)
+        self.assertEqual(dispatches[0]["max_march_count"], 4)
+        self.assertEqual(events.count("lua-execute"), 6)
+
+    def test_world_monster_loop_with_full_game_queue_only_waits(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(
+                    events,
+                    outputs=(world_march_capacity_protocol(
+                        role, current_marches=4, max_marches=4
+                    ),),
+                ),
+            ),
+            patch(
+                "mumu_autotask.cli.time.sleep",
+                side_effect=KeyboardInterrupt,
+            ),
+            redirect_stdout(output),
+        ):
+            result_code = execute(
+                business_args(
+                    "world-monster-loop",
+                    dry_run=False,
+                    level=16,
+                    concurrency=None,
+                    poll_interval=0.05,
+                ),
+                settings,
+            )
+
+        self.assertEqual(result_code, 0, output.getvalue())
+        payloads = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertNotIn("dispatch", [item["event"] for item in payloads])
+        capacity = next(item for item in payloads if item["event"] == "capacity")
+        self.assertEqual(capacity["available_march_slots"], 0)
+        self.assertEqual(events.count("lua-execute"), 1)
+
+    def test_world_monster_loop_retries_initial_capacity_until_modules_ready(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(
+                    events,
+                    outputs=(
+                        LuaExecutionError(
+                            "attempt to index field 'm_modules' (a nil value)"
+                        ),
+                        world_march_capacity_protocol(
+                            role, current_marches=4, max_marches=4
+                        ),
+                    ),
+                ),
+            ),
+            patch("mumu_autotask.cli.time.sleep", side_effect=(None, KeyboardInterrupt)),
+            redirect_stdout(output),
+        ):
+            result_code = execute(
+                business_args(
+                    "world-monster-loop",
+                    dry_run=False,
+                    level=16,
+                    concurrency=None,
+                    poll_interval=0.05,
+                ),
+                settings,
+            )
+
+        self.assertEqual(result_code, 0, output.getvalue())
+        payloads = [json.loads(line) for line in output.getvalue().splitlines()]
+        retry = next(item for item in payloads if item["event"] == "retry")
+        self.assertEqual(retry["stage"], "capacity")
+        self.assertIn("模块尚未完成初始化", retry["detail"])
+        self.assertIn("capacity", [item["event"] for item in payloads])
+        self.assertEqual(events.count("lua-execute"), 2)
+
+    def test_world_monster_loop_silently_waits_if_last_slot_is_taken(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        level = 16
+        settings = Settings(devices=(DeviceProfile("device-1"),))
+        outputs = (
+            world_march_capacity_protocol(
+                role, current_marches=3, max_marches=4
+            ),
+            world_monster_search_sent_protocol(role, level),
+            world_monster_search_protocol(role, level),
+            world_monster_commit_protocol(
+                role,
+                level,
+                sent=False,
+                current_marches=4,
+                max_marches=4,
+                blocked_reason="NO_IDLE_MARCH_QUEUE",
+            ),
+        )
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, outputs=outputs),
+            ),
+            patch(
+                "mumu_autotask.cli.time.sleep",
+                side_effect=KeyboardInterrupt,
+            ),
+            redirect_stdout(output),
+        ):
+            result_code = execute(
+                business_args(
+                    "world-monster-loop",
+                    dry_run=False,
+                    level=level,
+                    concurrency=None,
+                    poll_interval=0.05,
+                ),
+                settings,
+            )
+
+        self.assertEqual(result_code, 0, output.getvalue())
+        event_names = [
+            json.loads(line)["event"] for line in output.getvalue().splitlines()
+        ]
+        self.assertIn("capacity_wait", event_names)
+        self.assertNotIn("blocked", event_names)
+        self.assertNotIn("dispatch", event_names)
         self.assertEqual(events.count("lua-execute"), 4)
 
     def test_world_monster_status_outputs_returned_and_stamina(self) -> None:
@@ -1599,7 +1812,8 @@ class CliTests(unittest.TestCase):
         protocol = "\n".join((
             "MUMU_AUTOTASK\t1\tWORLD_MONSTER_STATUS",
             f"ROLE\t{role.encode('utf-8').hex()}", "KINGDOM\t4549",
-            "STAMINA\t34", "MARCH\t901\tRETURNED", "END\t1",
+            "QUEUE\t0\t4", "STAMINA\t34",
+            "MARCH\t901\tRETURNED", "END\t1",
         ))
         output = io.StringIO()
         with (

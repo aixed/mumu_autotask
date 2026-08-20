@@ -1045,22 +1045,23 @@ class GuiBackend:
         self,
         serial: str,
         level: int,
-        concurrency: int,
         on_event: Callable[[Mapping[str, Any]], None],
+        concurrency: int | None = None,
     ) -> None:
         level = GuiPreferences._validate_world_monster_level(level)
-        concurrency = GuiPreferences._validate_world_monster_concurrency(concurrency)
+        arguments = [
+            "world-monster-loop",
+            "--serial",
+            serial,
+            "--level",
+            str(level),
+        ]
+        if concurrency is not None:
+            concurrency = GuiPreferences._validate_world_monster_concurrency(concurrency)
+            arguments.extend(("--concurrency", str(concurrency)))
+        arguments.append("--execute")
         self.runner.run_json_stream(
-            (
-                "world-monster-loop",
-                "--serial",
-                serial,
-                "--level",
-                str(level),
-                "--concurrency",
-                str(concurrency),
-                "--execute",
-            ),
+            arguments,
             on_event,
         )
 

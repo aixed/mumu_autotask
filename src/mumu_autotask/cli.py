@@ -38,6 +38,7 @@ from .business import (
     build_verify_battle_intel_lua,
     build_verify_march_lua,
     build_world_monster_commit_lua,
+    build_world_march_capacity_lua,
     build_world_monster_search_lua,
     build_world_monster_search_result_lua,
     build_world_monster_status_lua,
@@ -61,6 +62,7 @@ from .business import (
     parse_toggle_world_output,
     parse_verify_output,
     parse_world_monster_commit_output,
+    parse_world_march_capacity_output,
     parse_world_monster_search_output,
     parse_world_monster_search_sent_output,
     parse_world_monster_status_output,
@@ -560,8 +562,11 @@ def build_parser() -> argparse.ArgumentParser:
     world_monster_loop.add_argument(
         "--concurrency",
         type=int,
-        default=4,
-        help="maximum active world monster marches (1-4; default: 4)",
+        default=None,
+        help=(
+            "optional safety cap for active marches (1-4); by default the "
+            "game's live current/maximum march counts are used"
+        ),
     )
     world_monster_loop.add_argument(
         "--poll-interval",
@@ -3198,14 +3203,18 @@ def _execute_world_monster_loop(
     client: FridaLuaClient,
     process: ProcessInfo,
     level: int,
-    concurrency: int,
+    concurrency: int | None,
     *,
     output_capacity: int,
     poll_interval_seconds: float,
     operation_timeout_seconds: float = 30.0,
 ) -> int:
     requested_level = normalize_world_monster_level(level)
-    requested_concurrency = normalize_world_monster_count(concurrency)
+    requested_concurrency = (
+        normalize_world_monster_count(concurrency)
+        if concurrency is not None
+        else None
+    )
     if (
         isinstance(poll_interval_seconds, bool)
         or not isinstance(poll_interval_seconds, (int, float))
@@ -3218,15 +3227,19 @@ def _execute_world_monster_loop(
     search_result_code = build_world_monster_search_result_lua(requested_level)
     commit_code = build_world_monster_commit_lua(requested_level)
     verify_code = build_world_monster_verify_lua(requested_level)
+    capacity_code = build_world_march_capacity_lua()
     scanner = _scanner(adb, profile)
     state = _wait_unique_idle_lua_state(
         adb, profile, scanner, process, "world monster loop initialization"
     )
     active: dict[int, dict[str, Any]] = {}
     current_stamina: int | None = None
+    current_march_count: int | None = None
+    max_march_count: int | None = None
     dispatch_count = 0
     stop_requested = False
     previous_status_signature: tuple[tuple[int, str], ...] | None = None
+    previous_capacity_signature: tuple[int, int] | None = None
 
     def emit(event: str, **extra: Any) -> None:
         payload: dict[str, Any] = {
@@ -3234,7 +3247,15 @@ def _execute_world_monster_loop(
             "serial": profile.serial,
             "level": requested_level,
             "concurrency": requested_concurrency,
+            "automatic_capacity": requested_concurrency is None,
             "current_stamina": current_stamina,
+            "current_march_count": current_march_count,
+            "max_march_count": max_march_count,
+            "available_march_slots": (
+                max(0, max_march_count - current_march_count)
+                if current_march_count is not None and max_march_count is not None
+                else None
+            ),
             "active_march_ids": sorted(active),
             "marches": [active[march_id] for march_id in sorted(active)],
         }
@@ -3269,8 +3290,47 @@ def _execute_world_monster_loop(
             recovery_cause=str(error),
         )
 
+    def refresh_capacity(operation: str) -> tuple[int, int]:
+        nonlocal current_stamina, current_march_count, max_march_count
+        deadline = time.monotonic() + operation_timeout_seconds
+        while True:
+            check_stop()
+            try:
+                result = _execute_lua_when_idle(
+                    adb,
+                    profile,
+                    client,
+                    process,
+                    scanner,
+                    state,
+                    capacity_code,
+                    output_capacity=output_capacity,
+                    operation=operation,
+                )
+                capacity = parse_world_march_capacity_output(result.output)
+                current_stamina = capacity.current_stamina
+                current_march_count = capacity.current_marches
+                max_march_count = capacity.max_marches
+                return current_march_count, max_march_count
+            except LuaStateScanError as exc:
+                recover_lua_state(operation, exc)
+            except LuaExecutionError as exc:
+                if time.monotonic() >= deadline:
+                    raise
+                emit(
+                    "retry",
+                    stage="capacity",
+                    detail=(
+                        "游戏模块尚未完成初始化，正在等待后重新读取当前/"
+                        "最大行军数量。"
+                    ),
+                    retry_cause=str(exc),
+                )
+                _require_same_foreground_process(adb, profile, process, operation)
+                time.sleep(poll_interval_seconds)
+
     def dispatch_one() -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        nonlocal current_stamina, dispatch_count
+        nonlocal current_stamina, current_march_count, max_march_count, dispatch_count
         while True:
             check_stop()
             try:
@@ -3346,14 +3406,23 @@ def _execute_world_monster_loop(
         )
         commit = parse_world_monster_commit_output(commit_result.output, search)
         current_stamina = commit.current_stamina
+        current_march_count = max(commit.current_marches, len(active))
+        max_march_count = commit.max_marches
         if not commit.request_dispatched:
             return None, {
                 "blocked_reason": commit.blocked_reason,
                 "required_stamina": commit.required_stamina,
                 "base_stamina": commit.base_stamina,
+                "current_march_count": commit.current_marches,
+                "max_march_count": commit.max_marches,
                 "detail": (
                     f"current stamina {commit.current_stamina} is below required "
                     f"stamina {commit.required_stamina}"
+                    if commit.blocked_reason == "insufficient_stamina"
+                    else (
+                        f"march queue is full ({commit.current_marches}/"
+                        f"{commit.max_marches}); waiting for a free slot"
+                    )
                 ),
             }
 
@@ -3377,6 +3446,10 @@ def _execute_world_monster_loop(
             current_stamina = verification.current_stamina
             if verification.march_id is not None:
                 dispatch_count += 1
+                current_march_count = min(
+                    commit.max_marches,
+                    current_march_count + 1,
+                )
                 march = {
                     "march_id": verification.march_id,
                     "status": "ACTIVE",
@@ -3436,6 +3509,7 @@ def _execute_world_monster_loop(
                 timeout_seconds=30.0,
                 poll_interval_seconds=poll_interval_seconds,
             )
+            refresh_capacity("world monster loop initial capacity")
             emit(
                 "start",
                 bridge_arch=initialization.get("arch"),
@@ -3444,7 +3518,29 @@ def _execute_world_monster_loop(
             try:
                 while True:
                     check_stop()
-                    while len(active) < requested_concurrency:
+                    if current_march_count is None or max_march_count is None:
+                        current, maximum = refresh_capacity(
+                            "world monster loop capacity"
+                        )
+                    else:
+                        current, maximum = current_march_count, max_march_count
+                    effective_limit = (
+                        min(maximum, requested_concurrency)
+                        if requested_concurrency is not None
+                        else maximum
+                    )
+                    capacity_signature = (current, maximum)
+                    if capacity_signature != previous_capacity_signature:
+                        emit(
+                            "capacity",
+                            effective_march_limit=effective_limit,
+                            detail=(
+                                f"game march capacity is {current}/{maximum}; "
+                                f"effective refill limit is {effective_limit}"
+                            ),
+                        )
+                        previous_capacity_signature = capacity_signature
+                    while current < effective_limit:
                         try:
                             march, blocked = dispatch_one()
                         except LuaExecutionError as exc:
@@ -3456,6 +3552,13 @@ def _execute_world_monster_loop(
                             }
                             march = None
                         if blocked is not None:
+                            if blocked.get("blocked_reason") == "no_idle_march_queue":
+                                emit(
+                                    "capacity_wait",
+                                    blocked_reason="no_idle_march_queue",
+                                    detail=blocked.get("detail"),
+                                )
+                                break
                             emit_blocked(blocked)
                             emit("stopped", reason=str(blocked.get("blocked_reason")))
                             terminal_outcome = True
@@ -3468,6 +3571,12 @@ def _execute_world_monster_loop(
                             )
                         active[march_id] = march
                         emit("dispatch", dispatched_march=march)
+                        current = current_march_count or (current + 1)
+
+                    if not active:
+                        time.sleep(poll_interval_seconds)
+                        refresh_capacity("world monster loop capacity wait")
+                        continue
 
                     check_stop()
                     status_code = build_world_monster_status_lua(tuple(sorted(active)))
@@ -3491,6 +3600,8 @@ def _execute_world_monster_loop(
                         status_result.output, tuple(sorted(active))
                     )
                     current_stamina = snapshot.current_stamina
+                    current_march_count = snapshot.current_marches
+                    max_march_count = snapshot.max_marches
                     signature = tuple(
                         (status.march_id, status.state)
                         for status in snapshot.statuses
@@ -3747,8 +3858,10 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
         code = build_world_monster_search_lua(world_monster_level)
     elif args.command == "world-monster-loop":
         world_monster_level = normalize_world_monster_level(args.level)
-        world_monster_loop_concurrency = normalize_world_monster_count(
-            args.concurrency
+        world_monster_loop_concurrency = (
+            normalize_world_monster_count(args.concurrency)
+            if args.concurrency is not None
+            else None
         )
         poll_interval_seconds = float(args.poll_interval)
         if (
@@ -3796,7 +3909,7 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
         payload["level"] = world_monster_level
     if world_monster_count is not None:
         payload["requested_count"] = world_monster_count
-    if world_monster_loop_concurrency is not None:
+    if args.command == "world-monster-loop":
         payload["concurrency"] = world_monster_loop_concurrency
     if world_monster_march_ids is not None:
         payload["march_ids"] = list(world_monster_march_ids)
@@ -3890,7 +4003,6 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
 
     if args.command == "world-monster-loop":
         assert world_monster_level is not None
-        assert world_monster_loop_concurrency is not None
         assert poll_interval_seconds is not None
         if args.dry_run:
             payload.update(

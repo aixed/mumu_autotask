@@ -795,12 +795,23 @@ class BusinessTests(unittest.TestCase):
             "MUMU_AUTOTASK\t1\tWORLD_MONSTER_COMMIT",
             f"ROLE\t{ROLE_HEX}", "KINGDOM\t4549", "LEVEL\t16",
             "MONSTER\t7100016", "POINT\t833\t749", "AVERAGE\t1",
-            "STAMINA\t7\t8\t10", "SENT\t0",
+            "STAMINA\t7\t8\t10", "QUEUE\t1\t4", "SENT\t0",
             "REASON\tINSUFFICIENT_STAMINA", "END\t1",
         ))
         blocked = parse_world_monster_commit_output(blocked_output, search)
         self.assertFalse(blocked.request_dispatched)
         self.assertEqual(blocked.blocked_reason, "insufficient_stamina")
+        self.assertIn("GetSelfMarchCount", build_world_monster_commit_lua(16))
+        self.assertIn(
+            "GetCurrentMaxMarchCount", build_world_monster_commit_lua(16)
+        )
+        self.assertIn(
+            'return result("0", "NO_IDLE_MARCH_QUEUE")',
+            build_world_monster_commit_lua(16),
+        )
+        commit_code = build_world_monster_commit_lua(16)
+        self.assertIn("CheckHasIdleMarch(", commit_code)
+        self.assertIn("nil, false)", commit_code)
         verify_missing = "\n".join((
             "MUMU_AUTOTASK\t1\tWORLD_MONSTER_VERIFY",
             f"ROLE\t{ROLE_HEX}", "KINGDOM\t4549", "LEVEL\t16",
@@ -817,7 +828,7 @@ class BusinessTests(unittest.TestCase):
         self.assertIn("RETURNED", code)
         output = "\n".join((
             "MUMU_AUTOTASK\t1\tWORLD_MONSTER_STATUS",
-            f"ROLE\t{ROLE_HEX}", "KINGDOM\t4549", "STAMINA\t32",
+            f"ROLE\t{ROLE_HEX}", "KINGDOM\t4549", "QUEUE\t1\t4", "STAMINA\t32",
             "MARCH\t901\tACTIVE", "MARCH\t902\tRETURNED", "END\t2",
         ))
         snapshot = parse_world_monster_status_output(output, (901, 902))

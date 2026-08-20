@@ -166,6 +166,8 @@ class WorldMonsterHuntReceipt:
     current_stamina: int
     required_stamina: int
     base_stamina: int
+    current_marches: int
+    max_marches: int
     blocked_reason: str | None = None
 
 
@@ -188,10 +190,21 @@ class WorldMonsterMarchStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class WorldMarchCapacity:
+    role: str
+    kingdom: int
+    current_marches: int
+    max_marches: int
+    current_stamina: int
+
+
+@dataclass(frozen=True, slots=True)
 class WorldMonsterStatusSnapshot:
     role: str
     kingdom: int
     current_stamina: int
+    current_marches: int
+    max_marches: int
     statuses: tuple[WorldMonsterMarchStatus, ...]
 
 
@@ -2895,6 +2908,24 @@ local function self_marches(kingdom)
     return marches
 end
 
+local function march_capacity()
+    local current = integer(call(GCtrl.WorldMarchCtrl, "GetSelfMarchCount",
+        "current self march count"), "current self march count", true)
+    if type(GHelper) ~= "table" or type(GHelper.WorldMarchHelper) ~= "table"
+        or type(GHelper.WorldMarchHelper.GetCurrentMaxMarchCount) ~= "function" then
+        fail("maximum self march count method is unavailable")
+    end
+    local ok, maximum = pcall(
+        GHelper.WorldMarchHelper.GetCurrentMaxMarchCount
+    )
+    if not ok then fail("maximum self march count method failed") end
+    maximum = integer(maximum, "maximum self march count", false)
+    if current > maximum then
+        fail("current self march count exceeds the maximum")
+    end
+    return current, maximum
+end
+
 local function march_call(march, method_name)
     if (type(march) ~= "table" and type(march) ~= "userdata")
         or type(march[method_name]) ~= "function" then
@@ -3252,10 +3283,6 @@ end
 local march_map_type = GDefine.WorldMarchDefine.MARCH_MAP_TYPE.NORMAL
 local march_type = WorldMapDefine.march_type.atk_monster
 local map_object_type = WorldMapDefine.mapobj_type.map_monster
-if not GHelper.WorldMarchHelper.CheckHasIdleMarch(
-    march_map_type, march_type, nil, true) then
-    fail("no idle march queue is available")
-end
 local extra = { monsterid = state.monster_id }
 local hero_list = GHelper.ExpeditionHelper.GetRecommendedHeroList(
     false, false, march_type, state.monster_id, march_map_type, extra)
@@ -3306,6 +3333,7 @@ end
 local required_stamina = integer(math.ceil(base_stamina * (1 - reduction)),
     "required stamina", true)
 local stamina = current_stamina()
+local current_marches, max_marches = march_capacity()
 local function result(sent, reason)
     return table.concat({
         "MUMU_AUTOTASK\t1\tWORLD_MONSTER_COMMIT",
@@ -3317,13 +3345,23 @@ local function result(sent, reason)
         "AVERAGE\t1",
         "STAMINA\t" .. tostring(stamina) .. "\t"
             .. tostring(required_stamina) .. "\t" .. tostring(base_stamina),
+        "QUEUE\t" .. tostring(current_marches) .. "\t" .. tostring(max_marches),
         "SENT\t" .. sent,
         "REASON\t" .. reason,
         "END\t1",
     }, "\n")
 end
+if current_marches >= max_marches then
+    return result("0", "NO_IDLE_MARCH_QUEUE")
+end
 if stamina < required_stamina then
     return result("0", "INSUFFICIENT_STAMINA")
+end
+-- The last flag controls the game's queue-full prompt. Capacity was already
+-- checked above, so keep this secondary guard silent if state changes.
+if not GHelper.WorldMarchHelper.CheckHasIdleMarch(
+    march_map_type, march_type, nil, false) then
+    return result("0", "NO_IDLE_MARCH_QUEUE")
 end
 local before_ids = {}
 for key, march in pairs(self_marches(kingdom)) do
@@ -3395,9 +3433,24 @@ return table.concat({
 '''
 
 
+_WORLD_MARCH_CAPACITY_BODY = r'''
+local role_hex, kingdom = identity()
+local current, maximum = march_capacity()
+return table.concat({
+    "MUMU_AUTOTASK\t1\tWORLD_MARCH_CAPACITY",
+    "ROLE\t" .. role_hex,
+    "KINGDOM\t" .. tostring(kingdom),
+    "QUEUE\t" .. tostring(current) .. "\t" .. tostring(maximum),
+    "STAMINA\t" .. tostring(current_stamina()),
+    "END\t1",
+}, "\n")
+'''
+
+
 _WORLD_MONSTER_STATUS_BODY = r'''
 local MARCH_IDS = { __MARCH_IDS__ }
 local role_hex, kingdom = identity()
+local current_marches, max_marches = march_capacity()
 local active = {}
 for key, march in pairs(self_marches(kingdom)) do
     local id = march_id(march, key)
@@ -3409,6 +3462,7 @@ local lines = {
     "MUMU_AUTOTASK\t1\tWORLD_MONSTER_STATUS",
     "ROLE\t" .. role_hex,
     "KINGDOM\t" .. tostring(kingdom),
+    "QUEUE\t" .. tostring(current_marches) .. "\t" .. tostring(max_marches),
     "STAMINA\t" .. tostring(current_stamina()),
 }
 for _, id in ipairs(MARCH_IDS) do
@@ -3448,6 +3502,10 @@ def build_world_monster_commit_lua(level: int) -> str:
 
 def build_world_monster_verify_lua(level: int) -> str:
     return _world_monster_lua(level, _WORLD_MONSTER_VERIFY_BODY)
+
+
+def build_world_march_capacity_lua() -> str:
+    return _finalize_lua(textwrap.dedent(_WORLD_MONSTER_COMMON + _WORLD_MARCH_CAPACITY_BODY))
 
 
 def build_world_monster_status_lua(march_ids: Sequence[int]) -> str:
@@ -4163,34 +4221,74 @@ def parse_world_monster_commit_output(
     lines = _protocol_lines(output, "WORLD_MONSTER_COMMIT")
     role, kingdom = _parse_world_monster_identity(lines, "WORLD_MONSTER_COMMIT")
     if (
-        len(lines) != 11 or role != search.role or kingdom != search.kingdom
+        len(lines) != 12 or role != search.role or kingdom != search.kingdom
         or lines[3] != ["LEVEL", str(search.level)]
         or lines[4] != ["MONSTER", str(search.monster_id)]
         or lines[5] != ["POINT", str(search.world_x), str(search.world_y)]
         or lines[6] != ["AVERAGE", "1"]
         or len(lines[7]) != 4 or lines[7][0] != "STAMINA"
-        or lines[8] not in (["SENT", "0"], ["SENT", "1"])
-        or len(lines[9]) != 2 or lines[9][0] != "REASON"
-        or lines[10] != ["END", "1"]
+        or len(lines[8]) != 3 or lines[8][0] != "QUEUE"
+        or lines[9] not in (["SENT", "0"], ["SENT", "1"])
+        or len(lines[10]) != 2 or lines[10][0] != "REASON"
+        or lines[11] != ["END", "1"]
     ):
         raise BusinessError("WORLD_MONSTER_COMMIT output is invalid")
     current = _parse_integer(lines[7][1], "world monster stamina", allow_zero=True)
     required = _parse_integer(lines[7][2], "world monster required stamina", allow_zero=True)
     base = _parse_integer(lines[7][3], "world monster base stamina", allow_zero=False)
-    dispatched = lines[8][1] == "1"
+    current_marches = _parse_integer(
+        lines[8][1], "world monster current marches", allow_zero=True
+    )
+    max_marches = _parse_integer(
+        lines[8][2], "world monster maximum marches", allow_zero=False
+    )
+    if current_marches > max_marches:
+        raise BusinessError("WORLD_MONSTER_COMMIT queue state is inconsistent")
+    dispatched = lines[9][1] == "1"
     if dispatched:
-        if lines[9][1] != "NONE" or current < required:
+        if lines[10][1] != "NONE" or current < required \
+                or current_marches >= max_marches:
             raise BusinessError("WORLD_MONSTER_COMMIT dispatch state is inconsistent")
         blocked_reason = None
     else:
-        if lines[9][1] != "INSUFFICIENT_STAMINA" or current >= required:
-            raise BusinessError("WORLD_MONSTER_COMMIT blocked state is inconsistent")
-        blocked_reason = "insufficient_stamina"
+        reason = lines[10][1]
+        if reason == "INSUFFICIENT_STAMINA":
+            if current >= required:
+                raise BusinessError("WORLD_MONSTER_COMMIT blocked state is inconsistent")
+            blocked_reason = "insufficient_stamina"
+        elif reason == "NO_IDLE_MARCH_QUEUE":
+            blocked_reason = "no_idle_march_queue"
+        else:
+            raise BusinessError("WORLD_MONSTER_COMMIT blocked reason is invalid")
     return WorldMonsterHuntReceipt(
         role, kingdom, search.level, int(search.monster_id),
         int(search.world_x), int(search.world_y), dispatched,
-        current, required, base, blocked_reason
+        current, required, base, current_marches, max_marches, blocked_reason
     )
+
+
+def parse_world_march_capacity_output(output: str) -> WorldMarchCapacity:
+    lines = _protocol_lines(output, "WORLD_MARCH_CAPACITY")
+    role, kingdom = _parse_world_monster_identity(lines, "WORLD_MARCH_CAPACITY")
+    if (
+        len(lines) != 6
+        or len(lines[3]) != 3 or lines[3][0] != "QUEUE"
+        or len(lines[4]) != 2 or lines[4][0] != "STAMINA"
+        or lines[5] != ["END", "1"]
+    ):
+        raise BusinessError("WORLD_MARCH_CAPACITY output is invalid")
+    current = _parse_integer(
+        lines[3][1], "WORLD_MARCH_CAPACITY current marches", allow_zero=True
+    )
+    maximum = _parse_integer(
+        lines[3][2], "WORLD_MARCH_CAPACITY maximum marches", allow_zero=False
+    )
+    stamina = _parse_integer(
+        lines[4][1], "WORLD_MARCH_CAPACITY stamina", allow_zero=True
+    )
+    if current > maximum:
+        raise BusinessError("WORLD_MARCH_CAPACITY queue state is inconsistent")
+    return WorldMarchCapacity(role, kingdom, current, maximum, stamina)
 
 
 def parse_world_monster_verify_output(
@@ -4229,17 +4327,26 @@ def parse_world_monster_status_output(
     lines = _protocol_lines(output, "WORLD_MONSTER_STATUS")
     role, kingdom = _parse_world_monster_identity(lines, "WORLD_MONSTER_STATUS")
     if (
-        len(lines) != len(expected_ids) + 5
-        or len(lines[3]) != 2 or lines[3][0] != "STAMINA"
+        len(lines) != len(expected_ids) + 6
+        or len(lines[3]) != 3 or lines[3][0] != "QUEUE"
+        or len(lines[4]) != 2 or lines[4][0] != "STAMINA"
         or lines[-1] != ["END", str(len(expected_ids))]
     ):
         raise BusinessError("WORLD_MONSTER_STATUS output is invalid")
     stamina = _parse_integer(
-        lines[3][1], "WORLD_MONSTER_STATUS stamina", allow_zero=True
+        lines[4][1], "WORLD_MONSTER_STATUS stamina", allow_zero=True
     )
+    current_marches = _parse_integer(
+        lines[3][1], "WORLD_MONSTER_STATUS current marches", allow_zero=True
+    )
+    max_marches = _parse_integer(
+        lines[3][2], "WORLD_MONSTER_STATUS maximum marches", allow_zero=False
+    )
+    if current_marches > max_marches:
+        raise BusinessError("WORLD_MONSTER_STATUS queue state is inconsistent")
     statuses: list[WorldMonsterMarchStatus] = []
     for index, (march_id, fields) in enumerate(
-        zip(expected_ids, lines[4:-1], strict=True)
+        zip(expected_ids, lines[5:-1], strict=True)
     ):
         if len(fields) != 3 or fields[0] != "MARCH" \
                 or fields[1] != str(march_id):
@@ -4253,7 +4360,9 @@ def parse_world_monster_status_output(
         if fields[2] not in {"ACTIVE", "RETURNED"}:
             raise BusinessError(f"WORLD_MONSTER_STATUS MARCH[{index}] is invalid")
         statuses.append(WorldMonsterMarchStatus(march_id, fields[2]))
-    return WorldMonsterStatusSnapshot(role, kingdom, stamina, tuple(statuses))
+    return WorldMonsterStatusSnapshot(
+        role, kingdom, stamina, current_marches, max_marches, tuple(statuses)
+    )
 
 
 def parse_battle_commit_output(
@@ -4489,6 +4598,7 @@ __all__ = [
     "WorldMonsterMarchStatus",
     "WorldMonsterSearchReceipt",
     "WorldMonsterStatusSnapshot",
+    "WorldMarchCapacity",
     "build_claim_intel_lua",
     "build_close_expedition_lua",
     "build_commit_march_lua",
@@ -4511,6 +4621,7 @@ __all__ = [
     "build_verify_battle_intel_lua",
     "build_verify_march_lua",
     "build_world_monster_commit_lua",
+    "build_world_march_capacity_lua",
     "build_world_monster_search_lua",
     "build_world_monster_search_result_lua",
     "build_world_monster_status_lua",
@@ -4537,6 +4648,7 @@ __all__ = [
     "parse_toggle_world_output",
     "parse_verify_output",
     "parse_world_monster_commit_output",
+    "parse_world_march_capacity_output",
     "parse_world_monster_search_output",
     "parse_world_monster_search_sent_output",
     "parse_world_monster_status_output",
