@@ -3003,6 +3003,9 @@ if LEVEL > max_level then
     fail("requested monster level exceeds the player's attack limit")
 end
 local view_id = 207
+-- ReqWorldMapSearch argument 6 controls map navigation. Keep background
+-- searches silent so repeated hunts do not move the player's camera.
+local auto_jump = false
 -- The UI sends an explicit zero resource id for monster searches.  Passing
 -- nil here looks harmless in Lua, but the game's request handler treats it as
 -- a different overload and does not dispatch the normal search callback.
@@ -3098,7 +3101,7 @@ state.start = function()
         LEVEL,
         state.resource_id,
         nil,
-        false,
+        auto_jump,
         view_id
     )
     if not request_ok then
