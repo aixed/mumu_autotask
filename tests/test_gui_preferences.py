@@ -8,11 +8,13 @@ from pathlib import Path
 from mumu_autotask.gui_backend import (
     DEFAULT_GUI_CATEGORIES,
     DEFAULT_HUNT_CONCURRENCY,
+    DEFAULT_YETI_RALLY_MINUTES,
     DEFAULT_WORLD_MONSTER_CONCURRENCY,
     DEFAULT_WORLD_MONSTER_LEVEL,
     GUI_PREFERENCES_FILENAME,
     GuiBackendError,
     GuiPreferences,
+    YETI_RALLY_MINUTE_OPTIONS,
 )
 
 
@@ -46,6 +48,10 @@ class GuiPreferencesTests(unittest.TestCase):
             self.assertEqual(
                 preferences.get_world_monster_concurrency("127.0.0.1:16384"),
                 DEFAULT_WORLD_MONSTER_CONCURRENCY,
+            )
+            self.assertEqual(
+                preferences.get_yeti_rally_minutes("127.0.0.1:16384"),
+                DEFAULT_YETI_RALLY_MINUTES,
             )
 
     def test_device_sections_are_saved_immediately_and_independently(self) -> None:
@@ -198,6 +204,29 @@ class GuiPreferencesTests(unittest.TestCase):
                             "127.0.0.1:16384", invalid
                         )
 
+    def test_yeti_rally_minutes_are_saved_per_device_and_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / GUI_PREFERENCES_FILENAME
+            preferences = GuiPreferences(path)
+
+            preferences.set_yeti_rally_minutes("127.0.0.1:16384", 5)
+            preferences.set_yeti_rally_minutes("127.0.0.1:16480", 10)
+
+            reloaded = GuiPreferences(path)
+            self.assertEqual(reloaded.get_yeti_rally_minutes("127.0.0.1:16384"), 5)
+            self.assertEqual(reloaded.get_yeti_rally_minutes("127.0.0.1:16480"), 10)
+            self.assertEqual(
+                reloaded.get_yeti_rally_minutes("unseen-device"),
+                DEFAULT_YETI_RALLY_MINUTES,
+            )
+            self.assertEqual(YETI_RALLY_MINUTE_OPTIONS, (3, 5, 10))
+            for invalid in (0, 4, 11, True, 3.0):
+                with self.subTest(rally_minutes=invalid):
+                    with self.assertRaisesRegex(GuiBackendError, "3/5/10"):
+                        preferences.set_yeti_rally_minutes(  # type: ignore[arg-type]
+                            "127.0.0.1:16384", invalid
+                        )
+
     def test_categories_are_saved_per_device_and_allow_multi_select(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / GUI_PREFERENCES_FILENAME
@@ -257,6 +286,9 @@ class GuiPreferencesTests(unittest.TestCase):
             )
             self.assertEqual(
                 preferences.get_world_monster_concurrency("127.0.0.1:16384"), 4
+            )
+            self.assertEqual(
+                preferences.get_yeti_rally_minutes("127.0.0.1:16384"), 3
             )
             self.assertEqual(
                 preferences.get_selected_categories("127.0.0.1:16384"),

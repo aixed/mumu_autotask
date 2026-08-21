@@ -28,10 +28,14 @@ from mumu_autotask.business import (
     build_world_monster_search_result_lua,
     build_world_monster_status_lua,
     build_world_monster_verify_lua,
+    build_yeti_commit_lua,
+    build_yeti_spawn_lua,
+    build_yeti_status_lua,
     normalize_quality,
     normalize_target_ids,
     normalize_world_monster_level,
     normalize_world_monster_count,
+    normalize_yeti_rally_minutes,
     parse_claim_intel_output,
     parse_battle_commit_output,
     parse_commit_output,
@@ -49,6 +53,9 @@ from mumu_autotask.business import (
     parse_world_monster_search_output,
     parse_world_monster_status_output,
     parse_world_monster_verify_output,
+    parse_yeti_commit_output,
+    parse_yeti_spawn_output,
+    parse_yeti_status_output,
     select_march_target,
     script_sha256,
     validate_role_whitelist,
@@ -839,6 +846,68 @@ class BusinessTests(unittest.TestCase):
                 output.replace("MARCH\t901\tACTIVE", "MARCH\t901\tUNKNOWN"),
                 (901, 902),
             )
+
+    def test_yeti_native_chain_uses_boss_stamina_and_exact_level5_shield(self) -> None:
+        self.assertEqual(normalize_yeti_rally_minutes(3), 3)
+        for value in (0, 4, 15, True, "3"):
+            with self.subTest(value=value), self.assertRaises(BusinessError):
+                normalize_yeti_rally_minutes(value)  # type: ignore[arg-type]
+
+        status = build_yeti_status_lua()
+        spawn = build_yeti_spawn_lua()
+        commit = build_yeti_commit_lua(3)
+        self.assertIn("GetBossData", status)
+        self.assertIn("GetJoinedMassMarchMap", status)
+        self.assertIn("HasOwnActiveMarchByType", status)
+        self.assertIn("GDefine.ActivityDefine.TabState.Show", status)
+        self.assertIn("finish_time <= TimeUtil.GetServerTime()", status)
+        self.assertIn("ReqIceFieldHunterSpawnMonster", spawn)
+        self.assertIn("GCtrl.SpSummonCtrl, nil, item_id", spawn)
+        self.assertNotIn("GCtrl.SpSummonCtrl, nil, activity_id", spawn)
+        self.assertIn("local PREPARE_TIME_INDEX = 1", commit)
+        self.assertIn("GetRecommendedHeroList", commit)
+        self.assertIn("GetMapBossAttackCostEnergy", commit)
+        self.assertNotIn("GetMapMonsterAttackCostEnergy", commit)
+        self.assertIn("soldier = { [YETI_SOLDIER_ID] = 1 }", commit)
+        self.assertIn("RequestMarchStartOff", commit)
+
+    def test_yeti_protocols_preserve_target_and_runtime_guards(self) -> None:
+        status_output = "\n".join((
+            "MUMU_AUTOTASK\t1\tYETI_STATUS",
+            f"ROLE\t{ROLE_HEX}", "KINGDOM\t4549", "QUEUE\t1\t3",
+            "STAMINA\t85", "ACTIVE_RALLIES\t0", "SPAWN_PENDING\t0",
+            "PREPARED\t1", "TARGET\t7200102\t775\t784", "END\t1",
+        ))
+        status = parse_yeti_status_output(status_output)
+        self.assertEqual(
+            (status.monster_id, status.world_x, status.world_y),
+            (7200102, 775, 784),
+        )
+
+        commit_output = "\n".join((
+            "MUMU_AUTOTASK\t1\tYETI_COMMIT",
+            f"ROLE\t{ROLE_HEX}", "KINGDOM\t4549",
+            "TARGET\t7200102\t775\t784", "QUEUE\t1\t3",
+            "STAMINA\t85\t25", "ACTIVE_RALLIES\t0", "SENT\t1",
+            "REASON\tNONE", "END\t1",
+        ))
+        commit = parse_yeti_commit_output(commit_output)
+        self.assertTrue(commit.request_dispatched)
+        self.assertEqual(commit.required_stamina, 25)
+        self.assertEqual(
+            (commit.monster_id, commit.world_x, commit.world_y),
+            (7200102, 775, 784),
+        )
+
+        spawn_output = "\n".join((
+            "MUMU_AUTOTASK\t1\tYETI_SPAWN",
+            f"ROLE\t{ROLE_HEX}", "KINGDOM\t4549", "SENT\t0",
+            "REASON\tTARGET_ALREADY_PREPARED", "END\t1",
+        ))
+        self.assertEqual(
+            parse_yeti_spawn_output(spawn_output).blocked_reason,
+            "target_already_prepared",
+        )
 
 
 if __name__ == "__main__":

@@ -99,7 +99,7 @@ class FakeSession:
 
     def create_script(self, source: str) -> FakeScript:
         self.sources.append(source)
-        is_guard = len(self.sources) == 1
+        is_guard = "const GATE_OFFSET = 0x314890;" in source
         script = FakeScript(
             self.exports,
             fail_load=(self.fail_guard_load if is_guard else self.fail_main_load),
@@ -216,6 +216,11 @@ class FridaDriverTests(unittest.TestCase):
         source = load_agent_source()
         self.assertIn("eglSwapBuffers", source)
         self.assertIn("unity-frame-hook", source)
+        self.assertIn("const unityJobs = []", source)
+        self.assertIn("unityJobs.push", source)
+        self.assertIn("add(0x50).readPointer().isNull()", source)
+        self.assertIn("UNITY_JOB_TIMEOUT_MS = 5000", source)
+        self.assertNotIn("another Unity Lua job is already pending", source)
         self.assertNotIn("frida-java-bridge", source)
         self.assertNotIn("Java.performNow", source)
         self.assertNotIn("Java.registerClass", source)

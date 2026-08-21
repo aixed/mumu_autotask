@@ -209,6 +209,54 @@ class WorldMonsterStatusSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class YetiRallyStatus:
+    role: str
+    kingdom: int
+    current_stamina: int
+    current_marches: int
+    max_marches: int
+    active_rallies: int
+    prepared: bool
+    world_x: int | None = None
+    world_y: int | None = None
+    monster_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class YetiSearchReceipt:
+    role: str
+    kingdom: int
+    ready: bool
+    world_x: int | None
+    world_y: int | None
+    monster_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class YetiCommitReceipt:
+    role: str
+    kingdom: int
+    request_dispatched: bool
+    current_stamina: int
+    required_stamina: int
+    current_marches: int
+    max_marches: int
+    active_rallies: int
+    monster_id: int | None
+    world_x: int | None
+    world_y: int | None
+    blocked_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class YetiSpawnReceipt:
+    role: str
+    kingdom: int
+    request_dispatched: bool
+    blocked_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ClaimReceipt:
     role: str
     kingdom: int
@@ -3522,6 +3570,284 @@ def build_world_monster_status_lua(march_ids: Sequence[int]) -> str:
     )
 
 
+_YETI_COMMON = r'''
+local YETI_MARCH_TYPE = 501
+local YETI_SOLDIER_ID = 10500
+
+local function yeti_activity()
+    if type(GDefine) ~= "table" or type(GDefine.ActivityDefine) ~= "table"
+        or type(GDefine.ActivityDefine.ActivityType) ~= "table"
+        or GDefine.ActivityDefine.ActivityType.IceFieldHunter == nil then
+        fail("ice field hunter activity type is unavailable")
+    end
+    local show_state, activity_id, finish_time = call(
+        GCtrl.ActivityCtrl,
+        "GetShowStateByType",
+        "ice field hunter activity",
+        GDefine.ActivityDefine.ActivityType.IceFieldHunter
+    )
+    activity_id = integer(activity_id, "ice field hunter activity id", false)
+    if type(GDefine.ActivityDefine.TabState) ~= "table"
+        or show_state ~= GDefine.ActivityDefine.TabState.Show then
+        fail("ice field hunter activity is not currently visible")
+    end
+    if type(finish_time) == "number" then
+        if type(TimeUtil) ~= "table" or type(TimeUtil.GetServerTime) ~= "function" then
+            fail("server time is unavailable")
+        end
+        if finish_time <= TimeUtil.GetServerTime() then
+            fail("ice field hunter activity has ended")
+        end
+    end
+    return show_state, activity_id, finish_time
+end
+
+local function yeti_boss(activity_id)
+    local boss = call(GCtrl.IceFieldHunterCtrl, "GetBossData",
+        "ice field hunter boss", activity_id)
+    if boss == nil then return nil end
+    if type(boss) ~= "table" then fail("ice field hunter boss data is invalid") end
+    return {
+        id = integer(boss.id, "yeti monster id", false),
+        x = integer(boss.x, "yeti world x", true),
+        y = integer(boss.y, "yeti world y", true),
+    }
+end
+
+local function march_type(march)
+    for _, method_name in ipairs({ "GetType", "GetMarchType" }) do
+        local value = march_call(march, method_name)
+        if type(value) == "number" then return value end
+    end
+    local data = march_call(march, "GetData")
+    if type(data) == "table" then
+        for _, key in ipairs({ "type", "march_type", "marchType" }) do
+            if type(data[key]) == "number" then return data[key] end
+        end
+    end
+    return nil
+end
+
+local function active_yeti_rallies(kingdom)
+    local function contains_yeti(marches)
+        if type(marches) ~= "table" then return false end
+        for _, march in pairs(marches) do
+            if march_type(march) == YETI_MARCH_TYPE then return true end
+        end
+        return false
+    end
+    if contains_yeti(self_marches(kingdom)) then return 1 end
+    if type(GCtrl.WorldMarchCtrl.GetJoinedMassMarchMap) == "function" then
+        local ok, joined = pcall(
+            GCtrl.WorldMarchCtrl.GetJoinedMassMarchMap,
+            GCtrl.WorldMarchCtrl
+        )
+        if ok and contains_yeti(joined) then return 1 end
+    end
+    if type(GHelper) == "table" and type(GHelper.WorldMarchHelper) == "table"
+        and type(GHelper.WorldMarchHelper.HasOwnActiveMarchByType) == "function" then
+        local ok, active = pcall(
+            GHelper.WorldMarchHelper.HasOwnActiveMarchByType,
+            GDefine.WorldMarchDefine.MARCH_MAP_TYPE.NORMAL,
+            YETI_MARCH_TYPE,
+            true
+        )
+        if ok and active == true then return 1 end
+    end
+    return 0
+end
+
+local function yeti_status_lines(role_hex, kingdom)
+    local _, activity_id = yeti_activity()
+    local boss = yeti_boss(activity_id)
+    local current, maximum = march_capacity()
+    local active = active_yeti_rallies(kingdom)
+    return boss, current, maximum, active, {
+        "ROLE\t" .. role_hex,
+        "KINGDOM\t" .. tostring(kingdom),
+        "QUEUE\t" .. tostring(current) .. "\t" .. tostring(maximum),
+        "STAMINA\t" .. tostring(current_stamina()),
+        "ACTIVE_RALLIES\t" .. tostring(active),
+        "SPAWN_PENDING\t0",
+        "PREPARED\t" .. (boss ~= nil and "1" or "0"),
+        "TARGET\t" .. (boss ~= nil and (
+            tostring(boss.id) .. "\t" .. tostring(boss.x) .. "\t" .. tostring(boss.y)
+        ) or "missing\tmissing\tmissing"),
+    }
+end
+'''
+
+
+_YETI_STATUS_BODY = r'''
+local role_hex, kingdom = identity()
+local _, _, _, _, lines = yeti_status_lines(role_hex, kingdom)
+table.insert(lines, 1, "MUMU_AUTOTASK\t1\tYETI_STATUS")
+lines[#lines + 1] = "END\t1"
+return table.concat(lines, "\n")
+'''
+
+
+_YETI_SPAWN_BODY = r'''
+local role_hex, kingdom = identity()
+local _, activity_id = yeti_activity()
+local boss = yeti_boss(activity_id)
+local active = active_yeti_rallies(kingdom)
+local function result(sent, reason)
+    return table.concat({
+        "MUMU_AUTOTASK\t1\tYETI_SPAWN",
+        "ROLE\t" .. role_hex,
+        "KINGDOM\t" .. tostring(kingdom),
+        "SENT\t" .. sent,
+        "REASON\t" .. reason,
+        "END\t1",
+    }, "\n")
+end
+if boss ~= nil then return result("0", "TARGET_ALREADY_PREPARED") end
+if active > 0 then return result("0", "YETI_RALLY_ACTIVE") end
+local cost = GRead.IceFieldHunterRead.Cost(activity_id)
+if type(cost) ~= "table" or type(cost[1]) ~= "number"
+    or type(cost[2]) ~= "number" then
+    fail("ice field hunter summon cost is unavailable")
+end
+local item_id = integer(cost[1], "ice field hunter summon item id", false)
+local item_count = integer(cost[2], "ice field hunter summon item count", false)
+local enough = false
+if type(GHelper.ItemHelper) == "table"
+    and type(GHelper.ItemHelper.CheckCount) == "function" then
+    local ok, value = pcall(GHelper.ItemHelper.CheckCount, item_id, item_count)
+    enough = ok and value == true
+end
+if not enough then return result("0", "INSUFFICIENT_SUMMON_ITEM") end
+local ok = pcall(GCtrl.SpSummonCtrl.ReqIceFieldHunterSpawnMonster,
+    GCtrl.SpSummonCtrl, nil, item_id)
+if not ok then fail("ice field hunter summon request failed") end
+return result("1", "NONE")
+'''
+
+
+_YETI_COMMIT_BODY = r'''
+local PREPARE_TIME_INDEX = __PREPARE_TIME_INDEX__
+local role_hex, kingdom = identity()
+local _, activity_id = yeti_activity()
+local boss = yeti_boss(activity_id)
+local current, maximum = march_capacity()
+local active = active_yeti_rallies(kingdom)
+local stamina = current_stamina()
+local function result(sent, reason, required)
+    return table.concat({
+        "MUMU_AUTOTASK\t1\tYETI_COMMIT",
+        "ROLE\t" .. role_hex,
+        "KINGDOM\t" .. tostring(kingdom),
+        "TARGET\t" .. (boss ~= nil and (
+            tostring(boss.id) .. "\t" .. tostring(boss.x) .. "\t" .. tostring(boss.y)
+        ) or "missing\tmissing\tmissing"),
+        "QUEUE\t" .. tostring(current) .. "\t" .. tostring(maximum),
+        "STAMINA\t" .. tostring(stamina) .. "\t" .. tostring(required or 0),
+        "ACTIVE_RALLIES\t" .. tostring(active),
+        "SENT\t" .. sent,
+        "REASON\t" .. reason,
+        "END\t1",
+    }, "\n")
+end
+if active > 0 then return result("0", "YETI_RALLY_ACTIVE", 0) end
+if boss == nil then return result("0", "NO_PREPARED_TARGET", 0) end
+if current >= maximum then return result("0", "NO_IDLE_MARCH_QUEUE", 0) end
+local extra = {
+    monsterid = boss.id,
+    prepare_time_index = PREPARE_TIME_INDEX,
+}
+local heroes = GHelper.ExpeditionHelper.GetRecommendedHeroList(
+    false, false, YETI_MARCH_TYPE, boss.id,
+    GDefine.WorldMarchDefine.MARCH_MAP_TYPE.NORMAL, extra)
+if type(heroes) ~= "table"
+    or GHelper.FormationHelper.IsHaveCaptain(heroes) ~= true then
+    fail("yeti formation selected no available captain")
+end
+local hero_ids = GHelper.FormationHelper.DealWithExpeditionInfo(heroes, {})
+if type(hero_ids) ~= "table" or next(hero_ids) == nil then
+    fail("yeti recommended hero payload is unavailable")
+end
+local formation_limit = integer(GHelper.ExpeditionHelper.GetTroopLimit(
+    GDefine.WorldMarchDefine.MARCH_MAP_TYPE.NORMAL,
+    heroes,
+    GDefine.HeroDefine.HeroAttrType.SLG,
+    extra
+), "yeti formation limit", false)
+local open_params = {
+    marchMapType = GDefine.WorldMarchDefine.MARCH_MAP_TYPE.NORMAL,
+    marchType = YETI_MARCH_TYPE,
+    formationNumLimt = formation_limit,
+    targetId = boss.id,
+    isAttack = true,
+}
+local available = GHelper.ExpeditionHelper.GetSoldierInfoByMarchType(
+    YETI_MARCH_TYPE, 0, false, open_params, nil)
+local shield_available = false
+if type(available) == "table" then
+    for _, item in ipairs(available) do
+        if type(item) == "table" and item.id == YETI_SOLDIER_ID
+            and type(item.allNum) == "number" and item.allNum >= 1 then
+            shield_available = true
+            break
+        end
+    end
+end
+if not shield_available then return result("0", "NO_LEVEL5_SHIELD", 0) end
+local base_stamina = integer(GRead.WorldRead.GetMapBossAttackCostEnergy(),
+    "yeti base stamina", false)
+local reduction = GHelper.AttributeHelper.GetCostStaminaEduce(heroes)
+if type(reduction) ~= "number" or reduction < 0 or reduction > 1 then
+    fail("yeti stamina reduction is invalid")
+end
+local required = integer(math.ceil(base_stamina * (1 - reduction)),
+    "yeti required stamina", true)
+if stamina < required then return result("0", "INSUFFICIENT_STAMINA", required) end
+if not GHelper.WorldMarchHelper.CheckHasIdleMarch(
+    GDefine.WorldMarchDefine.MARCH_MAP_TYPE.NORMAL,
+    YETI_MARCH_TYPE,
+    nil,
+    false
+) then
+    return result("0", "NO_IDLE_MARCH_QUEUE", required)
+end
+local ok = pcall(GHelper.WorldMarchHelper.RequestMarchStartOff,
+    GDefine.WorldMarchDefine.MARCH_MAP_TYPE.NORMAL,
+    YETI_MARCH_TYPE,
+    boss.x,
+    boss.y,
+    { hero_id = hero_ids, soldier = { [YETI_SOLDIER_ID] = 1 } },
+    extra)
+if not ok then fail("yeti rally request failed") end
+return result("1", "NONE", required)
+'''
+
+
+def normalize_yeti_rally_minutes(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value not in {3, 5, 10}:
+        raise BusinessError("yeti rally minutes must be one of 3, 5, or 10")
+    return value
+
+
+def _yeti_lua(body: str) -> str:
+    return _finalize_lua(textwrap.dedent(_WORLD_MONSTER_COMMON + _YETI_COMMON + body))
+
+
+def build_yeti_status_lua() -> str:
+    return _yeti_lua(_YETI_STATUS_BODY)
+
+
+def build_yeti_spawn_lua() -> str:
+    return _yeti_lua(_YETI_SPAWN_BODY)
+
+
+def build_yeti_commit_lua(rally_minutes: int) -> str:
+    minutes = normalize_yeti_rally_minutes(rally_minutes)
+    prepare_time_index = {3: 1, 5: 2, 10: 3}[minutes]
+    return _yeti_lua(
+        _YETI_COMMIT_BODY.replace("__PREPARE_TIME_INDEX__", str(prepare_time_index))
+    )
+
+
 def build_close_expedition_lua(roles: Sequence[str]) -> str:
     common = _LUA_COMMON.replace("__ROLE_TABLE__", _lua_role_table(roles))
     return _finalize_lua(textwrap.dedent(common + _CLOSE_EXPEDITION_BODY))
@@ -4368,6 +4694,122 @@ def parse_world_monster_status_output(
     )
 
 
+def parse_yeti_status_output(output: str) -> YetiRallyStatus:
+    lines = _protocol_lines(output, "YETI_STATUS")
+    role, kingdom = _parse_world_monster_identity(lines, "YETI_STATUS")
+    if (
+        len(lines) != 10
+        or len(lines[3]) != 3 or lines[3][0] != "QUEUE"
+        or len(lines[4]) != 2 or lines[4][0] != "STAMINA"
+        or len(lines[5]) != 2 or lines[5][0] != "ACTIVE_RALLIES"
+        or lines[6] not in (["SPAWN_PENDING", "0"], ["SPAWN_PENDING", "1"])
+        or lines[7] not in (["PREPARED", "0"], ["PREPARED", "1"])
+        or len(lines[8]) != 4 or lines[8][0] != "TARGET"
+        or lines[9] != ["END", "1"]
+    ):
+        raise BusinessError("YETI_STATUS output is invalid")
+    current = _parse_integer(lines[3][1], "YETI_STATUS current marches", allow_zero=True)
+    maximum = _parse_integer(lines[3][2], "YETI_STATUS maximum marches", allow_zero=False)
+    stamina = _parse_integer(lines[4][1], "YETI_STATUS stamina", allow_zero=True)
+    active = _parse_integer(lines[5][1], "YETI_STATUS active rallies", allow_zero=True)
+    if current > maximum or active > 1:
+        raise BusinessError("YETI_STATUS queue state is inconsistent")
+    prepared = lines[7][1] == "1"
+    if prepared:
+        monster_id = _parse_integer(lines[8][1], "YETI_STATUS monster id", allow_zero=False)
+        world_x = _parse_integer(lines[8][2], "YETI_STATUS world x", allow_zero=True)
+        world_y = _parse_integer(lines[8][3], "YETI_STATUS world y", allow_zero=True)
+    else:
+        if lines[8][1:] != ["missing", "missing", "missing"]:
+            raise BusinessError("YETI_STATUS target state is inconsistent")
+        monster_id = world_x = world_y = None
+    return YetiRallyStatus(
+        role, kingdom, stamina, current, maximum, active, prepared,
+        world_x, world_y, monster_id,
+    )
+
+
+def parse_yeti_spawn_output(output: str) -> YetiSpawnReceipt:
+    lines = _protocol_lines(output, "YETI_SPAWN")
+    role, kingdom = _parse_world_monster_identity(lines, "YETI_SPAWN")
+    if (
+        len(lines) != 6
+        or lines[3] not in (["SENT", "0"], ["SENT", "1"])
+        or len(lines[4]) != 2 or lines[4][0] != "REASON"
+        or lines[5] != ["END", "1"]
+    ):
+        raise BusinessError("YETI_SPAWN output is invalid")
+    dispatched = lines[3][1] == "1"
+    reason = lines[4][1]
+    allowed = {
+        "TARGET_ALREADY_PREPARED": "target_already_prepared",
+        "YETI_RALLY_ACTIVE": "yeti_rally_active",
+        "SPAWN_PENDING": "spawn_pending",
+        "INSUFFICIENT_SUMMON_ITEM": "insufficient_summon_item",
+    }
+    if dispatched:
+        if reason != "NONE":
+            raise BusinessError("YETI_SPAWN dispatch state is inconsistent")
+        blocked_reason = None
+    else:
+        if reason not in allowed:
+            raise BusinessError("YETI_SPAWN blocked reason is invalid")
+        blocked_reason = allowed[reason]
+    return YetiSpawnReceipt(role, kingdom, dispatched, blocked_reason)
+
+
+def parse_yeti_commit_output(output: str) -> YetiCommitReceipt:
+    lines = _protocol_lines(output, "YETI_COMMIT")
+    role, kingdom = _parse_world_monster_identity(lines, "YETI_COMMIT")
+    if (
+        len(lines) != 10
+        or len(lines[3]) != 4 or lines[3][0] != "TARGET"
+        or len(lines[4]) != 3 or lines[4][0] != "QUEUE"
+        or len(lines[5]) != 3 or lines[5][0] != "STAMINA"
+        or len(lines[6]) != 2 or lines[6][0] != "ACTIVE_RALLIES"
+        or lines[7] not in (["SENT", "0"], ["SENT", "1"])
+        or len(lines[8]) != 2 or lines[8][0] != "REASON"
+        or lines[9] != ["END", "1"]
+    ):
+        raise BusinessError("YETI_COMMIT output is invalid")
+    current = _parse_integer(lines[4][1], "YETI_COMMIT current marches", allow_zero=True)
+    maximum = _parse_integer(lines[4][2], "YETI_COMMIT maximum marches", allow_zero=False)
+    stamina = _parse_integer(lines[5][1], "YETI_COMMIT stamina", allow_zero=True)
+    required = _parse_integer(lines[5][2], "YETI_COMMIT required stamina", allow_zero=True)
+    active = _parse_integer(lines[6][1], "YETI_COMMIT active rallies", allow_zero=True)
+    if current > maximum or active > 1:
+        raise BusinessError("YETI_COMMIT queue state is inconsistent")
+    if lines[3][1:] == ["missing", "missing", "missing"]:
+        monster_id = world_x = world_y = None
+    else:
+        monster_id = _parse_integer(
+            lines[3][1], "YETI_COMMIT monster id", allow_zero=False
+        )
+        world_x = _parse_integer(lines[3][2], "YETI_COMMIT world x", allow_zero=True)
+        world_y = _parse_integer(lines[3][3], "YETI_COMMIT world y", allow_zero=True)
+    dispatched = lines[7][1] == "1"
+    reason = lines[8][1]
+    allowed = {
+        "YETI_RALLY_ACTIVE": "yeti_rally_active",
+        "NO_PREPARED_TARGET": "no_prepared_target",
+        "NO_IDLE_MARCH_QUEUE": "no_idle_march_queue",
+        "NO_LEVEL5_SHIELD": "no_level5_shield",
+        "INSUFFICIENT_STAMINA": "insufficient_stamina",
+    }
+    if dispatched:
+        if reason != "NONE" or current >= maximum or stamina < required or active != 0:
+            raise BusinessError("YETI_COMMIT dispatch state is inconsistent")
+        blocked_reason = None
+    else:
+        if reason not in allowed:
+            raise BusinessError("YETI_COMMIT blocked reason is invalid")
+        blocked_reason = allowed[reason]
+    return YetiCommitReceipt(
+        role, kingdom, dispatched, stamina, required,
+        current, maximum, active, monster_id, world_x, world_y, blocked_reason,
+    )
+
+
 def parse_battle_commit_output(
     output: str,
     allowed_roles: Sequence[str],
@@ -4602,6 +5044,9 @@ __all__ = [
     "WorldMonsterSearchReceipt",
     "WorldMonsterStatusSnapshot",
     "WorldMarchCapacity",
+    "YetiCommitReceipt",
+    "YetiRallyStatus",
+    "YetiSpawnReceipt",
     "build_claim_intel_lua",
     "build_close_expedition_lua",
     "build_commit_march_lua",
@@ -4629,12 +5074,16 @@ __all__ = [
     "build_world_monster_search_result_lua",
     "build_world_monster_status_lua",
     "build_world_monster_verify_lua",
+    "build_yeti_commit_lua",
+    "build_yeti_spawn_lua",
+    "build_yeti_status_lua",
     "normalize_battle_category",
     "normalize_quality",
     "normalize_target_ids",
     "normalize_world_monster_level",
     "normalize_world_monster_count",
     "normalize_world_monster_march_ids",
+    "normalize_yeti_rally_minutes",
     "parse_battle_commit_output",
     "parse_battle_intel_output",
     "parse_battle_verify_output",
@@ -4651,6 +5100,9 @@ __all__ = [
     "parse_toggle_world_output",
     "parse_verify_output",
     "parse_world_monster_commit_output",
+    "parse_yeti_commit_output",
+    "parse_yeti_spawn_output",
+    "parse_yeti_status_output",
     "parse_world_march_capacity_output",
     "parse_world_monster_search_output",
     "parse_world_monster_search_sent_output",

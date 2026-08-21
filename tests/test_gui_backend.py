@@ -4,7 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from mumu_autotask.gui import CATEGORY_META, QUALITY_META, build_parser
 from mumu_autotask.gui_backend import (
@@ -22,11 +22,17 @@ class FakeRunner:
     def __init__(self, outputs: list[str]) -> None:
         self.outputs = list(outputs)
         self.calls: list[tuple[tuple[str, ...], float]] = []
+        self.stream_calls: list[tuple[tuple[str, ...], object]] = []
 
     def run(self, arguments, *, timeout: float) -> CommandResult:
         arguments = tuple(arguments)
         self.calls.append((arguments, timeout))
         return CommandResult(arguments, 0, self.outputs.pop(0), "")
+
+    def run_json_stream(self, arguments, on_payload) -> CommandResult:
+        arguments = tuple(arguments)
+        self.stream_calls.append((arguments, on_payload))
+        return CommandResult(arguments, 0, "", "")
 
 
 class GuiBackendTests(unittest.TestCase):
@@ -153,6 +159,30 @@ class GuiBackendTests(unittest.TestCase):
                 "device-1",
             )
         )
+
+    def test_runner_requests_stream_stop_over_stdin_before_termination(self) -> None:
+        class ControlInput:
+            def __init__(self) -> None:
+                self.values: list[str] = []
+
+            def write(self, value: str) -> None:
+                self.values.append(value)
+
+            def flush(self) -> None:
+                return None
+
+        control = ControlInput()
+        process = Mock()
+        process.poll.return_value = None
+        process.stdin = control
+        runner = CliRunner("config.json", python_executable="python.exe")
+        with patch("mumu_autotask.gui_backend.threading.Thread") as thread:
+            runner._request_stop(process)  # type: ignore[arg-type]
+
+        self.assertEqual(control.values, ["stop\n"])
+        process.terminate.assert_not_called()
+        process.kill.assert_not_called()
+        thread.assert_called_once()
         self.assertFalse(
             runner._command_targets_serial(  # type: ignore[attr-defined]
                 ("python.exe", "-m", "mumu_autotask", "status", "--serial", "device-2"),
@@ -482,6 +512,33 @@ class GuiBackendTests(unittest.TestCase):
                 ),
             ],
         )
+
+    def test_backend_yeti_rally_loop_binds_minutes_and_stream_callback(self) -> None:
+        runner = FakeRunner([])
+        backend = GuiBackend(runner)  # type: ignore[arg-type]
+        events: list[object] = []
+
+        backend.yeti_rally_loop("device-1", 5, events.append)
+
+        self.assertEqual(
+            runner.stream_calls,
+            [
+                (
+                    (
+                        "yeti-rally-loop",
+                        "--serial",
+                        "device-1",
+                        "--rally-minutes",
+                        "5",
+                        "--execute",
+                        "--control-stdin",
+                    ),
+                    events.append,
+                )
+            ],
+        )
+        with self.assertRaisesRegex(GuiBackendError, "3/5/10"):
+            backend.yeti_rally_loop("device-1", 4, events.append)
     def test_backend_wait_and_claim_keep_every_exact_target_id(self) -> None:
         runner = FakeRunner(
             [

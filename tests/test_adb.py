@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import unittest
 from collections.abc import Sequence
+from unittest.mock import patch
 
-from mumu_autotask.adb import AdbClient, AdbError
+from mumu_autotask.adb import (
+    AdbClient,
+    AdbError,
+    _default_binary_runner,
+    _default_runner,
+)
 
 
 class FakeRunner:
@@ -51,6 +58,14 @@ class FakeBinaryRunner:
 
 
 class AdbTests(unittest.TestCase):
+    def test_default_runners_hide_child_console_on_windows(self) -> None:
+        expected = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        with patch("mumu_autotask.adb.subprocess.run") as run:
+            _default_runner(("adb", "devices"), 1.0)
+            self.assertEqual(run.call_args.kwargs["creationflags"], expected)
+            _default_binary_runner(("adb", "exec-out", "screencap"), 1.0)
+            self.assertEqual(run.call_args.kwargs["creationflags"], expected)
+
     def test_parses_connected_devices(self) -> None:
         runner = FakeRunner(
             "List of devices attached\n"

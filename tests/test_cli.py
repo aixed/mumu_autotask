@@ -268,6 +268,8 @@ def business_args(
     concurrency: int | None = 4,
     march_ids: list[int] | None = None,
     return_on_any: bool = False,
+    rally_minutes: int = 3,
+    control_stdin: bool = False,
 ) -> argparse.Namespace:
     return argparse.Namespace(
         command=command,
@@ -288,6 +290,8 @@ def business_args(
         concurrency=concurrency,
         march_ids=march_ids,
         return_on_any=return_on_any,
+        rally_minutes=rally_minutes,
+        control_stdin=control_stdin,
         dry_run=dry_run,
     )
 
@@ -605,6 +609,59 @@ def scene_protocol(
             "END\t1",
         )
     )
+
+
+def yeti_status_protocol(
+    role: str,
+    *,
+    target: tuple[int, int, int] | None = (7200102, 775, 784),
+    active: int = 0,
+    current_marches: int = 0,
+    max_marches: int = 3,
+    stamina: int = 110,
+) -> str:
+    prepared = target is not None
+    target_text = (
+        "\t".join(str(value) for value in target)
+        if target is not None
+        else "missing\tmissing\tmissing"
+    )
+    return "\n".join((
+        "MUMU_AUTOTASK\t1\tYETI_STATUS",
+        f"ROLE\t{role.encode('utf-8').hex()}", "KINGDOM\t4549",
+        f"QUEUE\t{current_marches}\t{max_marches}", f"STAMINA\t{stamina}",
+        f"ACTIVE_RALLIES\t{active}", "SPAWN_PENDING\t0",
+        f"PREPARED\t{int(prepared)}", f"TARGET\t{target_text}", "END\t1",
+    ))
+
+
+def yeti_commit_protocol(
+    role: str,
+    *,
+    target: tuple[int, int, int] = (7200102, 775, 784),
+    sent: bool = True,
+    reason: str = "NONE",
+    current_marches: int = 0,
+    max_marches: int = 3,
+    stamina: int = 110,
+    required: int = 25,
+) -> str:
+    return "\n".join((
+        "MUMU_AUTOTASK\t1\tYETI_COMMIT",
+        f"ROLE\t{role.encode('utf-8').hex()}", "KINGDOM\t4549",
+        "TARGET\t" + "\t".join(str(value) for value in target),
+        f"QUEUE\t{current_marches}\t{max_marches}",
+        f"STAMINA\t{stamina}\t{required}", "ACTIVE_RALLIES\t0",
+        f"SENT\t{int(sent)}", f"REASON\t{reason}", "END\t1",
+    ))
+
+
+def yeti_spawn_protocol(role: str) -> str:
+    return "\n".join((
+        "MUMU_AUTOTASK\t1\tYETI_SPAWN",
+        f"ROLE\t{role.encode('utf-8').hex()}", "KINGDOM\t4549",
+        "SENT\t1", "REASON\tNONE", "END\t1",
+    ))
 
 
 def toggle_world_protocol(role: str) -> str:
@@ -1804,6 +1861,86 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("blocked", event_names)
         self.assertNotIn("dispatch", event_names)
         self.assertEqual(events.count("lua-execute"), 4)
+
+    def test_yeti_loop_locks_old_target_and_never_spawns_while_queue_is_full(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        outputs = (
+            yeti_status_protocol(role, current_marches=3, max_marches=3),
+            yeti_commit_protocol(
+                role,
+                sent=False,
+                reason="NO_IDLE_MARCH_QUEUE",
+                current_marches=3,
+                max_marches=3,
+                required=0,
+            ),
+        )
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, outputs=outputs),
+            ),
+            patch("mumu_autotask.cli.time.sleep", side_effect=KeyboardInterrupt),
+            redirect_stdout(output),
+        ):
+            result_code = execute(
+                business_args(
+                    "yeti-rally-loop",
+                    dry_run=False,
+                    rally_minutes=3,
+                    poll_interval=0.1,
+                ),
+                Settings(devices=(DeviceProfile("device-1"),)),
+            )
+
+        self.assertEqual(result_code, 0, output.getvalue())
+        payloads = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertIn("locked", [item["event"] for item in payloads])
+        blocked = next(item for item in payloads if item["event"] == "blocked")
+        self.assertEqual(blocked["blocked_reason"], "no_idle_march_queue")
+        self.assertNotIn("spawn", [item["event"] for item in payloads])
+        self.assertEqual(events.count("lua-execute"), 2)
+
+    def test_yeti_loop_does_not_resubmit_after_unconfirmed_dispatch(self) -> None:
+        events: list[str] = []
+        role = "打工的"
+        target = (7200102, 775, 784)
+        outputs = (
+            yeti_status_protocol(role, target=target),
+            yeti_commit_protocol(role, target=target),
+            yeti_status_protocol(role, target=target),
+        )
+        output = io.StringIO()
+        with (
+            patch("mumu_autotask.cli._adb", return_value=FakeAdb(events)),
+            patch(
+                "mumu_autotask.cli._client",
+                return_value=FakeClient(events, outputs=outputs),
+            ),
+            patch("mumu_autotask.cli.time.sleep", side_effect=KeyboardInterrupt),
+            redirect_stdout(output),
+        ):
+            result_code = execute(
+                business_args(
+                    "yeti-rally-loop",
+                    dry_run=False,
+                    rally_minutes=3,
+                    poll_interval=0.1,
+                ),
+                Settings(devices=(DeviceProfile("device-1"),)),
+            )
+
+        self.assertEqual(result_code, 0, output.getvalue())
+        event_names = [
+            json.loads(line)["event"] for line in output.getvalue().splitlines()
+        ]
+        self.assertEqual(event_names.count("dispatch"), 1)
+        self.assertNotIn("spawn", event_names)
+        self.assertNotIn("completed", event_names)
+        self.assertEqual(events.count("lua-execute"), 3)
 
     def test_world_monster_status_outputs_returned_and_stamina(self) -> None:
         events: list[str] = []

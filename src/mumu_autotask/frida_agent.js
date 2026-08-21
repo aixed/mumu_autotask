@@ -4,7 +4,8 @@ let bridge = null;
 let bridgeAllocations = [];
 const BRIDGE_CODE_CAPACITY = 16384;
 let unityFrameHook = null;
-let unityJob = null;
+const unityJobs = [];
+const UNITY_JOB_TIMEOUT_MS = 5000;
 
 function attachJniThread() {
   const getCreatedJavaVms = new NativeFunction(
@@ -303,14 +304,20 @@ function ensureUnityFrameHook() {
   const swapBuffers = egl.getExportByName("eglSwapBuffers");
   unityFrameHook = Interceptor.attach(swapBuffers, {
     onEnter() {
-      const job = unityJob;
-      if (job === null) {
+      const job = unityJobs[0];
+      if (job === undefined) {
         return;
       }
-      unityJob = null;
       try {
+        if (!ptr(job.stateAddress).add(0x50).readPointer().isNull()) {
+          return;
+        }
+        unityJobs.shift();
+        clearTimeout(job.timeoutId);
         job.resolve(job.execute());
       } catch (error) {
+        unityJobs.shift();
+        clearTimeout(job.timeoutId);
         job.reject(error);
       }
     },
@@ -320,16 +327,25 @@ function ensureUnityFrameHook() {
 function executeOnUnityThread(current, stateAddress, code, outputCapacity) {
   ensureUnityFrameHook();
   return new Promise((resolve, reject) => {
-    if (unityJob !== null) {
-      reject(new Error("another Unity Lua job is already pending"));
-      return;
-    }
-    unityJob = {
+    const job = {
+      stateAddress,
       execute: () =>
         executeBridgeNow(current, stateAddress, code, outputCapacity),
       resolve,
       reject,
+      timeoutId: null,
     };
+    job.timeoutId = setTimeout(() => {
+      const index = unityJobs.indexOf(job);
+      if (index < 0) {
+        return;
+      }
+      unityJobs.splice(index, 1);
+      reject(new Error(
+        "Unity Lua execution did not reach an idle main-state frame within 5 seconds",
+      ));
+    }, UNITY_JOB_TIMEOUT_MS);
+    unityJobs.push(job);
   });
 }
 

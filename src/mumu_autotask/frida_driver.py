@@ -432,6 +432,7 @@ class FridaLuaClient:
         self._exports: Any | None = None
         self._process: ProcessInfo | None = None
         self._initialized = False
+        self._session_detached = threading.Event()
         self.messages: list[Mapping[str, Any]] = []
 
     def _api(self) -> Any:
@@ -541,11 +542,12 @@ class FridaLuaClient:
         exports = None
         try:
             session = self._remote_device().attach(process.pid)
+            if hasattr(session, "on"):
+                session.on("detached", self._on_detached)
             guard_script = session.create_script(load_houdini_guard_source())
             if hasattr(guard_script, "on"):
                 guard_script.on("message", self._on_message)
             guard_script.load()
-
             script = session.create_script(self.agent_source or load_agent_source())
             if hasattr(script, "on"):
                 script.on("message", self._on_message)
@@ -567,10 +569,43 @@ class FridaLuaClient:
                 f"cannot attach to PID {process.pid} at {self.host}: {exc}"
             ) from exc
         self._session = session
+        self._session_detached.clear()
         self._guard_script = guard_script
         self._script = script
         self._exports = exports
         return process
+
+    def _on_detached(self, *args: Any) -> None:
+        self._session_detached.set()
+
+    @property
+    def session_detached(self) -> bool:
+        return self._session_detached.is_set()
+
+    @property
+    def native_hooks_installed(self) -> bool:
+        return self._guard_script is not None
+
+    def _ensure_guard(self) -> None:
+        if self._guard_script is not None:
+            return
+        session = self._session
+        if session is None:
+            raise FridaDriverError("connect() must be called before installing the guard")
+        guard_script = None
+        try:
+            guard_script = session.create_script(load_houdini_guard_source())
+            if hasattr(guard_script, "on"):
+                guard_script.on("message", self._on_message)
+            guard_script.load()
+        except Exception as exc:
+            if guard_script is not None and hasattr(guard_script, "unload"):
+                try:
+                    guard_script.unload()
+                except Exception:
+                    pass
+            raise FridaDriverError(f"cannot install Houdini guard: {exc}") from exc
+        self._guard_script = guard_script
 
     def connect(self) -> ProcessInfo:
         if self._session is not None:
@@ -649,6 +684,7 @@ class FridaLuaClient:
                 "output capacity must be an integer between 2 and 16384"
             )
         exports = self._require_exports()
+        self._ensure_guard()
         try:
             response = exports.execute(f"0x{address:x}", code, output_capacity)
         except Exception as exc:

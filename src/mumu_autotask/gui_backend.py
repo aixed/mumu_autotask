@@ -35,6 +35,8 @@ DEFAULT_WORLD_MONSTER_LEVEL = 16
 MIN_WORLD_MONSTER_CONCURRENCY = 1
 MAX_WORLD_MONSTER_CONCURRENCY = 4
 DEFAULT_WORLD_MONSTER_CONCURRENCY = 4
+YETI_RALLY_MINUTE_OPTIONS = (3, 5, 10)
+DEFAULT_YETI_RALLY_MINUTES = 3
 GUI_PREFERENCES_FILENAME = "mumu_autotask_gui_preferences.json"
 
 
@@ -191,6 +193,28 @@ class GuiPreferences:
             self._write(updated)
             self._memory_data = updated
 
+    def get_yeti_rally_minutes(self, serial: str) -> int:
+        serial = self._validate_serial(serial)
+        with self._lock:
+            data = self._read()
+            section = data["devices"].get(serial)
+            if section is None:
+                return DEFAULT_YETI_RALLY_MINUTES
+            return int(section["yeti_rally_minutes"])
+
+    def set_yeti_rally_minutes(self, serial: str, value: int) -> None:
+        serial = self._validate_serial(serial)
+        rally_minutes = self._validate_yeti_rally_minutes(value)
+        with self._lock:
+            data = self._read()
+            devices = dict(data["devices"])
+            section = dict(devices.get(serial, self._default_device_section()))
+            section["yeti_rally_minutes"] = rally_minutes
+            devices[serial] = section
+            updated = {"version": 1, "devices": devices}
+            self._write(updated)
+            self._memory_data = updated
+
     @staticmethod
     def _empty_data() -> dict[str, Any]:
         return {"version": 1, "devices": {}}
@@ -209,6 +233,7 @@ class GuiPreferences:
             "concurrency": DEFAULT_HUNT_CONCURRENCY,
             "world_monster_level": DEFAULT_WORLD_MONSTER_LEVEL,
             "world_monster_concurrency": DEFAULT_WORLD_MONSTER_CONCURRENCY,
+            "yeti_rally_minutes": DEFAULT_YETI_RALLY_MINUTES,
         }
 
     @staticmethod
@@ -284,6 +309,17 @@ class GuiPreferences:
                 "搜索野兽并发出征数必须是 "
                 f"{MIN_WORLD_MONSTER_CONCURRENCY}-{MAX_WORLD_MONSTER_CONCURRENCY} 的整数"
             )
+        return value
+
+    @staticmethod
+    def _validate_yeti_rally_minutes(value: int) -> int:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value not in YETI_RALLY_MINUTE_OPTIONS
+        ):
+            choices = "/".join(str(item) for item in YETI_RALLY_MINUTE_OPTIONS)
+            raise GuiBackendError(f"雪怪集结时间必须是 {choices} 分钟之一")
         return value
 
     def _read(self) -> dict[str, Any]:
@@ -372,12 +408,16 @@ class GuiPreferences:
                     DEFAULT_WORLD_MONSTER_CONCURRENCY,
                 )
             )
+            yeti_rally_minutes = cls._validate_yeti_rally_minutes(
+                section.get("yeti_rally_minutes", DEFAULT_YETI_RALLY_MINUTES)
+            )
             validated[serial] = {
                 "categories": categories,
                 "qualities": normalized,
                 "concurrency": concurrency,
                 "world_monster_level": world_monster_level,
                 "world_monster_concurrency": world_monster_concurrency,
+                "yeti_rally_minutes": yeti_rally_minutes,
             }
         return {"version": 1, "devices": validated}
 
@@ -624,6 +664,7 @@ class CliRunner:
                 command,
                 cwd=self.config_path.parent,
                 env=environment,
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -657,12 +698,12 @@ class CliRunner:
                 try:
                     payload = json.loads(stripped)
                 except json.JSONDecodeError as exc:
-                    process.kill()
+                    self._request_stop(process)
                     raise GuiBackendError(
                         f"常驻命令返回了无效 JSON：第 {exc.lineno} 行"
                     ) from exc
                 if not isinstance(payload, dict):
-                    process.kill()
+                    self._request_stop(process)
                     raise GuiBackendError("常驻命令事件必须是 JSON 对象")
                 on_payload(payload)
             returncode = process.wait()
@@ -686,7 +727,7 @@ class CliRunner:
             processes = tuple(self._processes)
         for process in processes:
             if process.poll() is None:
-                process.kill()
+                self._request_stop(process)
 
     def cancel_serial(self, serial: str) -> None:
         with self._lock:
@@ -696,6 +737,45 @@ class CliRunner:
                 if self._command_targets_serial(command, serial)
             )
         for process in processes:
+            if process.poll() is None:
+                self._request_stop(process)
+
+    @staticmethod
+    def _request_stop(process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        stdin = process.stdin
+        if stdin is not None:
+            try:
+                stdin.write("stop\n")
+                stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+            else:
+                threading.Thread(
+                    target=CliRunner._force_stop_after_timeout,
+                    args=(process,),
+                    name="mumu-autotask-stop-timeout",
+                    daemon=True,
+                ).start()
+                return
+        CliRunner._terminate_process(process)
+
+    @staticmethod
+    def _force_stop_after_timeout(process: subprocess.Popen[str]) -> None:
+        try:
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            CliRunner._terminate_process(process)
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=2.0)
+        except (OSError, subprocess.TimeoutExpired):
             if process.poll() is None:
                 process.kill()
 
@@ -764,6 +844,12 @@ class GuiBackend:
 
     def set_world_monster_concurrency(self, serial: str, value: int) -> None:
         self.preferences.set_world_monster_concurrency(serial, value)
+
+    def get_yeti_rally_minutes(self, serial: str) -> int:
+        return self.preferences.get_yeti_rally_minutes(serial)
+
+    def set_yeti_rally_minutes(self, serial: str, value: int) -> None:
+        self.preferences.set_yeti_rally_minutes(serial, value)
 
     def connect_devices(self) -> str:
         result = self.runner.run(("devices", "--connect"), timeout=30)
@@ -1059,9 +1145,29 @@ class GuiBackend:
         if concurrency is not None:
             concurrency = GuiPreferences._validate_world_monster_concurrency(concurrency)
             arguments.extend(("--concurrency", str(concurrency)))
-        arguments.append("--execute")
+        arguments.extend(("--execute", "--control-stdin"))
         self.runner.run_json_stream(
             arguments,
+            on_event,
+        )
+
+    def yeti_rally_loop(
+        self,
+        serial: str,
+        rally_minutes: int,
+        on_event: Callable[[Mapping[str, Any]], None],
+    ) -> None:
+        rally_minutes = GuiPreferences._validate_yeti_rally_minutes(rally_minutes)
+        self.runner.run_json_stream(
+            (
+                "yeti-rally-loop",
+                "--serial",
+                serial,
+                "--rally-minutes",
+                str(rally_minutes),
+                "--execute",
+                "--control-stdin",
+            ),
             on_event,
         )
 
@@ -1184,6 +1290,7 @@ __all__ = [
     "DEFAULT_GUI_CATEGORY",
     "DEFAULT_GUI_QUALITIES",
     "DEFAULT_HUNT_CONCURRENCY",
+    "DEFAULT_YETI_RALLY_MINUTES",
     "GUI_CATEGORY_ORDER",
     "GUI_PREFERENCES_FILENAME",
     "GUI_QUALITY_ORDER",
@@ -1192,6 +1299,7 @@ __all__ = [
     "GuiPreferences",
     "MAX_HUNT_CONCURRENCY",
     "MIN_HUNT_CONCURRENCY",
+    "YETI_RALLY_MINUTE_OPTIONS",
     "console_python_executable",
     "parse_json_lines",
 ]

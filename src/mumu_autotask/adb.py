@@ -126,6 +126,7 @@ def _foreground_from_dump(output: str, source: str) -> ForegroundActivity:
 def _default_runner(
     args: Sequence[str], timeout: float
 ) -> subprocess.CompletedProcess[str]:
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     return subprocess.run(
         list(args),
         capture_output=True,
@@ -134,17 +135,20 @@ def _default_runner(
         errors="replace",
         timeout=timeout,
         check=False,
+        creationflags=creationflags,
     )
 
 
 def _default_binary_runner(
     args: Sequence[str], timeout: float
 ) -> subprocess.CompletedProcess[bytes]:
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     return subprocess.run(
         list(args),
         capture_output=True,
         timeout=timeout,
         check=False,
+        creationflags=creationflags,
     )
 
 

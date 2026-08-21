@@ -20,6 +20,7 @@ from .config import ConfigError, DeviceProfile, Settings, load_settings
 from .gui_backend import (
     DEFAULT_GUI_CATEGORIES,
     DEFAULT_HUNT_CONCURRENCY,
+    DEFAULT_YETI_RALLY_MINUTES,
     DEFAULT_WORLD_MONSTER_CONCURRENCY,
     DEFAULT_WORLD_MONSTER_LEVEL,
     MAX_HUNT_CONCURRENCY,
@@ -28,6 +29,7 @@ from .gui_backend import (
     MIN_HUNT_CONCURRENCY,
     MIN_WORLD_MONSTER_CONCURRENCY,
     MIN_WORLD_MONSTER_LEVEL,
+    YETI_RALLY_MINUTE_OPTIONS,
     CliRunner,
     GuiBackend,
     GuiBackendError,
@@ -1930,6 +1932,11 @@ class DeviceManagerWindow:
         self.world_hunt_generation = 0
         self.world_poll_failures = 0
         self.world_dispatch_count = 0
+        self.yeti_running = False
+        self.yeti_operation_inflight = False
+        self.yeti_generation = 0
+        self.yeti_event_after_id: str | None = None
+        self.yeti_event_queue: queue.Queue[Mapping[str, Any]] = queue.Queue()
         self._follow_after_id: str | None = None
         self._last_follow_geometry: str | None = None
         self._emulator_visible = False
@@ -1998,6 +2005,18 @@ class DeviceManagerWindow:
         except Exception as exc:
             preference_errors.append(f"搜索野兽等级：{exc}")
             world_monster_level = DEFAULT_WORLD_MONSTER_LEVEL
+        load_yeti_minutes = getattr(self.backend, "get_yeti_rally_minutes", None)
+        try:
+            yeti_rally_minutes = (
+                int(load_yeti_minutes(self.profile.serial))
+                if callable(load_yeti_minutes)
+                else DEFAULT_YETI_RALLY_MINUTES
+            )
+            if yeti_rally_minutes not in YETI_RALLY_MINUTE_OPTIONS:
+                raise ValueError("雪怪集结时间必须是 3/5/10 分钟")
+        except Exception as exc:
+            preference_errors.append(f"雪怪集结时间：{exc}")
+            yeti_rally_minutes = DEFAULT_YETI_RALLY_MINUTES
         self.identity_text = tk.StringVar(
             value="尚未读取情报  |  领主体力：未读取"
         )
@@ -2032,6 +2051,13 @@ class DeviceManagerWindow:
         self.world_concurrency_text = tk.StringVar(value="自动读取")
         self.world_hunt_status_text = tk.StringVar(
             value="未启动  |  选择等级后开始"
+        )
+        self.yeti_minutes_var = tk.IntVar(
+            master=self.window,
+            value=yeti_rally_minutes,
+        )
+        self.yeti_status_text = tk.StringVar(
+            value="未启动  |  一次只处理一个雪怪"
         )
         self._build()
         self.window.bind("<Control-Return>", self._start_hunt_from_event)
@@ -2153,8 +2179,10 @@ class DeviceManagerWindow:
         self.notebook.grid(row=2, column=0, sticky="nsew")
         intel_tab = ttk.Frame(self.notebook, padding=(5, 6, 5, 5))
         world_tab = ttk.Frame(self.notebook, padding=(8, 8, 8, 7))
+        yeti_tab = ttk.Frame(self.notebook, padding=(8, 8, 8, 7))
         self.notebook.add(intel_tab, text="情报任务")
         self.notebook.add(world_tab, text="搜索野兽")
+        self.notebook.add(yeti_tab, text="雪怪")
         intel_tab.columnconfigure(0, weight=1)
         intel_tab.rowconfigure(1, weight=1)
 
@@ -2396,6 +2424,51 @@ class DeviceManagerWindow:
         )
         self.world_hunt_button.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(7, 0))
 
+        yeti_tab.columnconfigure(0, weight=1)
+        yeti_settings = ttk.LabelFrame(
+            yeti_tab,
+            text="失控的雪怪集结",
+            padding=(8, 8),
+        )
+        yeti_settings.grid(row=0, column=0, sticky="ew")
+        ttk.Label(yeti_settings, text="集结时间").grid(
+            row=0, column=0, sticky="w", padx=(0, 12)
+        )
+        self.yeti_minute_buttons: list[ttk.Radiobutton] = []
+        for column, minutes in enumerate(YETI_RALLY_MINUTE_OPTIONS, start=1):
+            button = ttk.Radiobutton(
+                yeti_settings,
+                text=f"{minutes} 分钟",
+                value=minutes,
+                variable=self.yeti_minutes_var,
+                command=self._yeti_minutes_changed,
+            )
+            button.grid(row=0, column=column, sticky="w", padx=(0, 8))
+            self.yeti_minute_buttons.append(button)
+        ttk.Label(
+            yeti_settings,
+            text="英雄实时推荐；固定 Lv.5 盾兵 1 个；不会覆盖已搜索目标。",
+            style="Subtle.TLabel",
+            wraplength=360,
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(9, 0))
+
+        yeti_state = ttk.LabelFrame(yeti_tab, text="运行状态", padding=(8, 8))
+        yeti_state.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        yeti_state.columnconfigure(0, weight=1)
+        ttk.Label(
+            yeti_state,
+            textvariable=self.yeti_status_text,
+            style="Status.TLabel",
+            wraplength=360,
+        ).grid(row=0, column=0, sticky="w")
+        self.yeti_button = ttk.Button(
+            yeti_state,
+            text="开始雪怪集结",
+            style="Primary.TButton",
+            command=self._toggle_yeti,
+        )
+        self.yeti_button.grid(row=1, column=0, sticky="ew", pady=(7, 0))
+
         log_frame = ttk.LabelFrame(outer, text="运行记录", padding=(5, 5))
         log_frame.grid(row=3, column=0, sticky="nsew", pady=(7, 0))
         log_frame.rowconfigure(0, weight=1)
@@ -2608,11 +2681,34 @@ class DeviceManagerWindow:
             except Exception as exc:
                 self._log(f"搜索野兽等级保存失败：{exc}")
 
+    def _yeti_minutes_changed(self) -> None:
+        minutes = int(self.yeti_minutes_var.get())
+        save_minutes = getattr(self.backend, "set_yeti_rally_minutes", None)
+        if callable(save_minutes):
+            try:
+                save_minutes(self.profile.serial, minutes)
+            except Exception as exc:
+                self._log(f"雪怪集结时间保存失败：{exc}")
+
+    def _update_yeti_controls(self) -> None:
+        if not hasattr(self, "yeti_button"):
+            return
+        running = bool(getattr(self, "yeti_running", False))
+        other_running = bool(getattr(self, "world_hunt_running", False))
+        locked = running or other_running or bool(getattr(self, "busy", False))
+        for button in self.yeti_minute_buttons:
+            button.configure(state="disabled" if locked else "normal")
+        self.yeti_button.configure(
+            text="停止雪怪集结" if running else "开始雪怪集结",
+            state="normal" if running or not (other_running or self.busy) else "disabled",
+        )
+
     def _update_world_hunt_controls(self) -> None:
         if not hasattr(self, "world_hunt_button"):
             return
         running = bool(getattr(self, "world_hunt_running", False))
-        locked = running or bool(getattr(self, "busy", False))
+        yeti_running = bool(getattr(self, "yeti_running", False))
+        locked = running or yeti_running or bool(getattr(self, "busy", False))
         if hasattr(self, "toggle_world_button"):
             self.toggle_world_button.configure(state="disabled" if locked else "normal")
         if hasattr(self, "restart_game_button"):
@@ -2622,7 +2718,7 @@ class DeviceManagerWindow:
             text="停止补充出征" if running else "开始搜索并攻击",
             state=(
                 "normal"
-                if running or not bool(getattr(self, "busy", False))
+                if running or not (bool(getattr(self, "busy", False)) or yeti_running)
                 else "disabled"
             ),
         )
@@ -2642,6 +2738,172 @@ class DeviceManagerWindow:
                 check.configure(state="normal")
             self.concurrency_scale.configure(state="normal")
             self._update_hunt_button()
+        self._update_yeti_controls()
+
+    def _toggle_yeti(self) -> None:
+        if self.yeti_running:
+            self.stop_yeti("用户已停止雪怪集结")
+        else:
+            self.start_yeti()
+
+    def start_yeti(self) -> None:
+        if self.busy or self.world_hunt_running:
+            messagebox.showwarning(
+                "暂时无法开始",
+                "当前设备正在执行情报或搜索野兽任务，请先停止该任务。",
+                parent=self.window,
+            )
+            return
+        if self.yeti_running:
+            return
+        minutes = int(self.yeti_minutes_var.get())
+        if minutes not in YETI_RALLY_MINUTE_OPTIONS:
+            messagebox.showwarning(
+                "集结时间无效", "集结时间必须是 3、5 或 10 分钟。", parent=self.window
+            )
+            return
+        self.yeti_generation += 1
+        generation = self.yeti_generation
+        self.yeti_event_queue = queue.Queue()
+        self.yeti_running = True
+        self.yeti_operation_inflight = True
+        self.yeti_status_text.set("正在读取已搜索雪怪和当前集结状态...")
+        self._update_world_hunt_controls()
+        self._log(
+            f"雪怪集结已启动：集结时间冻结为 {minutes} 分钟；"
+            "优先处理游戏中已搜索但未出征的雪怪。"
+        )
+        self._schedule_yeti_event_drain(generation)
+        self.dispatcher.submit(
+            lambda: self.backend.yeti_rally_loop(
+                self.profile.serial,
+                minutes,
+                self.yeti_event_queue.put,
+            ),
+            lambda value, error, generation=generation: self._yeti_loop_finished(
+                generation, value, error
+            ),
+        )
+
+    def stop_yeti(
+        self,
+        reason: str = "雪怪集结已停止",
+        *,
+        cancel_inflight: bool = True,
+    ) -> None:
+        was_running = bool(getattr(self, "yeti_running", False))
+        self.yeti_running = False
+        self.yeti_generation += 1
+        after_id = getattr(self, "yeti_event_after_id", None)
+        if after_id is not None:
+            try:
+                self.window.after_cancel(after_id)
+            except tk.TclError:
+                pass
+        self.yeti_event_after_id = None
+        if cancel_inflight and self.yeti_operation_inflight:
+            cancel_serial = getattr(self.backend.runner, "cancel_serial", None)
+            if callable(cancel_serial):
+                cancel_serial(self.profile.serial)
+        self.yeti_operation_inflight = False
+        self.yeti_status_text.set(f"已停止  |  {reason}")
+        self._update_world_hunt_controls()
+        if was_running:
+            self._log(f"{reason}；已创建的游戏集结不会被召回。")
+
+    def _schedule_yeti_event_drain(self, generation: int) -> None:
+        if not self.exists or not self.yeti_running or generation != self.yeti_generation:
+            return
+        self.yeti_event_after_id = self.window.after(
+            100,
+            lambda generation=generation: self._drain_yeti_events(generation),
+        )
+
+    def _drain_yeti_events(self, generation: int) -> None:
+        self.yeti_event_after_id = None
+        if generation != self.yeti_generation or not self.exists:
+            return
+        while True:
+            try:
+                payload = self.yeti_event_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._apply_yeti_event(generation, payload)
+            if generation != self.yeti_generation:
+                return
+        self._schedule_yeti_event_drain(generation)
+
+    def _apply_yeti_event(self, generation: int, payload: Mapping[str, Any]) -> None:
+        if payload.get("serial") != self.profile.serial:
+            self.stop_yeti("常驻会话事件的设备不匹配")
+            return
+        event = str(payload.get("event", "status")).lower()
+        stamina = self._valid_stamina(payload.get("current_stamina"))
+        if stamina is not None:
+            self._set_current_stamina(stamina)
+        current = payload.get("current_march_count")
+        maximum = payload.get("max_march_count")
+        queue_text = ""
+        if (
+            isinstance(current, int) and not isinstance(current, bool) and current >= 0
+            and isinstance(maximum, int) and not isinstance(maximum, bool) and maximum > 0
+        ):
+            queue_text = f"  |  行军 {current}/{maximum}"
+        phase_labels = {
+            "startup": "检查状态",
+            "spawning": "生成雪怪",
+            "target_locked": "目标已锁定",
+            "waiting_departure": "等待出征确认",
+            "waiting_clear": "等待雪怪消失",
+        }
+        phase = phase_labels.get(str(payload.get("phase", "")), "运行中")
+        target_text = ""
+        monster_id = payload.get("monster_id")
+        if isinstance(monster_id, int) and monster_id > 0:
+            target_text = (
+                f"  |  目标 {monster_id} @ "
+                f"({payload.get('world_x', '-')},{payload.get('world_y', '-')})"
+            )
+        self.yeti_status_text.set(f"{phase}{queue_text}{target_text}")
+        if event == "dispatch":
+            self._log(
+                f"雪怪集结已提交：目标 {monster_id} @ "
+                f"({payload.get('world_x', '-')}, {payload.get('world_y', '-')})，"
+                f"所需体力 {payload.get('required_stamina', '-')}。"
+            )
+        elif event in {"spawn", "adopted", "departed", "completed", "retry"}:
+            self._log(str(payload.get("detail") or phase))
+        elif event == "blocked":
+            reason = str(payload.get("blocked_reason") or "条件暂不满足")
+            detail = str(payload.get("detail") or "保留当前雪怪并等待重试。")
+            self._log(f"雪怪集结等待：{reason}；{detail}")
+        elif event == "error":
+            self.stop_yeti(
+                str(payload.get("error") or "雪怪常驻会话出错"),
+                cancel_inflight=False,
+            )
+        elif event == "stopped":
+            self.stop_yeti(
+                str(payload.get("reason") or "雪怪常驻会话已停止"),
+                cancel_inflight=False,
+            )
+
+    def _yeti_loop_finished(
+        self,
+        generation: int,
+        _value: Any | None,
+        error: Exception | None,
+    ) -> None:
+        if generation != self.yeti_generation or not self.exists:
+            return
+        self._drain_yeti_events(generation)
+        if generation != self.yeti_generation:
+            return
+        self.yeti_operation_inflight = False
+        if error is not None:
+            self.stop_yeti(f"雪怪常驻命令结束：{error}", cancel_inflight=False)
+        else:
+            self.stop_yeti("雪怪常驻会话已结束", cancel_inflight=False)
 
     def _toggle_world_hunt(self) -> None:
         if self.world_hunt_running:
@@ -2650,7 +2912,7 @@ class DeviceManagerWindow:
             self.start_world_hunt()
 
     def start_world_hunt(self) -> None:
-        if self.busy:
+        if self.busy or getattr(self, "yeti_running", False):
             messagebox.showwarning(
                 "暂时无法开始",
                 "当前正在处理情报任务，请等待该操作完成。",
@@ -3160,7 +3422,8 @@ class DeviceManagerWindow:
             self._schedule_world_hunt_poll(generation)
 
     def refresh_intel(self) -> None:
-        if self.busy or getattr(self, "world_hunt_running", False):
+        if self.busy or getattr(self, "world_hunt_running", False) \
+                or getattr(self, "yeti_running", False):
             return
         self.current_items = []
         self._render_items()
@@ -3174,7 +3437,8 @@ class DeviceManagerWindow:
     def toggle_world(self) -> None:
         """Switch city/world by invoking the native entrance Button event."""
 
-        if self.busy or getattr(self, "world_hunt_running", False):
+        if self.busy or getattr(self, "world_hunt_running", False) \
+                or getattr(self, "yeti_running", False):
             self._log("当前任务执行中，暂不能切换野外/城镇。")
             return
         self._set_busy(True, "正在调用野外/城镇切换事件...")
@@ -3187,7 +3451,8 @@ class DeviceManagerWindow:
     def restart_game(self) -> None:
         """Restart only this device's game process through ADB."""
 
-        if self.busy or getattr(self, "world_hunt_running", False):
+        if self.busy or getattr(self, "world_hunt_running", False) \
+                or getattr(self, "yeti_running", False):
             self._log("当前任务执行中，暂不能重启游戏。")
             return
         self._set_busy(True, "正在重启游戏...")
@@ -3316,7 +3581,8 @@ class DeviceManagerWindow:
         return "break"
 
     def start_hunt(self) -> None:
-        if self.busy or getattr(self, "world_hunt_running", False):
+        if self.busy or getattr(self, "world_hunt_running", False) \
+                or getattr(self, "yeti_running", False):
             return
         categories = self._selected_categories()
         selected_qualities = self._selected_qualities()
@@ -4329,10 +4595,13 @@ class DeviceManagerWindow:
         if self._closing:
             return
         world_running = bool(getattr(self, "world_hunt_running", False))
-        if confirm and ((self.busy and self.hunt_batch is not None) or world_running):
+        yeti_running = bool(getattr(self, "yeti_running", False))
+        if confirm and (
+            (self.busy and self.hunt_batch is not None) or world_running or yeti_running
+        ):
             should_close = messagebox.askyesno(
                 "任务正在执行",
-                "当前正在处理出征、领取或连续搜索野兽。"
+                "当前正在处理出征、连续搜索野兽或雪怪集结。"
                 "是否取消该设备后台命令并关闭管理窗口？",
                 parent=self.window,
             )
@@ -4341,7 +4610,9 @@ class DeviceManagerWindow:
         self._closing = True
         if world_running:
             self.stop_world_hunt("管理窗口已关闭")
-        if self.busy or world_running:
+        if yeti_running:
+            self.stop_yeti("管理窗口已关闭")
+        if self.busy or world_running or yeti_running:
             cancel_serial = getattr(self.backend.runner, "cancel_serial", None)
             if callable(cancel_serial):
                 cancel_serial(self.profile.serial)

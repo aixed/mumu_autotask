@@ -11,6 +11,7 @@ recon/captures/
 config.json
 mumu_autotask_gui_preferences.json
 *.log
+.mumu-frida-worker-*.log
 recon/static/
 recon/native/
 recon/native_extract/

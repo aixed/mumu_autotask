@@ -6,6 +6,7 @@ import logging
 import math
 import signal
 import sys
+import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -43,12 +44,16 @@ from .business import (
     build_world_monster_search_result_lua,
     build_world_monster_status_lua,
     build_world_monster_verify_lua,
+    build_yeti_commit_lua,
+    build_yeti_spawn_lua,
+    build_yeti_status_lua,
     normalize_battle_category,
     normalize_quality,
     normalize_target_ids,
     normalize_world_monster_level,
     normalize_world_monster_count,
     normalize_world_monster_march_ids,
+    normalize_yeti_rally_minutes,
     parse_battle_commit_output,
     parse_battle_intel_output,
     parse_battle_verify_output,
@@ -67,6 +72,9 @@ from .business import (
     parse_world_monster_search_sent_output,
     parse_world_monster_status_output,
     parse_world_monster_verify_output,
+    parse_yeti_commit_output,
+    parse_yeti_spawn_output,
+    parse_yeti_status_output,
     select_battle_target,
     select_march_target,
     script_sha256,
@@ -81,6 +89,7 @@ from .frida_driver import (
     LuaExecutionResult,
     ProcessInfo,
 )
+from .frida_worker import PersistentFridaClient
 from .kingdom import KingdomGuard, KingdomGuardError, KingdomStatus
 from .logging_utils import configure_logging
 from .lua_safety import LuaSafetyError, require_safe_lua
@@ -580,7 +589,42 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="hold one Frida session and continuously refill returned marches",
     )
+    world_monster_loop.add_argument(
+        "--control-stdin",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     world_monster_loop.set_defaults(dry_run=True)
+
+    yeti_rally_loop = subparsers.add_parser(
+        "yeti-rally-loop",
+        help="continuously summon and rally the Ice Field Hunter yeti",
+    )
+    yeti_rally_loop.add_argument("--serial", required=True)
+    yeti_rally_loop.add_argument(
+        "--rally-minutes",
+        required=True,
+        type=int,
+        help="rally preparation time: 3, 5, or 10 minutes",
+    )
+    yeti_rally_loop.add_argument(
+        "--poll-interval",
+        type=float,
+        default=1.5,
+        help="seconds between native yeti-state polls (default: 1.5)",
+    )
+    yeti_rally_loop.add_argument(
+        "--execute",
+        dest="dry_run",
+        action="store_false",
+        help="hold one game session and process one yeti at a time",
+    )
+    yeti_rally_loop.add_argument(
+        "--control-stdin",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    yeti_rally_loop.set_defaults(dry_run=True)
 
     world_monster_status = subparsers.add_parser(
         "world-monster-status",
@@ -896,7 +940,12 @@ def _client(
     *,
     pid: int | None = None,
     adb: AdbClient | None = None,
-) -> FridaLuaClient:
+    config_path: str | Path | None = None,
+) -> FridaLuaClient | PersistentFridaClient:
+    if config_path is not None:
+        if pid is None:
+            raise FridaDriverError("persistent Frida worker requires the current game PID")
+        return PersistentFridaClient(profile, config_path, pid=pid)
     return FridaLuaClient(
         profile.frida_host,
         process_name=profile.process_name,
@@ -1271,13 +1320,14 @@ def _execute_lua_when_idle(
     deadline = time.monotonic() + timeout_seconds
     while True:
         _require_same_foreground_process(adb, profile, process, operation)
-        _wait_idle_lua_state(
-            scanner,
-            process,
-            state,
-            timeout_seconds=max(0.05, min(1.0, timeout_seconds)),
-            poll_interval_seconds=poll_interval_seconds,
-        )
+        if not isinstance(client, PersistentFridaClient):
+            _wait_idle_lua_state(
+                scanner,
+                process,
+                state,
+                timeout_seconds=max(0.05, min(1.0, timeout_seconds)),
+                poll_interval_seconds=poll_interval_seconds,
+            )
         try:
             return client.execute_lua(
                 state.address,
@@ -3208,6 +3258,7 @@ def _execute_world_monster_loop(
     output_capacity: int,
     poll_interval_seconds: float,
     operation_timeout_seconds: float = 30.0,
+    control_stdin: bool = False,
 ) -> int:
     requested_level = normalize_world_monster_level(level)
     requested_concurrency = (
@@ -3470,6 +3521,7 @@ def _execute_world_monster_loop(
                 )
             time.sleep(poll_interval_seconds)
 
+
     def emit_blocked(blocked: Mapping[str, Any]) -> None:
         emit(
             "blocked",
@@ -3485,6 +3537,22 @@ def _execute_world_monster_loop(
     def request_stop(_signum: int, _frame: Any) -> None:
         nonlocal stop_requested
         stop_requested = True
+
+    if control_stdin:
+        def monitor_control_stdin() -> None:
+            try:
+                for line in sys.stdin:
+                    if line.strip().lower() in {"stop", "quit", "exit"}:
+                        request_stop(0, None)
+                        return
+            except (OSError, ValueError):
+                return
+
+        threading.Thread(
+            target=monitor_control_stdin,
+            name="mumu-autotask-control-stdin",
+            daemon=True,
+        ).start()
 
     terminal_outcome = False
     try:
@@ -3672,6 +3740,321 @@ def _execute_world_monster_loop(
             signal.signal(signal.SIGTERM, old_sigterm)
 
 
+def _initial_lua_state(
+    adb: AdbClient,
+    profile: DeviceProfile,
+    client: FridaLuaClient | PersistentFridaClient,
+    scanner: AdbLuaStateScanner,
+    process: ProcessInfo,
+    operation: str,
+    *,
+    timeout_seconds: float = 10.0,
+    poll_interval_seconds: float = 0.5,
+) -> LuaStateCandidate:
+    if isinstance(client, PersistentFridaClient):
+        cached_address = client.cached_state_address
+        if cached_address is not None:
+            try:
+                return scanner.verify_idle_main(process.pid, cached_address)
+            except LuaStateScanError:
+                pass
+    return _wait_unique_idle_lua_state(
+        adb,
+        profile,
+        scanner,
+        process,
+        operation,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+
+
+def _execute_yeti_rally_loop(
+    adb: AdbClient,
+    profile: DeviceProfile,
+    client: FridaLuaClient,
+    process: ProcessInfo,
+    rally_minutes: int,
+    *,
+    output_capacity: int,
+    poll_interval_seconds: float,
+    control_stdin: bool = False,
+) -> int:
+    minutes = normalize_yeti_rally_minutes(rally_minutes)
+    if (
+        isinstance(poll_interval_seconds, bool)
+        or not isinstance(poll_interval_seconds, (int, float))
+        or not math.isfinite(poll_interval_seconds)
+        or not 0.1 <= poll_interval_seconds <= 60
+    ):
+        raise BusinessError("yeti rally loop poll interval must be between 0.1 and 60 seconds")
+
+    status_code = build_yeti_status_lua()
+    spawn_code = build_yeti_spawn_lua()
+    commit_code = build_yeti_commit_lua(minutes)
+    scanner = _scanner(adb, profile)
+    state = _initial_lua_state(
+        adb, profile, client, scanner, process, "yeti rally loop initialization"
+    )
+    stop_requested = False
+    sigterm_installed = threading.current_thread() is threading.main_thread()
+    old_sigterm = signal.getsignal(signal.SIGTERM) if sigterm_installed else None
+    phase = "startup"
+    locked_target: tuple[int, int, int] | None = None
+    spawn_request_sent = False
+    dispatch_attempted = False
+    rally_confirmed = False
+    last_signature: tuple[Any, ...] | None = None
+
+    def emit(event: str, **extra: Any) -> None:
+        print(json.dumps({
+            "event": event,
+            "serial": profile.serial,
+            "rally_minutes": minutes,
+            "phase": phase,
+            **extra,
+        }, ensure_ascii=False), flush=True)
+
+    def request_stop(_signum: int, _frame: Any) -> None:
+        nonlocal stop_requested
+        stop_requested = True
+
+    if control_stdin:
+        def monitor_control_stdin() -> None:
+            try:
+                for line in sys.stdin:
+                    if line.strip().lower() in {"stop", "quit", "exit"}:
+                        request_stop(0, None)
+                        return
+            except (OSError, ValueError):
+                return
+
+        threading.Thread(
+            target=monitor_control_stdin,
+            name="mumu-autotask-control-stdin",
+            daemon=True,
+        ).start()
+
+    if sigterm_installed:
+        signal.signal(signal.SIGTERM, request_stop)
+
+    def run_lua(code: str, operation: str) -> LuaExecutionResult:
+        nonlocal state
+        while True:
+            try:
+                return _execute_lua_when_idle(
+                    adb, profile, client, process, scanner, state, code,
+                    output_capacity=output_capacity,
+                    operation=operation,
+                )
+            except LuaExecutionError as exc:
+                if "m_modules' (a nil value)" not in str(exc):
+                    raise
+                if stop_requested:
+                    raise KeyboardInterrupt
+                emit("waiting", blocked_reason="game_loading")
+                time.sleep(float(poll_interval_seconds))
+            except LuaStateScanError:
+                _require_same_foreground_process(adb, profile, process, operation)
+                state = _wait_unique_idle_lua_state(
+                    adb, profile, scanner, process,
+                    f"{operation} Lua state recovery",
+                    timeout_seconds=60.0,
+                )
+                emit("recover", lua_state=state.address_text)
+
+    try:
+        with client:
+            initialization = dict(client.initialize_bridge(profile.bridge_remote_path))
+            if not isinstance(client, PersistentFridaClient):
+                state = _wait_unique_idle_lua_state(
+                    adb, profile, scanner, process,
+                    "yeti rally loop post-bridge initialization",
+                    timeout_seconds=30.0,
+                    poll_interval_seconds=float(poll_interval_seconds),
+                )
+            emit("start", bridge_arch=initialization.get("arch"), pid=process.pid)
+            while not stop_requested:
+                status = parse_yeti_status_output(
+                    run_lua(status_code, "yeti rally status").output
+                )
+                current_target = (
+                    (status.monster_id, status.world_x, status.world_y)
+                    if status.prepared
+                    else None
+                )
+                if current_target is not None:
+                    assert all(value is not None for value in current_target)
+                    current_target = tuple(int(value) for value in current_target)
+                    if locked_target is None:
+                        locked_target = current_target
+                        spawn_request_sent = False
+                        dispatch_attempted = False
+                        emit(
+                            "locked",
+                            monster_id=locked_target[0],
+                            world_x=locked_target[1],
+                            world_y=locked_target[2],
+                            detail="已锁定游戏中现有雪怪；该目标消失前不会再次搜索。",
+                        )
+                    elif current_target != locked_target:
+                        emit(
+                            "error",
+                            error=(
+                                "锁定雪怪发生变化："
+                                f"{locked_target} -> {current_target}；已停止以避免误出征。"
+                            ),
+                            error_type="YetiTargetChanged",
+                        )
+                        return 2
+                signature = (
+                    status.prepared, status.monster_id, status.world_x, status.world_y,
+                    status.active_rallies, status.current_marches, status.max_marches,
+                    status.current_stamina, phase, locked_target,
+                )
+                if signature != last_signature:
+                    emit(
+                        "status",
+                        prepared=status.prepared,
+                        monster_id=status.monster_id,
+                        world_x=status.world_x,
+                        world_y=status.world_y,
+                        active_yeti_rallies=status.active_rallies,
+                        current_march_count=status.current_marches,
+                        max_march_count=status.max_marches,
+                        current_stamina=status.current_stamina,
+                    )
+                    last_signature = signature
+
+                if phase == "waiting_clear":
+                    if (
+                        rally_confirmed
+                        and status.active_rallies == 0
+                        and not status.prepared
+                    ):
+                        phase = "startup"
+                        locked_target = None
+                        spawn_request_sent = False
+                        dispatch_attempted = False
+                        rally_confirmed = False
+                        emit("completed", detail="雪怪集结已结束，目标已消失。")
+                    else:
+                        time.sleep(float(poll_interval_seconds))
+                    continue
+
+                if phase == "waiting_departure":
+                    if status.active_rallies > 0:
+                        phase = "waiting_clear"
+                        rally_confirmed = True
+                        emit("departed", detail="雪怪集结已创建，等待该雪怪消失。")
+                    else:
+                        time.sleep(float(poll_interval_seconds))
+                    continue
+
+                if status.active_rallies > 0:
+                    phase = "waiting_clear"
+                    rally_confirmed = True
+                    emit("adopted", detail="检测到已有自己的雪怪集结，等待目标消失。")
+                    continue
+
+                if locked_target is not None and status.prepared:
+                    phase = "target_locked"
+                    if dispatch_attempted:
+                        phase = "waiting_departure"
+                        time.sleep(float(poll_interval_seconds))
+                        continue
+                    commit = parse_yeti_commit_output(
+                        run_lua(commit_code, "yeti rally commit").output
+                    )
+                    commit_target = (
+                        commit.monster_id,
+                        commit.world_x,
+                        commit.world_y,
+                    )
+                    if commit_target != locked_target:
+                        emit(
+                            "error",
+                            error=(
+                                "雪怪出征回执目标与锁定目标不一致："
+                                f"{locked_target} -> {commit_target}"
+                            ),
+                            error_type="YetiCommitTargetChanged",
+                        )
+                        return 2
+                    if commit.request_dispatched:
+                        phase = "waiting_departure"
+                        dispatch_attempted = True
+                        emit(
+                            "dispatch",
+                            monster_id=locked_target[0],
+                            world_x=locked_target[1],
+                            world_y=locked_target[2],
+                            current_stamina=commit.current_stamina,
+                            required_stamina=commit.required_stamina,
+                        )
+                        continue
+                    emit(
+                        "blocked",
+                        blocked_reason=commit.blocked_reason,
+                        current_stamina=commit.current_stamina,
+                        required_stamina=commit.required_stamina,
+                        current_march_count=commit.current_marches,
+                        max_march_count=commit.max_marches,
+                        detail="已锁定当前雪怪，等待条件满足后继续出征。",
+                    )
+                    if commit.blocked_reason == "no_level5_shield":
+                        emit("stopped", reason=commit.blocked_reason)
+                        return 0
+                    time.sleep(float(poll_interval_seconds))
+                    continue
+
+                if locked_target is not None:
+                    phase = "target_locked"
+                    emit(
+                        "waiting",
+                        blocked_reason="locked_target_temporarily_missing",
+                        monster_id=locked_target[0],
+                        world_x=locked_target[1],
+                        world_y=locked_target[2],
+                        detail="锁定雪怪暂时未出现在原生状态中；保留目标且不会重新搜索。",
+                    )
+                    time.sleep(float(poll_interval_seconds))
+                    continue
+
+                if spawn_request_sent:
+                    phase = "spawning"
+                    time.sleep(float(poll_interval_seconds))
+                    continue
+
+                phase = "spawning"
+                spawn = parse_yeti_spawn_output(
+                    run_lua(spawn_code, "yeti spawn request").output
+                )
+                if spawn.request_dispatched:
+                    spawn_request_sent = True
+                    emit("spawn", detail="已请求生成失控的雪怪，等待原生目标数据。")
+                elif spawn.blocked_reason == "insufficient_summon_item":
+                    emit("blocked", blocked_reason=spawn.blocked_reason)
+                    emit("stopped", reason=spawn.blocked_reason)
+                    return 0
+                else:
+                    spawn_request_sent = True
+                    emit("waiting", blocked_reason=spawn.blocked_reason)
+                time.sleep(float(poll_interval_seconds))
+
+            emit("stopped", reason="signal")
+            return 0
+    except KeyboardInterrupt:
+        emit("stopped", reason="signal")
+        return 0
+    except Exception as exc:
+        emit("error", error=str(exc), error_type=type(exc).__name__)
+        return 2
+    finally:
+        if sigterm_installed:
+            signal.signal(signal.SIGTERM, old_sigterm)
+
+
 def execute(args: argparse.Namespace, settings: Settings) -> int:
     if args.command == "validate":
         for profile in settings.devices:
@@ -3708,7 +4091,16 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
             bridge_initialized = False
             bridge_arch: str | None = None
             if activity.matches(profile.activity_name):
-                client = _client(profile, pid=adb_pid, adb=adb)
+                client = _client(
+                    profile,
+                    pid=adb_pid,
+                    adb=adb,
+                    config_path=(
+                        getattr(args, "config", "config.json")
+                        if getattr(args, "prepare_frida", False)
+                        else None
+                    ),
+                )
                 if getattr(args, "prepare_frida", False):
                     _ensure_bridge_binary(adb, profile)
                     with client:
@@ -3803,6 +4195,7 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
     world_monster_count: int | None = None
     world_monster_loop_concurrency: int | None = None
     world_monster_march_ids: tuple[int, ...] | None = None
+    yeti_rally_minutes: int | None = None
     timeout_seconds: float | None = None
     poll_interval_seconds: float | None = None
     if args.command == "exec-lua":
@@ -3873,6 +4266,18 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
                 "world monster loop poll interval must be between 0.05 and 60 seconds"
             )
         code = build_world_monster_search_lua(world_monster_level)
+    elif args.command == "yeti-rally-loop":
+        yeti_rally_minutes = normalize_yeti_rally_minutes(args.rally_minutes)
+        poll_interval_seconds = float(args.poll_interval)
+        if (
+            isinstance(args.poll_interval, bool)
+            or not math.isfinite(poll_interval_seconds)
+            or not 0.1 <= poll_interval_seconds <= 60
+        ):
+            raise BusinessError(
+                "yeti rally loop poll interval must be between 0.1 and 60 seconds"
+            )
+        code = build_yeti_status_lua()
     elif args.command == "world-monster-status":
         world_monster_march_ids = normalize_world_monster_march_ids(args.march_ids)
         code = build_world_monster_status_lua(world_monster_march_ids)
@@ -3886,7 +4291,12 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
     adb_pid = _adb_pid(adb, profile)
     _ensure_frida_forward(adb, profile)
     _ensure_bridge_binary(adb, profile)
-    client = _client(profile, pid=adb_pid, adb=adb)
+    client = _client(
+        profile,
+        pid=adb_pid,
+        adb=adb,
+        config_path=getattr(args, "config", "config.json"),
+    )
     process = client.inspect_process()
     payload = _base_payload(profile, kingdom, process, activity)
     payload.update(
@@ -3911,6 +4321,8 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
         payload["requested_count"] = world_monster_count
     if args.command == "world-monster-loop":
         payload["concurrency"] = world_monster_loop_concurrency
+    if yeti_rally_minutes is not None:
+        payload["rally_minutes"] = yeti_rally_minutes
     if world_monster_march_ids is not None:
         payload["march_ids"] = list(world_monster_march_ids)
     if expected_role is not None:
@@ -4025,6 +4437,25 @@ def execute(args: argparse.Namespace, settings: Settings) -> int:
             world_monster_loop_concurrency,
             output_capacity=settings.frida.output_capacity,
             poll_interval_seconds=poll_interval_seconds,
+            control_stdin=bool(getattr(args, "control_stdin", False)),
+        )
+
+    if args.command == "yeti-rally-loop":
+        assert yeti_rally_minutes is not None
+        assert poll_interval_seconds is not None
+        if args.dry_run:
+            payload.update({"dry_run": True, "lua_executed": False})
+            print(json.dumps(payload, ensure_ascii=False))
+            return 0
+        return _execute_yeti_rally_loop(
+            adb,
+            profile,
+            client,
+            process,
+            yeti_rally_minutes,
+            output_capacity=settings.frida.output_capacity,
+            poll_interval_seconds=poll_interval_seconds,
+            control_stdin=bool(getattr(args, "control_stdin", False)),
         )
 
     if args.command == "inspect-tasks":
