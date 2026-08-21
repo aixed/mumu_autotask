@@ -3,13 +3,36 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from mumu_autotask.mumu_manager import MumuManagerClient, _profile_from_instance
+from mumu_autotask.config import Settings
+from mumu_autotask.mumu_manager import (
+    MumuManagerClient,
+    _profile_from_instance,
+    resolve_mumu_manager_executable,
+)
 
 
 class MumuManagerTests(unittest.TestCase):
+    def test_manager_is_resolved_beside_auto_detected_adb(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            install = Path(directory)
+            adb = install / "adb.exe"
+            manager = install / "MuMuManager.exe"
+            adb.touch()
+            manager.touch()
+
+            with patch(
+                "mumu_autotask.mumu_manager.resolve_adb_executable",
+                return_value=str(adb),
+            ):
+                resolved = resolve_mumu_manager_executable(Settings())
+
+            self.assertEqual(resolved, str(manager.resolve()))
+
     @unittest.skipUnless(os.name == "nt", "Windows-only process flag")
     def test_manager_commands_never_create_a_console_window(self) -> None:
         completed = subprocess.CompletedProcess([], 0, stdout="{}", stderr="")

@@ -17,9 +17,10 @@ recon/native/
 recon/native_extract/
 recon/carved_all/
 recon/carved_luajit/
-tools/bin/
+tools/bin/*
 *.pcap
 *.apk
 *.unity3d
 *.so
 *.xz
+!tools/bin/libmumu_bridge.so

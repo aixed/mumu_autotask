@@ -23,6 +23,18 @@ DEFAULT_PROCESS_NAME = "Whiteout Survival"
 DEFAULT_ACTIVITY_NAME = "com.gof.global/com.unity3d.player.MyMainPlayerActivity"
 DEFAULT_BRIDGE_REMOTE_PATH = "/data/local/tmp/libmumu_bridge.so"
 
+_INITIAL_CONFIG: Mapping[str, Any] = {
+    "adb": {
+        "command_timeout_seconds": 10,
+    },
+    "frida": {
+        "output_capacity": 16384,
+    },
+    # Running instances are discovered from MuMuManager.  Per-device entries
+    # are optional overrides and must not be copied between computers.
+    "devices": [],
+}
+
 
 def _expand_environment(value: Any) -> Any:
     if isinstance(value, str):
@@ -456,3 +468,23 @@ def load_settings(path: str | Path) -> Settings:
             f"invalid JSON in {config_path} at line {exc.lineno}, column {exc.colno}"
         ) from exc
     return Settings.from_dict(_expand_environment(raw))
+
+
+def ensure_config_file(path: str | Path) -> bool:
+    """Create a portable first-run config without replacing an existing one."""
+
+    config_path = Path(path)
+    if config_path.exists():
+        return False
+    try:
+        with config_path.open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(_INITIAL_CONFIG, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+    except FileExistsError:
+        # A second launcher may have created it after the existence check.
+        return False
+    except OSError as exc:
+        raise ConfigError(
+            f"cannot create initial configuration {config_path}: {exc}"
+        ) from exc
+    return True

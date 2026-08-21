@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .adb import AdbError, resolve_adb_executable
 from .config import (
     DEFAULT_ACTIVITY_NAME,
     DEFAULT_BRIDGE_REMOTE_PATH,
@@ -51,6 +52,13 @@ def resolve_mumu_manager_executable(settings: Settings) -> str:
     candidates: list[Path] = []
     if adb_executable:
         candidates.append(Path(adb_executable).expanduser().parent / "MuMuManager.exe")
+    else:
+        try:
+            detected_adb = resolve_adb_executable()
+        except AdbError:
+            pass
+        else:
+            candidates.append(Path(detected_adb).parent / "MuMuManager.exe")
     candidates.extend(
         [
             Path("D:/Program Files/Netease/MuMu/nx_main/MuMuManager.exe"),

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .adb import AdbError, resolve_adb_executable
 from .config import DeviceProfile, load_settings
 from .frida_driver import (
     FridaDriverError,
@@ -166,7 +167,10 @@ class PersistentFridaClient:
 
     def _current_adb_pid(self) -> int | None:
         settings = load_settings(self.config_path)
-        executable = settings.adb.executable or "adb"
+        try:
+            executable = resolve_adb_executable(settings.adb.executable)
+        except AdbError:
+            return None
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         try:
             completed = subprocess.run(
@@ -453,9 +457,16 @@ class _WorkerServer:
 def _profile_for_serial(config_path: str | Path, serial: str) -> DeviceProfile:
     settings = load_settings(config_path)
     matches = [profile for profile in settings.devices if profile.serial == serial]
-    if len(matches) != 1:
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
         raise FridaDriverError(f"expected one device profile for {serial!r}")
-    return matches[0]
+    from .mumu_manager import MumuManagerError, discover_profile_for_serial
+
+    try:
+        return discover_profile_for_serial(settings, serial)
+    except MumuManagerError as exc:
+        raise FridaDriverError(str(exc)) from exc
 
 
 def run_worker(config_path: str | Path, serial: str, pid: int) -> int:

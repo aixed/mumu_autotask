@@ -16,7 +16,13 @@ from typing import Any, Callable, Mapping, Sequence
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from .config import ConfigError, DeviceProfile, Settings, load_settings
+from .config import (
+    ConfigError,
+    DeviceProfile,
+    Settings,
+    ensure_config_file,
+    load_settings,
+)
 from .gui_backend import (
     DEFAULT_GUI_CATEGORIES,
     DEFAULT_HUNT_CONCURRENCY,
@@ -4662,6 +4668,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     config_path = Path(args.config).resolve()
     _configure_file_logging(config_path)
     try:
+        created_config = ensure_config_file(config_path)
         settings = load_settings(config_path)
     except ConfigError as exc:
         root = tk.Tk()
@@ -4669,6 +4676,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         messagebox.showerror("配置错误", str(exc), parent=root)
         root.destroy()
         return 2
+    if created_config:
+        LOGGER.info("Created portable initial configuration at %s", config_path)
 
     root = tk.Tk()
     backend = GuiBackend(CliRunner(config_path))

@@ -1,43 +1,48 @@
 from __future__ import annotations
 
-import os
+import json
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from mumu_autotask.config import ConfigError, Settings, load_settings
+from mumu_autotask.config import (
+    ConfigError,
+    Settings,
+    ensure_config_file,
+    load_settings,
+)
 
 
 class ConfigTests(unittest.TestCase):
-    def test_example_records_three_instance_role_mappings(self) -> None:
+    def test_example_is_portable_and_uses_dynamic_device_discovery(self) -> None:
         settings = load_settings(
             Path(__file__).resolve().parents[1] / "config.example.json"
         )
-        mappings = {
-            profile.serial: (profile.instance_name, profile.roles)
-            for profile in settings.devices
-        }
-        self.assertEqual(
-            mappings,
-            {
-                "127.0.0.1:16384": (
-                    "MuMuPlayer-12.0-0",
-                    ("打工人", "打工魂"),
-                ),
-                "127.0.0.1:16416": (
-                    "MuMuPlayer-12.0-1",
-                    ("打工的",),
-                ),
-                "127.0.0.1:16448": (
-                    "MuMuPlayer-12.0-2",
-                    (),
-                ),
-                "127.0.0.1:16480": (
-                    "MuMuPlayer-12.0-3",
-                    ("打工客", "打工仔"),
-                ),
-            },
-        )
+        self.assertIsNone(settings.adb.executable)
+        self.assertEqual(settings.adb.connect_targets, ())
+        self.assertEqual(settings.devices, ())
+
+    def test_missing_config_is_created_with_portable_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+
+            self.assertTrue(ensure_config_file(path))
+            settings = load_settings(path)
+
+            self.assertIsNone(settings.adb.executable)
+            self.assertEqual(settings.devices, ())
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["devices"], [])
+
+    def test_existing_config_is_never_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            original = '{"devices": [], "custom": "keep"}\n'
+            path.write_text(original, encoding="utf-8")
+
+            self.assertFalse(ensure_config_file(path))
+
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
 
     def test_frida_device_profile_defaults_to_kingdom_4549(self) -> None:
         settings = Settings.from_dict(

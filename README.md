@@ -41,14 +41,17 @@ Frida 的瞬态 `breakpoint triggered` 做短重试；`access violation` 会被�
 ```powershell
 python -m pip install "frida==17.17.0" "frida-tools==14.10.4"
 python -m pip install -e .
-Copy-Item config.example.json config.json
 python -m mumu_autotask --config config.json validate
 ```
+
+首次双击 `start_mumu_autotask.bat` 时，如果项目目录中还没有 `config.json`，程序会
+自动创建一份通用配置。该配置不包含开发电脑的安装路径、模拟器端口、角色或服务器；
+MuMu 和当前运行实例会在启动时动态探测。已有 `config.json` 永远不会被覆盖。
 
 当前使用的 ARM64 bridge 位于 `tools/bin/libmumu_bridge.so`，预期 SHA256 为：
 
 ```text
-F9AB67F631A53A7E2EB144C06886B6A26A6987DF2B144CA5C13FAE1D6111A60F
+2600FCA24D2FF19DD79004C1A374DFC0A9C66A75E27A9F931EE7D906E099BA0C
 ```
 
 16384 和 16480 的 Frida Server 内部监听 `27042`；16416 的实例使用内部端口

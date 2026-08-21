@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import threading
+import tempfile
 import time
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from mumu_autotask.config import DeviceProfile
 from mumu_autotask.frida_driver import LuaExecutionResult
@@ -10,6 +13,7 @@ from mumu_autotask.frida_worker import (
     PersistentFridaClient,
     _QueuedRequest,
     _WorkerServer,
+    _profile_for_serial,
     worker_port,
 )
 
@@ -52,6 +56,23 @@ class _FailingClient(_FakeClient):
 
 
 class FridaWorkerTests(unittest.TestCase):
+    def test_worker_discovers_profile_when_portable_config_has_no_devices(self) -> None:
+        profile = DeviceProfile(
+            "127.0.0.1:16384",
+            frida_host="127.0.0.1:26384",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.json"
+            config.write_text('{"devices": []}', encoding="utf-8")
+            with patch(
+                "mumu_autotask.mumu_manager.discover_profile_for_serial",
+                return_value=profile,
+            ) as discover:
+                resolved = _profile_for_serial(config, profile.serial)
+
+        self.assertEqual(resolved, profile)
+        discover.assert_called_once()
+
     def test_worker_ports_are_deterministic_and_per_frida_endpoint(self) -> None:
         first = DeviceProfile("device-1", frida_host="127.0.0.1:27042")
         second = DeviceProfile("device-2", frida_host="127.0.0.1:27052")
